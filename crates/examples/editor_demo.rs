@@ -447,7 +447,7 @@ impl ApplicationHandler for App {
                                                 &section_mat_ids,
                                                 placement,
                                                 [wx, wy, wz, radius],
-                                                None, // Static — containers never move
+                                                Some(helio::Movability::Static),
                                             ) {
                                                 Ok(_) => count += 1,
                                                 Err(e) => eprintln!(

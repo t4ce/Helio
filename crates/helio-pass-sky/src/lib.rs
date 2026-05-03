@@ -284,6 +284,14 @@ impl RenderPass for SkyPass {
         "Sky"
     }
 
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let (tex, view) = Self::create_pre_aa(device, width, height, self.target_format);
+        self.pre_aa_tex = tex;
+        self.pre_aa_view = view;
+        self.width = width;
+        self.height = height;
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         if !ctx.frame_resources.sky.has_sky {
             // Keep the sky LUT buffer unchanged; pre_aa clears to black in execute.

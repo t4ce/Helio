@@ -195,6 +195,39 @@ impl RenderPass for LightCullPass {
         "LightCull"
     }
 
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let num_tiles_x = width.div_ceil(TILE_SIZE);
+        let num_tiles_y = height.div_ceil(TILE_SIZE);
+        let num_tiles = num_tiles_x
+            .checked_mul(num_tiles_y)
+            .expect("tile grid overflow: viewport dimensions too large");
+
+        let list_buf_size = (num_tiles * MAX_LIGHTS_PER_TILE * 4) as u64;
+        self.tile_light_lists = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("TileLightLists"),
+            size: list_buf_size.max(4),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let count_buf_size = (num_tiles * 4) as u64;
+        self.tile_light_counts = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("TileLightCounts"),
+            size: count_buf_size.max(4),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        self.num_tiles_x = num_tiles_x;
+        self.num_tiles_y = num_tiles_y;
+        self.width = width;
+        self.height = height;
+        // Invalidate cached bind group so it gets rebuilt with the new buffers.
+        self.bind_group = None;
+        self.bind_group_key = None;
+        self.cull_cache_key = None;
+    }
+
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         frame.tile_light_lists = Some(&self.tile_light_lists);
         frame.tile_light_counts = Some(&self.tile_light_counts);
@@ -233,8 +266,10 @@ impl RenderPass for LightCullPass {
 
         let cache_key = (camera_gen, lights_gen, ctx.scene.movable_light_count);
 
-        // Check if resolution changed (window resize invalidates tile grid)
-        let resolution_changed = ctx.width != self.width || ctx.height != self.height;
+        // `self.width/height` are internal-resolution values maintained by
+        // on_resize. ctx.width/height are full output resolution, so do not
+        // use them as a resize signal here.
+        let resolution_changed = false;
 
         // Check if we can reuse previous frame's culling results
         if self.cull_cache_key == Some(cache_key) && !resolution_changed {

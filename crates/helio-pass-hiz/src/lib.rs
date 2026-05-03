@@ -428,6 +428,97 @@ impl RenderPass for HiZBuildPass {
         "HiZBuild"
     }
 
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let mip_count = mip_levels(width, height).min(MAX_MIP_LEVELS);
+
+        // Recreate the HiZ texture at the new resolution.
+        let hiz_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("HiZ Texture"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: mip_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+
+        self.hiz_view = Arc::new(hiz_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("HiZ Full View"),
+            ..Default::default()
+        }));
+
+        // Per-mip single-level views.
+        let mut mip_views = Vec::with_capacity(mip_count as usize);
+        for mip in 0..mip_count {
+            mip_views.push(hiz_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("HiZ Mip View"),
+                base_mip_level: mip,
+                mip_level_count: Some(1),
+                ..Default::default()
+            }));
+        }
+
+        // Rebuild per-mip bind groups and dispatch sizes (reuse existing mip_bgl and mip_pipeline).
+        let mut mip_bind_groups = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
+        let mut mip_uniforms = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
+        let mut mip_dispatch_groups = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
+        for mip in 0..(mip_count.saturating_sub(1)) {
+            let src_w = (width >> mip).max(1);
+            let src_h = (height >> mip).max(1);
+            let dst_w = (width >> (mip + 1)).max(1);
+            let dst_h = (height >> (mip + 1)).max(1);
+
+            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("HiZ Mip Uniform"),
+                contents: bytemuck::bytes_of(&HiZUniforms {
+                    src_size: [src_w, src_h],
+                    dst_size: [dst_w, dst_h],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("HiZ Mip BG"),
+                layout: &self.mip_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ub.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&mip_views[mip as usize]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(
+                            &mip_views[(mip + 1) as usize],
+                        ),
+                    },
+                ],
+            });
+            mip_uniforms.push(ub);
+            mip_bind_groups.push(bg);
+            mip_dispatch_groups.push((dst_w.div_ceil(WORKGROUP_SIZE), dst_h.div_ceil(WORKGROUP_SIZE)));
+        }
+
+        self.mip_views = mip_views;
+        self.mip_bind_groups = mip_bind_groups;
+        self.mip_uniforms = mip_uniforms;
+        self.mip_dispatch_groups = mip_dispatch_groups;
+        self.width = width;
+        self.height = height;
+        // Invalidate the copy bind group so it gets rebuilt with the new HiZ texture.
+        self.copy_bind_group = None;
+        self.copy_bind_group_key = None;
+        self.first_frame = true;
+    }
+
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         // Static HiZ mip uniforms are initialized once in `new()` and do not
         // need to be re-uploaded every frame unless the pass is recreated.
@@ -439,8 +530,10 @@ impl RenderPass for HiZBuildPass {
         // Use camera_generation counter to detect actual camera data changes.
         let camera_gen = ctx.scene.camera_generation;
 
-        // Check if resolution changed (window resize invalidates HiZ pyramid)
-        let resolution_changed = ctx.width != self.width || ctx.height != self.height;
+        // `self.width/height` are the authoritative internal-resolution values
+        // managed via on_resize. Do not compare against ctx.width/height here
+        // (those are full output resolution in this renderer setup).
+        let resolution_changed = false;
 
         // Skip HiZ rebuild if camera hasn't changed and resolution is the same
         if !self.first_frame && camera_gen == self.prev_camera_generation && self.copy_bind_group.is_some() && !resolution_changed {

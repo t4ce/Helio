@@ -4,7 +4,7 @@
 //! can reference the same mesh. Meshes cannot be removed while objects are using them.
 
 use crate::handles::MeshId;
-use crate::mesh::{MeshBuffers, MeshUpload};
+use crate::mesh::{MeshBuffers, MeshUpload, PackedVertex};
 
 use super::super::errors::{invalid, Result, SceneError};
 
@@ -34,6 +34,36 @@ impl super::super::Scene {
     /// ```
     pub(in crate::scene) fn insert_mesh(&mut self, mesh: MeshUpload) -> MeshId {
         self.mesh_pool.insert(mesh)
+    }
+
+    /// Insert a dynamic mesh whose vertex data can be replaced every frame.
+    ///
+    /// Use for skinned characters, morphed geometry, or any mesh that deforms.
+    /// Objects that *move rigidly* should use [`insert_mesh`] instead — only the
+    /// per-object transform changes, which is O(1) via `update_object_transform`.
+    ///
+    /// After inserting, drive deformation with [`update_mesh_vertices`] each frame.
+    pub fn insert_dynamic_mesh(&mut self, mesh: MeshUpload) -> MeshId {
+        self.mesh_pool.insert_dynamic(mesh)
+    }
+
+    /// Replace the vertex data of a dynamic mesh.
+    ///
+    /// `new_vertices` must have exactly the same length as the original upload.
+    /// The GPU upload is deferred to the next [`Scene::flush`] and only covers the
+    /// dirty byte range — O(V) upload cost where V = vertex count.
+    ///
+    /// # Errors
+    /// Returns an error if `id` is invalid, refers to a static mesh, or if the
+    /// vertex count doesn't match the original.
+    pub fn update_mesh_vertices(
+        &mut self,
+        id: MeshId,
+        new_vertices: &[PackedVertex],
+    ) -> Result<()> {
+        self.mesh_pool
+            .update_dynamic_vertices(id, new_vertices)
+            .map_err(|e| crate::scene::errors::SceneError::InvalidOperation { reason: e })
     }
 
     /// Remove a mesh from the scene's mesh pool.
@@ -85,6 +115,11 @@ impl super::super::Scene {
     /// ```
     pub fn mesh_buffers(&self) -> MeshBuffers<'_> {
         self.mesh_pool.buffers()
+    }
+
+    /// Returns GPU buffer references for the dynamic (per-frame-updatable) mesh pool.
+    pub fn dynamic_mesh_buffers(&self) -> MeshBuffers<'_> {
+        self.mesh_pool.dynamic_buffers()
     }
 
     /// Aggregate mesh statistics for the scene: total vertices, total triangles,

@@ -27,6 +27,13 @@ pub enum SceneError {
     /// The scene can hold a maximum of [`crate::MAX_TEXTURES`] textures.
     #[error("scene texture capacity exceeded")]
     TextureCapacityExceeded,
+
+    /// An operation was rejected because of an incompatible resource state.
+    #[error("invalid operation: {reason}")]
+    InvalidOperation {
+        /// Human-readable description of why the operation was rejected.
+        reason: &'static str,
+    },
 }
 
 /// Result type for scene operations.

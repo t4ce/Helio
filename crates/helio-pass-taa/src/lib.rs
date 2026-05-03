@@ -115,7 +115,7 @@ pub struct TaaPass {
     blit_pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     blit_bgl: wgpu::BindGroupLayout,
-    /// Lazy TAA bind group (pre_aa + history + velocity_fallback + depth + samplers + uniform).
+    /// Lazy TAA bind group (pre_aa + history + camera + depth + samplers + uniform).
     bind_group: Option<wgpu::BindGroup>,
     /// (pre_aa_ptr, depth_ptr)
     bind_group_key: Option<(usize, usize)>,
@@ -128,13 +128,13 @@ pub struct TaaPass {
     pub output_view: wgpu::TextureView,
     linear_sampler: wgpu::Sampler,
     point_sampler: wgpu::Sampler,
-    velocity_fallback_texture: wgpu::Texture,
-    velocity_fallback_view: wgpu::TextureView,
     /// Set to true on construction; cleared after the first prepare() so the
     /// shader's RESET path runs exactly once to prime the history texture.
     first_frame: bool,
-    /// Format of output / history textures (needed to recreate them on resize).
-    output_format: wgpu::TextureFormat,
+    /// Full (output / display) resolution — the textures and copy always run at
+    /// this size regardless of the internal (pre-AA) render scale.
+    output_width: u32,
+    output_height: u32,
 }
 
 impl TaaPass {
@@ -189,13 +189,15 @@ impl TaaPass {
         // history and output textures are always at OUTPUT (display) resolution so
         // temporal accumulation is gathered at full quality even when rendering at
         // a lower internal resolution.
+        // Rgba16Float preserves the full float range for the confidence counter stored
+        // in the alpha channel — an 8-bit swapchain format would clamp it to [0, 1].
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d { width: output_width, height: output_height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
             view_formats: &[],
         };
@@ -205,25 +207,23 @@ impl TaaPass {
         let output_texture = device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
         let output_view = output_texture.create_view(&Default::default());
 
-        let velocity_fallback_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("TAA Velocity Fallback"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let velocity_fallback_view = velocity_fallback_texture.create_view(&Default::default());
-
         // ── TAA BGL ────────────────────────────────────────────────────────────
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("TAA BGL"),
             entries: &[
                 tex_entry(0, wgpu::TextureSampleType::Float { filterable: true }),
                 tex_entry(1, wgpu::TextureSampleType::Float { filterable: true }),
-                tex_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
+                // binding 2: GpuCameraUniforms (for depth-based reprojection)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 tex_entry(3, wgpu::TextureSampleType::Depth),
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
@@ -299,7 +299,9 @@ impl TaaPass {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    // Internal accumulation target: Rgba16Float so the confidence
+                    // counter in alpha is not clamped to [0, 1].
+                    format: wgpu::TextureFormat::Rgba16Float,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -358,10 +360,9 @@ impl TaaPass {
             output_view,
             linear_sampler,
             point_sampler,
-            velocity_fallback_texture,
-            velocity_fallback_view,
             first_frame: true,
-            output_format: format,
+            output_width,
+            output_height,
         }
     }
 }
@@ -383,7 +384,10 @@ impl RenderPass for TaaPass {
     fn name(&self) -> &'static str { "TAA" }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let fmt = self.output_format;
+        self.output_width = width;
+        self.output_height = height;
+        // History/output always use Rgba16Float regardless of the swapchain format.
+        let fmt = wgpu::TextureFormat::Rgba16Float;
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -454,7 +458,7 @@ impl RenderPass for TaaPass {
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(pre_aa_view) },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.history_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.velocity_fallback_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: ctx.scene.camera.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(ctx.depth) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.point_sampler) },
@@ -470,7 +474,10 @@ impl RenderPass for TaaPass {
                 view: &self.output_view,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
             })];
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TAA Resolve"),
@@ -489,7 +496,7 @@ impl RenderPass for TaaPass {
         ctx.encoder.copy_texture_to_texture(
             self.output_texture.as_image_copy(),
             self.history_texture.as_image_copy(),
-            wgpu::Extent3d { width: ctx.width, height: ctx.height, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
         );
 
         // ── 4. Blit output_view → ctx.target ─────────────────────────────────
@@ -498,7 +505,10 @@ impl RenderPass for TaaPass {
                 view: ctx.target,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
             })];
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TAA Blit"),

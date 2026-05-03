@@ -386,6 +386,10 @@ impl RenderPass for GBufferPass {
         "GBuffer"
     }
 
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.resize(device, width, height);
+    }
+
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         frame.gbuffer = Some(libhelio::GBufferViews {
             albedo: &self.albedo_view,

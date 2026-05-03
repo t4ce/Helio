@@ -37,6 +37,8 @@ pub struct OcclusionCullPass {
     bind_group:     Option<wgpu::BindGroup>,
     /// (camera_ptr, instances_ptr, indirect_ptr)
     bind_group_key: Option<(usize, usize, usize)>,
+    screen_width:   u32,
+    screen_height:  u32,
 }
 
 impl OcclusionCullPass {
@@ -49,6 +51,8 @@ impl OcclusionCullPass {
         device: &wgpu::Device,
         hiz_view: Arc<wgpu::TextureView>,
         hiz_sampler: Arc<wgpu::Sampler>,
+        screen_width: u32,
+        screen_height: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("OcclusionCull Shader"),
@@ -156,7 +160,28 @@ impl OcclusionCullPass {
             hiz_sampler,
             bind_group:     None,
             bind_group_key: None,
+            screen_width,
+            screen_height,
         }
+    }
+
+    /// Update the shared HiZ texture view after HiZBuildPass recreates it on resize.
+    /// Clears the cached bind group so it gets rebuilt with the new view next frame.
+    pub fn update_hiz_view(
+        &mut self,
+        hiz_view: Arc<wgpu::TextureView>,
+        hiz_sampler: Arc<wgpu::Sampler>,
+    ) {
+        self.hiz_view = hiz_view;
+        self.hiz_sampler = hiz_sampler;
+        self.bind_group = None;
+        self.bind_group_key = None;
+    }
+
+    /// Update internal-resolution dimensions used by cull uniforms.
+    pub fn set_screen_size(&mut self, width: u32, height: u32) {
+        self.screen_width = width;
+        self.screen_height = height;
     }
 }
 
@@ -167,10 +192,10 @@ impl RenderPass for OcclusionCullPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let p = CullParams {
-            screen_width:  ctx.width,
-            screen_height: ctx.height,
+            screen_width:  self.screen_width,
+            screen_height: self.screen_height,
             total_slots:   ctx.scene.instances.len() as u32,
-            hiz_mip_count: mip_levels(ctx.width, ctx.height),
+            hiz_mip_count: mip_levels(self.screen_width, self.screen_height),
         };
         ctx.write_buffer(&self.cull_params_buf, 0, bytemuck::bytes_of(&p));
         Ok(())

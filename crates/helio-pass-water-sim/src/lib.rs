@@ -254,8 +254,10 @@ pub struct WaterSimPass {
     // ctx.width/height = full output res (scene.width), NOT internal res.
     internal_width: u32,
     internal_height: u32,
+    // Surface format stored for texture recreation on resize.
+    surface_format: wgpu::TextureFormat,
     // Persistent viewport uniform buffer: vec4f(w, h, 1/w, 1/h).
-    // Built once at construction; the water pass is recreated on resize anyway.
+    // Updated on resize to reflect the new internal resolution.
     viewport_buf: wgpu::Buffer,
     // Blit pipeline: copies pre_aa -> water_output as the scene baseline
     blit_bgl: wgpu::BindGroupLayout,
@@ -1142,6 +1144,7 @@ impl WaterSimPass {
             water_output_view,
             internal_width,
             internal_height,
+            surface_format,
             viewport_buf: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Water Viewport"),
                 contents: bytemuck::cast_slice(&[
@@ -1252,6 +1255,85 @@ impl WaterSimPass {
             });
         }
     }
+
+    /// Resize the water-simulation pass to a new **internal** (render-scaled) resolution.
+    ///
+    /// This must be called by the renderer (not by the graph's generic `on_resize` path)
+    /// because WaterSimPass works at a different resolution from the rest of the graph.
+    pub fn resize_internal(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        // Recreate the three internal-resolution textures.
+        let depth_copy_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water Depth Copy"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.depth_copy_view = depth_copy_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self._depth_copy_tex = depth_copy_tex;
+
+        let water_output_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water Output Tex"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.water_output_view = water_output_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self._water_output_tex = water_output_tex;
+
+        let tint_scratch_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water Tint Scratch"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.tint_scratch_view = tint_scratch_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self._tint_scratch_tex = tint_scratch_tex;
+
+        // Recreate the viewport uniform buffer with the new dimensions.
+        self.viewport_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Water Viewport"),
+            contents: bytemuck::cast_slice(&[
+                width  as f32,
+                height as f32,
+                1.0 / width  as f32,
+                1.0 / height as f32,
+            ]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        self.internal_width = width;
+        self.internal_height = height;
+
+        // Invalidate bind group caches that depend on the recreated resources.
+        self.render_bg = None;
+        self.render_bg_key = None;
+        self.blit_bg = None;
+        self.blit_bg_key = None;
+    }
 }
 
 impl RenderPass for WaterSimPass {
@@ -1259,7 +1341,12 @@ impl RenderPass for WaterSimPass {
         "WaterSim"
     }
 
-
+    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+        // WaterSimPass operates at INTERNAL (render-scaled) resolution, so it must
+        // not be resized from the graph's set_render_size() call (which uses the full
+        // output resolution).  Resizing is done explicitly by the renderer via
+        // resize_internal() with the correct internal dimensions.
+    }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         let view = if self.front { &self.view_a } else { &self.view_b };

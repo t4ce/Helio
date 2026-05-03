@@ -4,6 +4,24 @@ use helio_v3::GrowableBuffer;
 use crate::arena::SparsePool;
 use crate::handles::MeshId;
 
+/// Determines the lifetime and update policy of mesh geometry on the GPU.
+///
+/// | Kind    | Can update geometry? | CPU mirror retained? | Use case |
+/// |---------|---------------------|----------------------|----------|
+/// | Static  | No (upload-once)    | Yes (baking)         | Buildings, terrain, props |
+/// | Dynamic | Yes (per-frame OK)  | Yes (dirty tracking) | Skinned characters, morphs, procedural |
+///
+/// Objects that **move** but keep their shape (rigid bodies) use `MeshKind::Static`
+/// geometry combined with `Movability::Movable` on the object. Transform updates
+/// go through `update_object_transform()` which is O(1) and never touches mesh data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshKind {
+    /// Geometry is uploaded once and never changed.
+    Static,
+    /// Geometry can be replaced per-frame via [`MeshPool::update_dynamic_vertices`].
+    Dynamic,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct PackedVertex {
@@ -84,6 +102,7 @@ pub struct MeshSlice {
 pub(crate) struct MeshRecord {
     pub slice: MeshSlice,
     pub ref_count: u32,
+    pub kind: MeshKind,
 }
 
 pub struct MeshBuffers<'a> {
@@ -91,34 +110,100 @@ pub struct MeshBuffers<'a> {
     pub indices: &'a wgpu::Buffer,
 }
 
-pub struct MeshPool {
+/// Shared vertex + index storage for one class of mesh geometry (static or dynamic).
+struct MeshSubPool {
     vertices: GrowableBuffer<PackedVertex>,
     indices: GrowableBuffer<u32>,
+}
+
+impl MeshSubPool {
+    fn new(device: std::sync::Arc<wgpu::Device>, kind: MeshKind) -> Self {
+        let (v_label, i_label, v_cap, i_cap) = match kind {
+            MeshKind::Static => (
+                "Helio Static Vertex Buffer",
+                "Helio Static Index Buffer",
+                4096,
+                8192,
+            ),
+            MeshKind::Dynamic => (
+                "Helio Dynamic Vertex Buffer",
+                "Helio Dynamic Index Buffer",
+                512,
+                1024,
+            ),
+        };
+        Self {
+            vertices: GrowableBuffer::new(
+                device.clone(),
+                v_cap,
+                wgpu::BufferUsages::VERTEX,
+                v_label,
+            ),
+            indices: GrowableBuffer::new(
+                device,
+                i_cap,
+                wgpu::BufferUsages::INDEX,
+                i_label,
+            ),
+        }
+    }
+
+    fn buffers(&self) -> MeshBuffers<'_> {
+        MeshBuffers {
+            vertices: self.vertices.buffer(),
+            indices: self.indices.buffer(),
+        }
+    }
+
+    fn flush(&mut self, queue: &wgpu::Queue) {
+        self.vertices.flush(queue);
+        self.indices.flush(queue);
+    }
+}
+
+pub struct MeshPool {
+    /// Upload-once geometry (terrain, buildings, props).
+    static_sub: MeshSubPool,
+    /// Per-frame-updatable geometry (skinned, morphed, procedural).
+    dynamic_sub: MeshSubPool,
     meshes: SparsePool<MeshRecord, MeshId>,
 }
 
 impl MeshPool {
     pub fn new(device: std::sync::Arc<wgpu::Device>) -> Self {
         Self {
-            vertices: GrowableBuffer::new(
-                device.clone(),
-                4096,
-                wgpu::BufferUsages::VERTEX,
-                "Helio Mesh Vertex Buffer",
-            ),
-            indices: GrowableBuffer::new(
-                device,
-                8192,
-                wgpu::BufferUsages::INDEX,
-                "Helio Mesh Index Buffer",
-            ),
+            static_sub: MeshSubPool::new(device.clone(), MeshKind::Static),
+            dynamic_sub: MeshSubPool::new(device, MeshKind::Dynamic),
             meshes: SparsePool::new(),
         }
     }
 
+    /// Insert static (upload-once) mesh geometry. The geometry cannot be changed later.
+    ///
+    /// Use for terrain, buildings, props — any geometry that never deforms.
+    /// Objects that *move* but keep their shape (rigid bodies) should still use
+    /// `insert()` here; only the per-object transform changes via
+    /// [`update_object_transform`](crate::Scene::update_object_transform).
     pub fn insert(&mut self, mesh: MeshUpload) -> MeshId {
-        let vertex_range = self.vertices.extend_from_slice(&mesh.vertices);
-        let index_range = self.indices.extend_from_slice(&mesh.indices);
+        self.insert_with_kind(mesh, MeshKind::Static)
+    }
+
+    /// Insert dynamic mesh geometry that can be updated every frame.
+    ///
+    /// Use for skinned characters, morphed geometry, or any mesh whose vertex
+    /// positions/normals change at runtime. After inserting, call
+    /// [`update_dynamic_vertices`](Self::update_dynamic_vertices) each frame.
+    pub fn insert_dynamic(&mut self, mesh: MeshUpload) -> MeshId {
+        self.insert_with_kind(mesh, MeshKind::Dynamic)
+    }
+
+    fn insert_with_kind(&mut self, mesh: MeshUpload, kind: MeshKind) -> MeshId {
+        let sub = match kind {
+            MeshKind::Static => &mut self.static_sub,
+            MeshKind::Dynamic => &mut self.dynamic_sub,
+        };
+        let vertex_range = sub.vertices.extend_from_slice(&mesh.vertices);
+        let index_range = sub.indices.extend_from_slice(&mesh.indices);
         let slice = MeshSlice {
             first_vertex: vertex_range.start as u32,
             vertex_count: (vertex_range.end - vertex_range.start) as u32,
@@ -128,6 +213,7 @@ impl MeshPool {
         let (id, _, _) = self.meshes.insert(MeshRecord {
             slice,
             ref_count: 0,
+            kind,
         });
         id
     }
@@ -138,7 +224,8 @@ impl MeshPool {
     ///
     /// This is the GPU-native implementation of Unreal's Static Mesh sections.
     pub fn insert_sectioned(&mut self, upload: SectionedMeshUpload) -> MultiMeshRecord {
-        let vertex_range = self.vertices.extend_from_slice(&upload.vertices);
+        let sub = &mut self.static_sub;
+        let vertex_range = sub.vertices.extend_from_slice(&upload.vertices);
         let first_vertex = vertex_range.start as u32;
         let vertex_count = (vertex_range.end - vertex_range.start) as u32;
 
@@ -146,7 +233,7 @@ impl MeshPool {
             .sections
             .iter()
             .map(|sec_indices| {
-                let index_range = self.indices.extend_from_slice(sec_indices);
+                let index_range = sub.indices.extend_from_slice(sec_indices);
                 let (id, _, _) = self.meshes.insert(MeshRecord {
                     slice: MeshSlice {
                         first_vertex,
@@ -155,6 +242,7 @@ impl MeshPool {
                         index_count: (index_range.end - index_range.start) as u32,
                     },
                     ref_count: 0,
+                    kind: MeshKind::Static,
                 });
                 id
             })
@@ -164,6 +252,32 @@ impl MeshPool {
             section_mesh_ids,
             ref_count: 0,
         }
+    }
+
+    /// Replace the vertex data of a **dynamic** mesh in-place.
+    ///
+    /// The new slice must have the same length as the original upload.
+    /// Returns an error string if `id` is invalid, is a static mesh, or the
+    /// vertex count doesn't match.
+    ///
+    /// On the next [`flush`](Self::flush), only the dirty byte range is re-uploaded.
+    pub fn update_dynamic_vertices(
+        &mut self,
+        id: MeshId,
+        new_vertices: &[PackedVertex],
+    ) -> Result<(), &'static str> {
+        let Some(record) = self.meshes.get(id) else {
+            return Err("invalid mesh id");
+        };
+        if record.kind != MeshKind::Dynamic {
+            return Err("cannot update static mesh vertices");
+        }
+        if new_vertices.len() != record.slice.vertex_count as usize {
+            return Err("vertex count mismatch: new_vertices.len() must equal the original upload");
+        }
+        let start = record.slice.first_vertex as usize;
+        self.dynamic_sub.vertices.update_range(start, new_vertices);
+        Ok(())
     }
 
     pub fn get(&self, id: MeshId) -> Option<&MeshRecord> {
@@ -179,21 +293,21 @@ impl MeshPool {
     }
 
     pub fn buffers(&self) -> MeshBuffers<'_> {
-        MeshBuffers {
-            vertices: self.vertices.buffer(),
-            indices: self.indices.buffer(),
-        }
+        self.static_sub.buffers()
     }
 
-    /// Total vertices in the shared vertex mega-buffer.
+    pub fn dynamic_buffers(&self) -> MeshBuffers<'_> {
+        self.dynamic_sub.buffers()
+    }
+
+    /// Total vertices in the static vertex mega-buffer.
     pub fn total_vertex_count(&self) -> usize {
-        self.vertices.len()
+        self.static_sub.vertices.len()
     }
 
-    /// Total indices in the shared index mega-buffer.
-    /// Triangles = `total_index_count() / 3`.
+    /// Total indices in the static index mega-buffer.
     pub fn total_index_count(&self) -> usize {
-        self.indices.len()
+        self.static_sub.indices.len()
     }
 
     /// Number of unique mesh records currently live (sections each count as one).
@@ -202,8 +316,8 @@ impl MeshPool {
     }
 
     pub fn flush(&mut self, queue: &wgpu::Queue) {
-        self.vertices.flush(queue);
-        self.indices.flush(queue);
+        self.static_sub.flush(queue);
+        self.dynamic_sub.flush(queue);
     }
 
     /// Extracts a mesh's vertex and index data from the pool.
@@ -212,19 +326,19 @@ impl MeshPool {
     pub(crate) fn extract_mesh_data(&self, id: MeshId) -> Option<MeshUpload> {
         let record = self.meshes.get(id)?;
         let slice = &record.slice;
-        
+        let sub = match record.kind {
+            MeshKind::Static => &self.static_sub,
+            MeshKind::Dynamic => &self.dynamic_sub,
+        };
+
         let vertex_start = slice.first_vertex as usize;
         let vertex_end = vertex_start + slice.vertex_count as usize;
         let index_start = slice.first_index as usize;
         let index_end = index_start + slice.index_count as usize;
-        
-        let vertices = self.vertices.as_slice()
-            .get(vertex_start..vertex_end)?
-            .to_vec();
-        let indices = self.indices.as_slice()
-            .get(index_start..index_end)?
-            .to_vec();
-        
+
+        let vertices = sub.vertices.as_slice().get(vertex_start..vertex_end)?.to_vec();
+        let indices = sub.indices.as_slice().get(index_start..index_end)?.to_vec();
+
         Some(MeshUpload { vertices, indices })
     }
 }

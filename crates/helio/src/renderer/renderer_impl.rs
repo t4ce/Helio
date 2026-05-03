@@ -107,6 +107,14 @@ pub struct Renderer {
     /// Whether Helio owns the wgpu device (true) or is using an externally-owned
     /// device (false, e.g. GPUI). When false, device.poll() must never be called.
     owns_device: bool,
+    /// Pending resize dimensions.  Set by `set_render_size`; consumed and applied
+    /// (graph rebuild + texture recreation) at the start of the next `render()` call
+    /// so that rapid resize events during window dragging only trigger one rebuild
+    /// per rendered frame rather than one per pixel of drag movement.
+    pending_resize: Option<(u32, u32)>,
+    /// Force-clears the output target on the next frame. Set after resize so
+    /// stale swapchain contents from the old size cannot leak into the new frame.
+    clear_target_next_frame: bool,
 }
 
 enum GraphKind {
@@ -336,7 +344,9 @@ impl Renderer {
             bake_pending: None,
             #[cfg(feature = "bake")]
             baked_data: None,
+            clear_target_next_frame: true,
             owns_device: true,
+            pending_resize: None,
         };
 
         // Automatically start live performance dashboard if feature is enabled
@@ -485,6 +495,8 @@ impl Renderer {
             #[cfg(feature = "bake")]
             baked_data: None,
             owns_device: false,
+            pending_resize: None,
+            clear_target_next_frame: true,
         }
     }
 
@@ -841,6 +853,10 @@ impl Renderer {
         self.scene.mesh_buffers()
     }
 
+    pub fn dynamic_mesh_buffers(&self) -> MeshBuffers<'_> {
+        self.scene.dynamic_mesh_buffers()
+    }
+
     pub fn add_pass(&mut self, pass: Box<dyn helio_v3::RenderPass>) {
         self.graph.add_pass(pass);
     }
@@ -865,10 +881,28 @@ impl Renderer {
         self.graph.find_pass::<T>()
     }
 
+    /// Queue a render size change.  The actual graph rebuild and texture
+    /// recreation is deferred to the next `render()` call so that rapid
+    /// `Resized` events during a window drag only trigger **one** rebuild per
+    /// rendered frame instead of one rebuild per pixel of drag movement.
     pub fn set_render_size(&mut self, width: u32, height: u32) {
+        // Always update the logical dimensions immediately so that callers
+        // querying `output_width` / `output_height` see the current value,
+        // and so that aspect-ratio computations in the same frame are correct.
         self.output_width = width;
         self.output_height = height;
+        self.pending_resize = Some((width, height));
+    }
+
+    /// Perform the actual graph rebuild and depth-texture recreation for a
+    /// pending resize.  Called at the top of `render()`.
+    fn apply_resize_now(&mut self, width: u32, height: u32) {
+        let resize_start = Instant::now();
+        
+        let scene_start = Instant::now();
         self.scene.set_render_size(width, height);
+        log::trace!("apply_resize_now: scene.set_render_size {}ms", scene_start.elapsed().as_secs_f64() * 1000.0);
+        
         let config = RendererConfig {
             width,
             height,
@@ -879,6 +913,8 @@ impl Renderer {
             render_scale: self.render_scale,
             perf_overlay_mode: self.perf_overlay_mode,
         };
+        
+        let depth_start = Instant::now();
         let (depth_texture, depth_view) = create_depth_resources(
             &self.device,
             config.internal_width(),
@@ -886,17 +922,28 @@ impl Renderer {
         );
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
+        log::trace!("apply_resize_now: internal depth {}x{} {}ms", config.internal_width(), config.internal_height(), depth_start.elapsed().as_secs_f64() * 1000.0);
+        
+        let full_depth_start = Instant::now();
         if self.render_scale < 1.0 {
             let (t, v) = create_depth_resources(&self.device, width, height);
             self.full_res_depth_texture = Some(t);
             self.full_res_depth_view = Some(v);
+            log::trace!("apply_resize_now: full-res depth {}x{} {}ms", width, height, full_depth_start.elapsed().as_secs_f64() * 1000.0);
         } else {
             self.full_res_depth_texture = None;
             self.full_res_depth_view = None;
         }
 
+        // Ensure the first frame after resize starts from a known target state.
+        self.clear_target_next_frame = true;
+
+        let graph_start = Instant::now();
         match self.graph_kind {
             GraphKind::Default => {
+                // Safety-first path: rebuild the default graph on resize so Helio
+                // re-creates and rebinds all pass-owned resources from a single
+                // source of truth. This avoids stale views/buffers after resize.
                 self.graph = if self.owns_device {
                     build_default_graph(
                         &self.device,
@@ -916,13 +963,17 @@ impl Renderer {
                         &self.debug_camera_buffer,
                     )
                 };
-                // The new graph contains a fresh WaterSimPass with default (no-wind)
-                // settings. Re-dirty the water volumes so the next frame re-applies
-                // the descriptor's wind/sim params to the new pass.
+                log::trace!("apply_resize_now: graph rebuild {}ms", graph_start.elapsed().as_secs_f64() * 1000.0);
+
+                // The rebuilt graph contains fresh pass instances; mark water
+                // volumes dirty so simulation params get re-applied next frame.
+                let water_start = Instant::now();
                 self.scene.mark_water_volumes_dirty();
+                log::trace!("apply_resize_now: mark_water_volumes_dirty {}ms", water_start.elapsed().as_secs_f64() * 1000.0);
             }
             GraphKind::Simple => {
-                self.graph = build_simple_graph(&self.device, &self.queue, self.surface_format);
+                self.graph.set_render_size(width, height);
+                log::trace!("apply_resize_now: simple graph set_render_size {}ms", graph_start.elapsed().as_secs_f64() * 1000.0);
             }
             GraphKind::Custom => {
                 if let Some(builder) = &self.custom_graph_builder {
@@ -941,16 +992,23 @@ impl Renderer {
                             &self.debug_camera_buffer,
                         );
                         self.custom_graph_config = Some(new_cfg);
+                        log::trace!("apply_resize_now: custom graph rebuild {}ms", graph_start.elapsed().as_secs_f64() * 1000.0);
+                        
                         // Same as Default: re-dirty so the new pass gets wind params.
+                        let water_start = Instant::now();
                         self.scene.mark_water_volumes_dirty();
+                        log::trace!("apply_resize_now: mark_water_volumes_dirty {}ms", water_start.elapsed().as_secs_f64() * 1000.0);
                     } else {
                         self.graph.set_render_size(width, height);
+                        log::trace!("apply_resize_now: custom graph set_render_size {}ms", graph_start.elapsed().as_secs_f64() * 1000.0);
                     }
                 } else {
                     self.graph.set_render_size(width, height);
                 }
             }
         }
+        
+        log::trace!("apply_resize_now: total resize {}ms", resize_start.elapsed().as_secs_f64() * 1000.0);
     }
 
     pub fn set_render_scale(&mut self, scale: f32) {
@@ -1077,6 +1135,14 @@ impl Renderer {
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
+        // ── Deferred resize: apply at most once per frame ─────────────────
+        // `set_render_size` only records a pending size to avoid rebuilding
+        // the full render graph on every pixel of a window drag.  We flush it
+        // here, at the top of the first render call after the resize settles.
+        if let Some((w, h)) = self.pending_resize.take() {
+            self.apply_resize_now(w, h);
+        }
+
         // ── Baking: run once, blocking, before the first drawn frame ──────
         #[cfg(feature = "bake")]
         if let Some(request) = self.bake_pending.take() {
@@ -1261,6 +1327,7 @@ impl Renderer {
         }
 
         let mesh_buffers = self.scene.mesh_buffers();
+        let dynamic_mesh_buffers = self.scene.dynamic_mesh_buffers();
         if let Ok(mut state) = self.debug_state.lock() {
             state.camera_position = camera.position;
         }
@@ -1320,6 +1387,8 @@ impl Renderer {
                 mesh_buffers: libhelio::MeshBuffers {
                     vertices: mesh_buffers.vertices,
                     indices: mesh_buffers.indices,
+                    dynamic_vertices: dynamic_mesh_buffers.vertices,
+                    dynamic_indices: dynamic_mesh_buffers.indices,
                 },
                 material_textures: libhelio::MaterialTextureBindings {
                     material_textures: self.scene.material_texture_buffer(),
@@ -1374,6 +1443,40 @@ impl Renderer {
             baked_irradiance_sh,
             baked_pvs,
         };
+
+        if self.clear_target_next_frame {
+            let clear = wgpu::Color {
+                r: self.clear_color[0] as f64,
+                g: self.clear_color[1] as f64,
+                b: self.clear_color[2] as f64,
+                a: self.clear_color[3] as f64,
+            };
+            let mut clear_encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Renderer Resize Target Clear"),
+                });
+            {
+                let _pass = clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Renderer Resize Target Clear Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            }
+            self.queue.submit(std::iter::once(clear_encoder.finish()));
+            self.clear_target_next_frame = false;
+        }
 
         self.graph.execute_with_frame_resources(
             self.scene.gpu_scene(),

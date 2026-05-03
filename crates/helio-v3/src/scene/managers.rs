@@ -131,6 +131,19 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
         true
     }
 
+    /// Overwrites a contiguous range in-place. Panics if out of bounds.
+    ///
+    /// This is the write path for dynamic mesh geometry: call it each frame with
+    /// updated vertex data, then `flush()` will upload only the dirty range.
+    pub fn update_range(&mut self, start: usize, data: &[T])
+    where
+        T: Copy,
+    {
+        let end = start + data.len();
+        self.data[start..end].copy_from_slice(data);
+        self.mark_dirty_range(start, end);
+    }
+
     /// Removes one element in O(1) by swap-removing it. Returns the removed item.
     pub fn swap_remove(&mut self, index: usize) -> Option<T> {
         if index >= self.data.len() {

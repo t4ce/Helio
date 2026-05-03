@@ -129,7 +129,13 @@ fn build_default_graph_internal(
     )));
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(device)));
-    graph.add_pass(Box::new(OcclusionCullPass::new(device, hiz_view, hiz_sampler)));
+    graph.add_pass(Box::new(OcclusionCullPass::new(
+        device,
+        hiz_view,
+        hiz_sampler,
+        config.internal_width(),
+        config.internal_height(),
+    )));
 
     let perf_overlay_shared = PerfOverlayShared::new(device, config.internal_width(), config.internal_height());
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
@@ -212,7 +218,10 @@ fn build_default_graph_internal(
         false,
     )));
 
-    graph.set_render_size(config.width, config.height);
+    // Use init_transients instead of set_render_size so that passes keep
+    // their constructor-provided sizes. Default graph transients are internal-
+    // resolution, so initialize with render-scaled dimensions.
+    graph.init_transients(config.internal_width(), config.internal_height());
 
     graph
 }
@@ -288,7 +297,13 @@ pub fn build_hlfs_graph(
     )));
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(device)));
-    graph.add_pass(Box::new(OcclusionCullPass::new(device, hiz_view, hiz_sampler)));
+    graph.add_pass(Box::new(OcclusionCullPass::new(
+        device,
+        hiz_view,
+        hiz_sampler,
+        config.internal_width(),
+        config.internal_height(),
+    )));
 
     let perf_overlay_shared = PerfOverlayShared::new(device, config.internal_width(), config.internal_height());
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
@@ -363,7 +378,8 @@ pub fn build_hlfs_graph(
         false,
     )));
 
-    graph.set_render_size(config.width, config.height);
+    // HLFS graph also runs its main transient resources at internal resolution.
+    graph.init_transients(config.internal_width(), config.internal_height());
 
     graph
 }

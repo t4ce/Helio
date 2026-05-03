@@ -65,6 +65,8 @@ pub struct SsaoPass {
     noise_sampler: wgpu::Sampler,
     pub ssao_texture: wgpu::Texture,
     pub ssao_view: wgpu::TextureView,
+    width: u32,
+    height: u32,
     /// When set, replaces the runtime SSAO computation with a pre-baked AO texture.
     /// The pass skips GPU execution and publishes this view into `frame.ssao` instead.
     baked_ao_override: Option<std::sync::Arc<wgpu::TextureView>>,
@@ -387,6 +389,8 @@ impl SsaoPass {
             noise_sampler,
             ssao_texture,
             ssao_view,
+            width,
+            height,
             baked_ao_override: None,
         }
     }
@@ -395,6 +399,10 @@ impl SsaoPass {
 impl RenderPass for SsaoPass {
     fn name(&self) -> &'static str {
         "SSAO"
+    }
+
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.resize(device, width, height);
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
@@ -418,8 +426,8 @@ impl RenderPass for SsaoPass {
             power: 2.0,
             samples: KERNEL_SIZE as u32,
             noise_scale: [
-                ctx.width as f32 / NOISE_DIM as f32,
-                ctx.height as f32 / NOISE_DIM as f32,
+                self.width as f32 / NOISE_DIM as f32,
+                self.height as f32 / NOISE_DIM as f32,
             ],
             _pad: [0.0; 2],
         };
@@ -469,6 +477,8 @@ impl SsaoPass {
         let (tex, view) = make_ssao_texture(device, width, height);
         self.ssao_texture = tex;
         self.ssao_view = view;
+        self.width = width;
+        self.height = height;
     }
 
     /// Replace runtime SSAO with a pre-baked AO texture.

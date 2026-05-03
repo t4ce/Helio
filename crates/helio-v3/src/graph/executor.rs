@@ -382,6 +382,23 @@ impl RenderGraph {
         self.rebuild_gpu_render_bundles();
     }
 
+    /// Initialise the graph's render dimensions and create transient textures **without**
+    /// calling `on_resize` on any pass.
+    ///
+    /// Use this instead of `set_render_size` when constructing a graph whose passes
+    /// have already been built at the correct resolution.  Calling `set_render_size`
+    /// at construction time would invoke `on_resize` on every pass, potentially
+    /// overwriting their constructor-provided sizes with the wrong (e.g. full-output)
+    /// dimensions.
+    ///
+    /// During an actual window resize use `set_render_size` as normal.
+    pub fn init_transients(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self.recreate_transient_textures();
+        self.rebuild_gpu_render_bundles();
+    }
+
     /// Adds a render pass to the graph.
     ///
     /// Collects resource declarations from the pass and prepares for transient texture creation.

@@ -524,6 +524,10 @@ impl RenderPass for DeferredLightPass {
         "DeferredLight"
     }
 
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.resize(device, width, height);
+    }
+
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         if frame.pre_aa.is_none() {
             frame.pre_aa = Some(&self.pre_aa_view);

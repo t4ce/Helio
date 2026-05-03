@@ -13,7 +13,18 @@ const MIN_HISTORY_BLEND_RATE:     f32 = 0.015; // used when history is very conf
 
 @group(0) @binding(0) var current_frame: texture_2d<f32>;
 @group(0) @binding(1) var history_frame: texture_2d<f32>;
-@group(0) @binding(2) var velocity_tex: texture_2d<f32>;
+// binding 2: GpuCameraUniforms (inv_view_proj + prev_view_proj for depth reprojection)
+struct CameraUniforms {
+    view:           mat4x4<f32>,
+    proj:           mat4x4<f32>,
+    view_proj:      mat4x4<f32>,
+    inv_view_proj:  mat4x4<f32>,
+    position_near:  vec4<f32>,
+    forward_far:    vec4<f32>,
+    jitter_frame:   vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
+}
+@group(0) @binding(2) var<uniform> camera: CameraUniforms;
 @group(0) @binding(3) var depth_tex: texture_depth_2d;
 @group(0) @binding(4) var linear_sampler: sampler;
 @group(0) @binding(5) var point_sampler: sampler;
@@ -153,11 +164,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(original_color.rgb, 1.0 / MIN_HISTORY_BLEND_RATE);
     }
 
-    // ── Motion / history UV ─────────────────────────────────────────────────
-    // history_uv = where this world-point was last frame (no jitter, history
-    // is stored in unjittered output space).
-    let velocity   = textureSample(velocity_tex, point_sampler, in.uv).xy;
-    let history_uv = in.uv - velocity;
+    // ── Depth-based reprojection ────────────────────────────────────────────
+    // Reconstruct this pixel’s world-space position from the depth buffer, then
+    // reproject with the previous frame’s view-projection to find where the same
+    // world point landed last frame.  Handles all camera movement over static
+    // geometry without a dedicated velocity buffer.
+    let depth_val  = textureSample(depth_tex, point_sampler, in.uv);
+    // UV (0,0)=top-left → NDC: x ∈ [-1,+1], y ∈ [+1,-1]
+    let ndc_xy     = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+    let clip       = vec4<f32>(ndc_xy, depth_val, 1.0);
+    let world_h    = camera.inv_view_proj * clip;
+    let world_pos  = world_h.xyz / world_h.w;
+    let prev_clip  = camera.prev_view_proj * vec4<f32>(world_pos, 1.0);
+    let prev_ndc   = prev_clip.xy / prev_clip.w;
+    let history_uv = vec2<f32>((prev_ndc.x + 1.0) * 0.5, (1.0 - prev_ndc.y) * 0.5);
 
     if any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0)) {
         return vec4<f32>(original_color.rgb, 1.0);
@@ -198,14 +218,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ));
 
     // ── Confidence-based blend rate ─────────────────────────────────────────
-    // Static pixels accumulate confidence → blend rate approaches MIN (0.015).
-    // Moving pixels reset confidence to 1 → blend rate = DEFAULT (0.1).
-    let pixel_motion = abs(velocity) * in_dims;
+    // Confidence accumulates each frame when history is stable.
+    // If the AABB clipping moved the history sample significantly, the world
+    // content at this pixel changed (disocclusion or fast object motion) —
+    // reset to 1 so we fall back to the DEFAULT blend rate for those pixels.
+    let clip_error = length(rgb_to_ycocg(clipped_history) - rgb_to_ycocg(history_color));
     var new_confidence: f32;
-    if pixel_motion.x < 0.01 && pixel_motion.y < 0.01 {
-        new_confidence = raw_confidence + 10.0;
-    } else {
+    if clip_error > 0.05 {
         new_confidence = 1.0;
+    } else {
+        new_confidence = raw_confidence + 1.0;
     }
     let blend_rate = clamp(1.0 / new_confidence, MIN_HISTORY_BLEND_RATE, DEFAULT_HISTORY_BLEND_RATE);
 

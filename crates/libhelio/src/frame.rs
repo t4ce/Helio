@@ -35,10 +35,21 @@ pub struct GBufferViews<'a> {
 }
 
 /// Borrowed mesh buffers for passes that render scene geometry directly.
+///
+/// Static geometry (terrain, buildings, props) lives in `vertices`/`indices`.
+/// Dynamic geometry (skinned characters, morphed meshes) lives in
+/// `dynamic_vertices`/`dynamic_indices`. Each pair must be bound separately
+/// around the corresponding draw calls.
 #[derive(Clone, Copy)]
 pub struct MeshBuffers<'a> {
+    /// Vertex buffer for upload-once static geometry.
     pub vertices: &'a wgpu::Buffer,
+    /// Index buffer for upload-once static geometry.
     pub indices: &'a wgpu::Buffer,
+    /// Vertex buffer for per-frame-updatable dynamic geometry.
+    pub dynamic_vertices: &'a wgpu::Buffer,
+    /// Index buffer for per-frame-updatable dynamic geometry.
+    pub dynamic_indices: &'a wgpu::Buffer,
 }
 
 /// Borrowed material-texture state for passes that sample Helio's texture table.
