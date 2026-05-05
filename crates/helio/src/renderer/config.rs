@@ -9,6 +9,7 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     #[cfg(target_arch = "wasm32")]
     let required = wgpu::Features::empty();
     let optional =
+        wgpu::Features::INDIRECT_FIRST_INSTANCE | // non-zero firstInstance in indirect draws (WebGPU: indirect-first-instance)
         wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::SHADER_PRIMITIVE_INDEX | // @builtin(primitive_index) in fs
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries

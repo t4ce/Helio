@@ -249,6 +249,20 @@ impl Renderer {
     }
 
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, config: RendererConfig) -> Self {
+        // On WebGPU, non-zero firstInstance in indirect draw calls requires the
+        // `indirect-first-instance` feature (wgpu::Features::INDIRECT_FIRST_INSTANCE).
+        // Without it, every draw with firstInstance>0 is silently skipped by the browser,
+        // so only the first object (dense_index=0, the floor) would render.
+        #[cfg(target_arch = "wasm32")]
+        if !device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
+            log::error!(
+                "helio: INDIRECT_FIRST_INSTANCE (WebGPU indirect-first-instance) is not \
+                 available on this device. Only the first object in every scene will render. \
+                 Please use a browser that supports the indirect-first-instance WebGPU feature \
+                 (Chrome 113+, Firefox 122+, Safari 17+)."
+            );
+        }
+
         let mut scene = Scene::new(device.clone(), queue.clone());
         scene.set_render_size(config.width, config.height);
 
