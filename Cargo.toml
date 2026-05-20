@@ -44,6 +44,9 @@ members = [
 
     # Baking (offline AO, lightmaps, reflection probes, PVS via Nebula)
     "crates/helio-bake",
+
+    # Offline / tooling crates (no window required)
+    "crates_other/helio-snapshot",
 ]
 resolver = "2"
 
