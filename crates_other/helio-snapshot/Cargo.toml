@@ -1,0 +1,25 @@
+[package]
+name = "helio-snapshot"
+version = "0.1.0"
+edition = "2021"
+description = "Headless snapshot renderer for Helio — loads a model file, renders one frame, saves a PNG"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-asset-compat = { path = "../../crates/helio-asset-compat" }
+helio              = { path = "../../crates/helio" }
+wgpu               = { workspace = true }
+glam               = { workspace = true }
+bytemuck           = { version = "1.14", features = ["derive"] }
+image              = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+pollster           = "0.4"
+thiserror          = "2.0"
+log                = "0.4"
+futures-channel    = "0.3"
+
+[dev-dependencies]
+env_logger         = "0.11"
+
+[[example]]
+name = "snapshot_test_fbx"
+path = "examples/snapshot_test_fbx.rs"
