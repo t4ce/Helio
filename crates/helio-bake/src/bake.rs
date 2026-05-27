@@ -142,8 +142,8 @@ pub fn run_bake_blocking(
                 let mut mip_levels = spec.config.specular_mip_levels;
                 let mut is_rgbe = false;
 
-                for (i, &pos) in spec.positions.iter().enumerate() {
-                    let pos_v = Vec3::from(pos);
+                for (i, pos) in spec.positions.iter().enumerate() {
+                    let pos_v = Vec3::from(*pos);
                     let (refl, irr) = nebula::probe::ProbeBaker::bake_at(
                         pos_v, scene, &spec.config, &ctx, &NullReporter,
                     ).await?;
