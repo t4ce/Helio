@@ -6,19 +6,19 @@ description = "Headless snapshot renderer for Helio — loads a model file, rend
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-helio-asset-compat = { path = "../../crates/helio-asset-compat" }
-helio              = { path = "../../crates/helio" }
+helio-asset-compat = { workspace = true }
+helio              = { workspace = true }
 wgpu               = { workspace = true }
 glam               = { workspace = true }
-bytemuck           = { version = "1.14", features = ["derive"] }
-image              = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-pollster           = "0.4"
-thiserror          = "2.0"
-log                = "0.4"
+bytemuck           = { workspace = true, features = ["derive"] }
+image              = { workspace = true, features = ["png", "jpeg"] }
+pollster           = { workspace = true }
+thiserror          = { workspace = true }
+log                = { workspace = true }
 futures-channel    = "0.3"
 
 [dev-dependencies]
-env_logger         = "0.11"
+env_logger         = { workspace = true }
 
 [[example]]
 name = "snapshot_test_fbx"

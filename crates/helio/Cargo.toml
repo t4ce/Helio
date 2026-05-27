@@ -8,10 +8,10 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 arrayvec = "0.7"
-bytemuck = { version = "1.14", features = ["derive"] }
+bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
-image = { version = "0.25", default-features = false, features = ["png"] }
-helio-v3 = { path = "../helio-v3", default-features = false }
+image = { workspace = true, features = ["png"] }
+helio-v3 = { workspace = true }
 helio-pass-billboard = { path = "../helio-pass-billboard" }
 helio-pass-light-cull = { path = "../helio-pass-light-cull" }
 helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
@@ -31,17 +31,17 @@ helio-pass-sky = { path = "../helio-pass-sky" }
 helio-pass-sky-lut = { path = "../helio-pass-sky-lut" }
 helio-pass-smaa = { path = "../helio-pass-smaa" }
 helio-pass-ssao = { path = "../helio-pass-ssao" }
-helio-pass-taa = { path = "../helio-pass-taa" }
+helio-pass-taa = { workspace = true }
 helio-pass-transparent = { path = "../helio-pass-transparent" }
 helio-pass-debug = { path = "../helio-pass-debug" }
 helio-pass-water-sim = { path = "../helio-pass-water-sim" }
 helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
-libhelio = { path = "../libhelio" }
-log = "0.4"
-thiserror = "2.0"
-wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl", "dx12", "vulkan"] }
-pollster = "0.3"
-quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
+libhelio = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+wgpu = { workspace = true, features = ["web", "webgpu", "wgsl", "dx12", "vulkan"] }
+pollster = { workspace = true }
+quark = { workspace = true, package = "quark" }
 helio-live-portal = { path = "../helio-live-portal", optional = true }
 helio-bake = { path = "../helio-bake", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }

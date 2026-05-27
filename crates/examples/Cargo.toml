@@ -138,19 +138,19 @@ path = "editor_demo.rs"
 
 
 [dependencies]
-helio = { path = "../helio", features = ["live-portal", "bake"] }
-helio-asset-compat = { path = "../helio-asset-compat" }
-helio-pass-sdf = { path = "../helio-pass-sdf" }
+helio = { workspace = true, features = ["live-portal", "bake"] }
+helio-asset-compat = { workspace = true }
+helio-pass-sdf = { workspace = true }
 helio-pass-terra-forge = { path = "../helio-pass-terra-forge" }
-helio-pass-taa = { path = "../helio-pass-taa" }
+helio-pass-taa = { workspace = true }
 rapier3d = "0.24"
 rapier_testbed3d = "0.24"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { workspace = true, features = ["png"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 winit = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
-wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl"] }
-pollster = "0.4"
+wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }
+pollster = { workspace = true }
 salva3d = { version = "0.9", features = ["dim3", "parry", "rapier"] }
