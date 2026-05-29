@@ -6,7 +6,7 @@ description = "Helio render pass: helio-pass-sky"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-helio-v3  = { path = "../helio-v3" }
-libhelio  = { path = "../libhelio" }
+helio-v3  = { workspace = true }
+libhelio  = { workspace = true }
 wgpu      = { workspace = true }
-bytemuck  = { version = "1.14", features = ["derive"] }
+bytemuck  = { workspace = true, features = ["derive"] }

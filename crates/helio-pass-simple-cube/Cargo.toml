@@ -6,7 +6,7 @@ description = "Helio render pass: simple hardcoded cube (debug / reference graph
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-helio-v3 = { path = "../helio-v3" }
+helio-v3 = { workspace = true }
 wgpu     = { workspace = true }
-bytemuck = { version = "1.14", features = ["derive"] }
-log      = "0.4"
+bytemuck = { workspace = true, features = ["derive"] }
+log      = { workspace = true }

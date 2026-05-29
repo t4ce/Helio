@@ -7,8 +7,8 @@ description = "GPU-driven virtual geometry pass: per-meshlet frustum + backface-
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-bytemuck = { version = "1.14", features = ["derive"] }
-helio-v3 = { path = "../helio-v3" }
-libhelio = { path = "../libhelio" }
-log = "0.4"
-wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl"] }
+bytemuck = { workspace = true, features = ["derive"] }
+helio-v3 = { workspace = true }
+libhelio = { workspace = true }
+log = { workspace = true }
+wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }

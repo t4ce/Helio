@@ -147,28 +147,6 @@ impl RenderPass for IndirectDispatchPass {
         self.draw_count = draw_count;
         let planes = extract_frustum_planes(ctx.scene.camera.data().view_proj);
 
-        if ctx.frame_num % 100 == 0 {
-            let cam = ctx.scene.camera.data();
-            let pos = cam.position_near;
-            let fwd = cam.forward_far;
-            eprintln!(
-                "[IndirectDispatch] frame={} draw_count={} \
-                 camera_pos=({:.2}, {:.2}, {:.2}) near={:.3} \
-                 forward=({:.3}, {:.3}, {:.3}) far={:.1}",
-                ctx.frame_num,
-                draw_count,
-                pos[0], pos[1], pos[2], pos[3],
-                fwd[0], fwd[1], fwd[2], fwd[3],
-            );
-            let names = ["left", "right", "bottom", "top", "near", "far"];
-            for (name, p) in names.iter().zip(planes.iter()) {
-                eprintln!(
-                    "  plane {:6}: ({:8.4}, {:8.4}, {:8.4},  d={:10.4})",
-                    name, p[0], p[1], p[2], p[3]
-                );
-            }
-        }
-
         let uniforms = CullUniforms {
             frustum_planes: planes,
             draw_count,

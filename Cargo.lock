@@ -2178,7 +2178,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "env_logger",
- "glam 0.29.3",
+ "glam 0.33.0",
  "helio",
  "helio-asset-compat",
  "helio-pass-sdf",
@@ -2487,6 +2487,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fb167719045debebe9f532320accc7b5c993c5a3b813f5696a11d5ca7bdc57b"
+dependencies = [
+ "bytemuck",
+ "serde_core",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2497,18 +2507,6 @@ name = "glow"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d51fa363f025f5c111e03f13eda21162faeacb6911fe8caa0c0349f9cf0c4483"
-dependencies = [
- "js-sys",
- "slotmap",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
-name = "glow"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5e5ea60d70410161c8bf5da3fdfeaa1c72ed2c15f8bbb9d19fe3a4fad085f08"
 dependencies = [
  "js-sys",
  "slotmap",
@@ -2676,7 +2674,7 @@ version = "0.17.0"
 dependencies = [
  "arrayvec",
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "helio-bake",
  "helio-live-portal",
  "helio-pass-billboard",
@@ -2707,7 +2705,7 @@ dependencies = [
  "image",
  "libhelio",
  "log",
- "pollster 0.3.0",
+ "pollster 0.4.0",
  "quark",
  "thiserror 2.0.18",
  "uuid",
@@ -2721,7 +2719,7 @@ name = "helio-asset-compat"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "helio",
  "image",
  "libhelio",
@@ -2731,7 +2729,7 @@ dependencies = [
  "solid-obj",
  "solid-rs",
  "solid-usd",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "wgpu 28.0.0",
 ]
 
@@ -2741,13 +2739,13 @@ version = "0.1.0"
 dependencies = [
  "bincode 1.3.3",
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "half",
  "helio-v3",
  "libhelio",
  "log",
  "nebula",
- "pollster 0.3.0",
+ "pollster 0.4.0",
  "serde",
  "thiserror 2.0.18",
  "wgpu 28.0.0",
@@ -2841,7 +2839,7 @@ name = "helio-pass-hlfs"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "helio-v3",
  "libhelio",
  "wgpu 28.0.0",
@@ -2900,7 +2898,7 @@ name = "helio-pass-sdf"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "helio-v3",
  "libhelio",
  "log",
@@ -3001,7 +2999,7 @@ name = "helio-pass-terra-forge"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "helio-v3",
  "libhelio",
  "log",
@@ -3073,7 +3071,7 @@ dependencies = [
  "bytemuck",
  "env_logger",
  "futures-channel",
- "glam 0.29.3",
+ "glam 0.33.0",
  "helio",
  "helio-asset-compat",
  "image",
@@ -3088,7 +3086,7 @@ name = "helio-v3"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "libhelio",
  "pollster 0.4.0",
  "thiserror 2.0.18",
@@ -3102,7 +3100,7 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "env_logger",
- "glam 0.29.3",
+ "glam 0.33.0",
  "helio",
  "js-sys",
  "log",
@@ -3121,7 +3119,7 @@ dependencies = [
  "env_logger",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
- "glam 0.29.3",
+ "glam 0.33.0",
  "helio",
  "helio-asset-compat",
  "helio-pass-sdf",
@@ -3569,7 +3567,7 @@ name = "libhelio"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "wgpu 28.0.0",
 ]
 
@@ -3919,7 +3917,7 @@ dependencies = [
 [[package]]
 name = "nebula"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=b9b7cfc9d071aab999ae1e8ce98f576e67c82c80#b9b7cfc9d071aab999ae1e8ce98f576e67c82c80"
 dependencies = [
  "nebula-ao",
  "nebula-core",
@@ -3933,11 +3931,11 @@ dependencies = [
 [[package]]
 name = "nebula-ao"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=b9b7cfc9d071aab999ae1e8ce98f576e67c82c80#b9b7cfc9d071aab999ae1e8ce98f576e67c82c80"
 dependencies = [
  "async-trait",
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "log",
  "nebula-core",
  "nebula-gpu",
@@ -3951,12 +3949,12 @@ dependencies = [
 [[package]]
 name = "nebula-core"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=b9b7cfc9d071aab999ae1e8ce98f576e67c82c80#b9b7cfc9d071aab999ae1e8ce98f576e67c82c80"
 dependencies = [
  "async-trait",
  "bitflags 2.11.0",
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "log",
  "pollster 0.3.0",
  "serde",
@@ -3968,10 +3966,10 @@ dependencies = [
 [[package]]
 name = "nebula-gpu"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=b9b7cfc9d071aab999ae1e8ce98f576e67c82c80#b9b7cfc9d071aab999ae1e8ce98f576e67c82c80"
 dependencies = [
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "log",
  "nebula-core",
  "thiserror 1.0.69",
@@ -3981,11 +3979,11 @@ dependencies = [
 [[package]]
 name = "nebula-light"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=b9b7cfc9d071aab999ae1e8ce98f576e67c82c80#b9b7cfc9d071aab999ae1e8ce98f576e67c82c80"
 dependencies = [
  "async-trait",
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "log",
  "nebula-core",
  "nebula-gpu",
@@ -4001,12 +3999,12 @@ dependencies = [
 [[package]]
 name = "nebula-probe"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=b9b7cfc9d071aab999ae1e8ce98f576e67c82c80#b9b7cfc9d071aab999ae1e8ce98f576e67c82c80"
 dependencies = [
  "async-trait",
  "bincode 2.0.1",
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "log",
  "nebula-core",
  "nebula-gpu",
@@ -4020,7 +4018,7 @@ dependencies = [
 [[package]]
 name = "nebula-serialize"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=b9b7cfc9d071aab999ae1e8ce98f576e67c82c80#b9b7cfc9d071aab999ae1e8ce98f576e67c82c80"
 dependencies = [
  "bincode 2.0.1",
  "log",
@@ -4034,12 +4032,12 @@ dependencies = [
 [[package]]
 name = "nebula-visibility"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=b9b7cfc9d071aab999ae1e8ce98f576e67c82c80#b9b7cfc9d071aab999ae1e8ce98f576e67c82c80"
 dependencies = [
  "async-trait",
  "bincode 2.0.1",
  "bytemuck",
- "glam 0.29.3",
+ "glam 0.33.0",
  "log",
  "nebula-core",
  "nebula-gpu",
@@ -6557,7 +6555,6 @@ dependencies = [
  "js-sys",
  "log",
  "naga 28.0.0",
- "parking_lot",
  "portable-atomic",
  "profiling",
  "raw-window-handle",
@@ -6621,7 +6618,6 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.18",
  "wgpu-core-deps-apple",
- "wgpu-core-deps-emscripten",
  "wgpu-core-deps-windows-linux-android",
  "wgpu-hal 28.0.0",
  "wgpu-types 28.0.0",
@@ -6629,14 +6625,6 @@ dependencies = [
 
 [[package]]
 name = "wgpu-core-deps-apple"
-version = "28.0.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?rev=fce5b80e8017304449124b12637ec324417e40c8#fce5b80e8017304449124b12637ec324417e40c8"
-dependencies = [
- "wgpu-hal 28.0.0",
-]
-
-[[package]]
-name = "wgpu-core-deps-emscripten"
 version = "28.0.0"
 source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?rev=fce5b80e8017304449124b12637ec324417e40c8#fce5b80e8017304449124b12637ec324417e40c8"
 dependencies = [
@@ -6666,7 +6654,7 @@ dependencies = [
  "bytemuck",
  "cfg_aliases 0.1.1",
  "core-graphics-types",
- "glow 0.14.2",
+ "glow",
  "glutin_wgl_sys",
  "gpu-alloc",
  "gpu-allocator 0.27.0",
@@ -6710,18 +6698,13 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "cfg_aliases 0.2.1",
- "glow 0.16.0",
- "glutin_wgl_sys",
  "gpu-allocator 0.28.0",
  "gpu-descriptor",
  "hashbrown 0.16.1",
- "js-sys",
- "khronos-egl",
  "libc",
  "libloading",
  "log",
  "naga 28.0.0",
- "ndk-sys 0.6.0+11769913",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
@@ -6739,9 +6722,6 @@ dependencies = [
  "renderdoc-sys",
  "smallvec",
  "thiserror 2.0.18",
- "wasm-bindgen",
- "wayland-sys",
- "web-sys",
  "wgpu-types 28.0.0",
  "windows 0.62.2",
  "windows-core 0.62.2",

@@ -6,8 +6,8 @@ description = "SolidRS integration layer for Helio renderer - asset loading and 
 
 [dependencies]
 # Helio renderer facade
-helio = { path = "../helio" }
-libhelio = { path = "../libhelio" }
+helio = { workspace = true }
+libhelio = { workspace = true }
 
 # SolidRS - 3D asset loading
 solid-rs.workspace = true
@@ -19,11 +19,11 @@ solid-usd.workspace = true
 # Math and utilities
 glam.workspace = true
 log.workspace = true
-thiserror = "1.0"
+thiserror = { workspace = true }
 
 # GPU
-wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl"] }
-bytemuck = { version = "1.14", features = ["derive"] }
+wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }
+bytemuck = { workspace = true, features = ["derive"] }
 
 # Image decoding
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { workspace = true, features = ["png", "jpeg"] }
