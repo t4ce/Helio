@@ -155,11 +155,12 @@ impl ApplicationHandler for App {
             },
         );
 
-        // ── Renderer ──────────────────────────────────────────────────────
+        // ── Renderer (FXAA pipeline: full-res, no TAA jitter/upscaling) ───
         let mut renderer = Renderer::new(
             device.clone(),
             queue.clone(),
-            RendererConfig::new(sz.width, sz.height, format),
+            RendererConfig::new(sz.width, sz.height, format)
+                .with_render_scale(1.0),
         );
         renderer.set_editor_mode(true);
         // Night sky — deep navy
