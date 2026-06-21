@@ -48,35 +48,45 @@ struct VgGlobals {
 
 /// Controls how aggressively distant objects are simplified.
 ///
-/// Each level raises the screen-coverage thresholds at which LOD transitions
-/// fire, so higher quality = full-detail geometry is visible at greater
-/// distances.  All values are fraction of screen height covered by the
-/// object's bounding sphere (`screen_radius = obj_radius * cot(fov/2) / dist`).
+/// Lower thresholds mean full-detail geometry stays visible at greater
+/// distances (= higher quality).  All values are fraction of screen height
+/// covered by the object's bounding sphere
+/// (`screen_radius = obj_radius * cot(fov/2) / dist`).
+///
+/// 8 LOD levels (0–7) are supported, matching UE5's traditional mesh LOD
+/// system.  The 7 thresholds define the screen-radius boundaries between
+/// adjacent levels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum LodQuality {
     /// Aggressive simplification — good for low-end GPUs / perf testing.
-    /// LOD0 only when the object covers ≥ 2 % of screen height.
+    /// Full detail only when the object covers ≥ 18 % of screen height.
     Low,
-    /// Balanced default.  LOD0 ≥ 5 %, LOD1 ≥ 1 %.
+    /// Balanced default.
     #[default]
     Medium,
-    /// Sharper detail at a distance.  LOD0 ≥ 10 %, LOD1 ≥ 2 %.
+    /// Sharper detail at a distance.
     High,
-    /// Near-cinematic — LOD transitions barely visible.  LOD0 ≥ 18 %, LOD1 ≥ 4 %.
+    /// Near-cinematic — LOD transitions barely visible.
     Ultra,
 }
 
+/// Number of LOD levels supported (LOD 0 through LOD 7).
+pub const LOD_LEVEL_COUNT: u32 = 8;
+
 impl LodQuality {
-    /// Returns `(lod_s0, lod_s1)` screen-radius thresholds for this quality level.
+    /// Returns 7 screen-radius thresholds `[s0, s1, s2, s3, s4, s5, s6]`.
     ///
-    /// `lod_s0` : transition from LOD 0 → 1 (full → medium)  
-    /// `lod_s1` : transition from LOD 1 → 2 (medium → coarse)
-    pub fn thresholds(self) -> (f32, f32) {
+    /// `s[i]` is the transition from LOD i → LOD i+1.  When `screen_size`
+    /// drops below `s[i]`, the renderer switches to LOD i+1.
+    ///
+    /// Lower thresholds = higher quality (full detail visible at smaller
+    /// screen coverage / greater distance).
+    pub fn thresholds(self) -> [f32; 7] {
         match self {
-            LodQuality::Low => (0.02, 0.004),
-            LodQuality::Medium => (0.05, 0.010),
-            LodQuality::High => (0.10, 0.020),
-            LodQuality::Ultra => (0.18, 0.040),
+            LodQuality::Low => [0.180, 0.120, 0.080, 0.050, 0.030, 0.015, 0.006],
+            LodQuality::Medium => [0.050, 0.035, 0.022, 0.014, 0.008, 0.004, 0.002],
+            LodQuality::High => [0.020, 0.014, 0.009, 0.005, 0.003, 0.0015, 0.0006],
+            LodQuality::Ultra => [0.008, 0.005, 0.003, 0.002, 0.001, 0.0005, 0.0002],
         }
     }
 }
