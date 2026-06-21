@@ -34,7 +34,10 @@ pub use material::{
 pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use quark_commands::{HelioAction, HelioCommandBridge, register_helio_commands};
 pub use renderer::{
-    build_simple_graph, build_hlfs_graph, build_default_graph_external, required_wgpu_features, required_wgpu_limits, GiConfig, Renderer,
+    build_simple_graph, build_hlfs_graph, build_default_graph_external,
+    build_fxaa_graph, build_fxaa_graph_external,
+    build_fxaa_hlfs_graph, build_fxaa_hlfs_graph_external,
+    required_wgpu_features, required_wgpu_limits, GiConfig, Renderer,
     RendererConfig,
 };
 pub use scene::{
