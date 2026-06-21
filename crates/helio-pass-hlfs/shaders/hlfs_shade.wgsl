@@ -53,7 +53,7 @@ struct GpuLight {
 const ENABLE_SHADOWS: bool = true;
 const MAX_SHADOW_LIGHTS: u32 = 42u;
 const ATLAS_SIZE: f32 = 1024.0;
-const NORMAL_OFFSET_SCALE: f32 = 0.002;
+const NORMAL_OFFSET_SCALE: f32 = 0.01;
 
 struct LightMatrix {
     mat: mat4x4<f32>,
@@ -153,8 +153,6 @@ fn sample_cascade_shadow(layer: u32, cascade_idx: u32, cascade_scale: f32, world
     if any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
         return 1.0;
     }
-
-    let biased_depth = ndc.z - shadow_config.cascades[cascade_idx].depth_bias;
     let theta = hash22(frag_coord) * 6.28318530718;
 
     // OPTIMIZATION: Adaptive PCF sample count based on cascade distance
@@ -170,7 +168,7 @@ fn sample_cascade_shadow(layer: u32, cascade_idx: u32, cascade_scale: f32, world
     var lit_sum = 0.0;
     for (var i = 0u; i < pcf_count; i++) {
         let offset = vogel_disk_sample(i, pcf_count, theta) * (cascade_scale / ATLAS_SIZE);
-        lit_sum += textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), biased_depth);
+        lit_sum += textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), ndc.z);
     }
 
     return lit_sum / f32(pcf_count);
@@ -202,13 +200,11 @@ fn sample_cascade_shadow_pcss(layer: u32, cascade_idx: u32, world_pos: vec3<f32>
     let penumbra = pcss_penumbra_size(receiver_depth, blocker.x, config.pcss_light_size);
     let filter_radius = clamp(penumbra / ATLAS_SIZE, config.filter_radius / ATLAS_SIZE, config.filter_radius * 3.0 / ATLAS_SIZE);
 
-    // Final PCF comparison uses biased depth to prevent self-shadowing at contact points.
-    let biased_depth = receiver_depth - config.depth_bias;
     var lit_sum = 0.0;
 
     for (var i = 0u; i < shadow_config.pcss_filter_samples; i++) {
         let offset = vogel_disk_sample(i, shadow_config.pcss_filter_samples, theta) * filter_radius;
-        lit_sum += textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), biased_depth);
+        lit_sum += textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), receiver_depth);
     }
 
     return lit_sum / f32(shadow_config.pcss_filter_samples);

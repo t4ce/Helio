@@ -196,8 +196,7 @@ fn point_light_face(dir: vec3<f32>) -> u32 {
 // Shifts the shadow query point along the surface normal before projecting into
 // light space, eliminating self-shadowing without any visible surface gap.
 // This is the same technique used by UE4 ("Normal Shadow Bias") and Unity HDRP.
-// Set small — the cascade depth_bias handles the rest.
-const NORMAL_OFFSET_SCALE: f32 = 0.002;
+const NORMAL_OFFSET_SCALE: f32 = 0.01;
 
 // High-quality PCF shadow sampling with Vogel disk pattern.
 // world_pos must already have normal-offset applied (call shadow_factor, not this directly).
@@ -221,7 +220,6 @@ fn sample_cascade_shadow(
         return 1.0;
     }
 
-    let biased_depth = ndc.z - shadow_config.cascades[cascade_idx].depth_bias;
     let filter_radius = (2.0 / ATLAS_SIZE) * cascade_scale;
 
     // Per-pixel rotation to break up banding (stable hash — no frame counter)
@@ -248,16 +246,17 @@ fn sample_cascade_shadow(
             shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
-            biased_depth,
+            ndc.z,
         );
         let sta_lit = textureSampleCompareLevel(
             static_shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
-            biased_depth,
+            ndc.z,
         );
         lit_sum += min(dyn_lit, sta_lit);
     }
+
     return lit_sum / f32(pcf_count);
 }
 
@@ -359,8 +358,6 @@ fn sample_cascade_shadow_pcss(
                                 config.filter_radius * 3.0 / ATLAS_SIZE);
 
     // Step 3: Variable-kernel PCF (filter size scales with penumbra)
-    // Apply depth_bias here to prevent self-shadowing at contact points.
-    let biased_depth = receiver_depth - config.depth_bias;
     var lit_sum = 0.0;
     for (var i = 0u; i < shadow_config.pcss_filter_samples; i++) {
         let offset = vogel_disk_sample(i, shadow_config.pcss_filter_samples, theta) * filter_radius;
@@ -369,13 +366,13 @@ fn sample_cascade_shadow_pcss(
             shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
-            biased_depth
+            receiver_depth
         );
         let sta_lit = textureSampleCompareLevel(
             static_shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
-            biased_depth
+            receiver_depth
         );
         lit_sum += min(dyn_lit, sta_lit);
     }
