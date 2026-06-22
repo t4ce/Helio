@@ -582,6 +582,11 @@ impl Renderer {
         self.editor_mode
     }
 
+    /// Clear the per-frame debug geometry.
+    ///
+    /// **Must** be called every frame before any [`debug_batch`](Self::debug_batch)
+    /// or direct debug-draw calls.  The generation counter is bumped so the
+    /// render pass detects the change and uploads the (now-empty) buffer.
     pub fn debug_clear(&mut self) {
         if let Ok(mut s) = self.debug_state.lock() {
             if !s.user_lines.is_empty() {
