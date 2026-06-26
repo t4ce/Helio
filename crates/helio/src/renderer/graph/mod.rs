@@ -13,6 +13,7 @@ pub use simple::build_simple_graph;
 use std::sync::Arc;
 
 use helio_pass_billboard::BillboardPass;
+use helio_pass_corona::CoronaPass;
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_indirect_dispatch::IndirectDispatchPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
@@ -195,6 +196,14 @@ fn add_late_passes(
     );
     billboard_pass.set_occluded_by_geometry(true);
     graph.add_pass(Box::new(billboard_pass));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
+
+    graph.add_pass(Box::new(CoronaPass::new(
+        device,
+        queue,
+        camera_buf,
+        config.surface_format,
+    )));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 
     graph.add_pass(Box::new(WaterSimPass::new(

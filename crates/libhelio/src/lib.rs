@@ -12,6 +12,7 @@
 //! - All structs must be multiples of 16 bytes for uniform buffers
 
 pub mod camera;
+pub mod corona;
 pub mod draw;
 pub mod frame;
 pub mod instance;
@@ -24,6 +25,7 @@ pub mod sky;
 pub mod water;
 
 pub use camera::*;
+pub use corona::*;
 pub use draw::*;
 pub use frame::*;
 pub use instance::*;

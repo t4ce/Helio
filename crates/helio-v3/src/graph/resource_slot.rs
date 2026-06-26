@@ -37,4 +37,5 @@ pub enum ResourceSlot {
     BakedReflectionSampler,
     BakedIrradianceSh,
     BakedPvs,
+    CoronaEmitters,
 }

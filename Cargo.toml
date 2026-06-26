@@ -37,6 +37,7 @@ members = [
     "crates/helio-pass-water-caustics",
     "crates/helio-pass-water-surface",
     "crates/helio-pass-underwater",
+    "crates/helio-pass-corona",
 
     # WASM infrastructure
     "crates/helio-wasm",
@@ -78,3 +79,4 @@ helio-pass-taa = { path = "crates/helio-pass-taa" }
 helio = { path = "crates/helio" }
 libhelio = { path = "crates/libhelio" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }
+helio-pass-corona = { path = "crates/helio-pass-corona" }

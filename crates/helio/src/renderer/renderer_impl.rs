@@ -82,6 +82,11 @@ pub struct Renderer {
     billboard_cached_editor_hidden: bool,
     /// Monotonic generation for billboard GPU uploads.
     billboard_generation: u64,
+
+    // ── Corona particle emitters ──────────────────────────────────────────
+    corona_emitters: Vec<libhelio::GpuCoronaEmitter>,
+    corona_emitter_generation: u64,
+
     water_volumes_buffer: wgpu::Buffer,
     water_hitboxes_buffer: wgpu::Buffer,
     /// Instant of the previous `render()` call, used to compute real `delta_time`.
@@ -351,6 +356,10 @@ impl Renderer {
             billboard_cached_light_gen: u64::MAX,
             billboard_cached_editor_hidden: false,
             billboard_generation: 0,
+
+            corona_emitters: Vec::new(),
+            corona_emitter_generation: 0,
+
             water_volumes_buffer,
             water_hitboxes_buffer,
             last_render_time: Instant::now(),
@@ -503,6 +512,10 @@ impl Renderer {
             billboard_cached_light_gen: u64::MAX,
             billboard_cached_editor_hidden: false,
             billboard_generation: 0,
+
+            corona_emitters: Vec::new(),
+            corona_emitter_generation: 0,
+
             water_volumes_buffer,
             water_hitboxes_buffer,
             last_render_time: Instant::now(),
@@ -1170,6 +1183,12 @@ impl Renderer {
         self.billboard_dirty = true;
     }
 
+    pub fn set_corona_emitters(&mut self, emitters: &[libhelio::GpuCoronaEmitter]) {
+        self.corona_emitters.clear();
+        self.corona_emitters.extend_from_slice(emitters);
+        self.corona_emitter_generation = self.corona_emitter_generation.wrapping_add(1);
+    }
+
     /// Store the current camera and viewport height for screen-space gizmo sizing.
     ///
     /// Call this **before** [`draw_gizmos`](crate::EditorState::draw_gizmos) / [`update_hover`](crate::EditorState::update_hover)
@@ -1458,6 +1477,18 @@ impl Renderer {
                     instances: bytemuck::cast_slice(&self.billboard_scratch),
                     count: self.billboard_scratch.len() as u32,
                     generation: self.billboard_generation,
+                },
+                "Renderer",
+            );
+        }
+
+        if !self.corona_emitters.is_empty() {
+            frame_resources.corona_emitters.write(
+                libhelio::CoronaEmitterFrameData {
+                    emitters: bytemuck::cast_slice(&self.corona_emitters),
+                    count: self.corona_emitters.len() as u32,
+                    generation: self.corona_emitter_generation,
+                    max_particles: libhelio::CORONA_MAX_PARTICLES,
                 },
                 "Renderer",
             );

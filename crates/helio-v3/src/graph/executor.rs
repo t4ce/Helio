@@ -495,6 +495,7 @@ impl RenderGraph {
         available.insert(super::ResourceSlot::MainScene);
         available.insert(super::ResourceSlot::Vg);
         available.insert(super::ResourceSlot::Billboards);
+        available.insert(super::ResourceSlot::CoronaEmitters);
         available.insert(super::ResourceSlot::DepthTexture);
 
         for (i, pass) in self.passes.iter().enumerate() {

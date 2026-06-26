@@ -4,6 +4,8 @@
 //! `RenderGraph` owns. These are passed into `PassContext` and `PrepareContext` so
 //! passes can read outputs of earlier passes without any allocation or locking.
 
+use crate::CoronaEmitterFrameData;
+
 /// Per-frame billboard instance data, provided by the high-level `Renderer`.
 ///
 /// The high-level renderer stores a `Vec<BillboardInstance>` and populates this
@@ -295,6 +297,9 @@ pub struct FrameResources<'a> {
     /// Use [`BakedPvsRef::is_visible`] to test cell-to-cell visibility before
     /// submitting draw calls. Returns `None` when PVS baking was not configured.
     pub baked_pvs: Tracked<BakedPvsRef<'a>>,
+
+    /// Corona particle emitter definitions (uploaded by the Renderer each frame)
+    pub corona_emitters: Tracked<CoronaEmitterFrameData<'a>>,
 }
 
 // ── PVS CPU reference ──────────────────────────────────────────────────────────
@@ -397,6 +402,7 @@ impl<'a> FrameResources<'a> {
             baked_reflection_sampler: Tracked::empty(),
             baked_irradiance_sh: Tracked::empty(),
             baked_pvs: Tracked::empty(),
+            corona_emitters: Tracked::empty(),
         }
     }
 
@@ -451,6 +457,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(baked_reflection_sampler);
             reset_field!(baked_irradiance_sh);
             reset_field!(baked_pvs);
+            reset_field!(corona_emitters);
         }
     }
 }

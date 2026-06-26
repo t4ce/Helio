@@ -2181,10 +2181,12 @@ dependencies = [
  "glam 0.33.0",
  "helio",
  "helio-asset-compat",
+ "helio-pass-corona",
  "helio-pass-sdf",
  "helio-pass-taa",
  "helio-pass-terra-forge",
  "image",
+ "libhelio",
  "log",
  "pollster 0.4.0",
  "rapier3d 0.24.0",
@@ -2687,6 +2689,7 @@ dependencies = [
  "helio-bake",
  "helio-live-portal",
  "helio-pass-billboard",
+ "helio-pass-corona",
  "helio-pass-debug",
  "helio-pass-deferred-light",
  "helio-pass-depth-prepass",
@@ -2774,6 +2777,16 @@ dependencies = [
 
 [[package]]
 name = "helio-pass-billboard"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 28.0.0",
+]
+
+[[package]]
+name = "helio-pass-corona"
 version = "0.1.0"
 dependencies = [
  "bytemuck",

@@ -13,7 +13,8 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
         wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::SHADER_PRIMITIVE_INDEX | // @builtin(primitive_index) in fs
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
-        wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS; // GPU profiling timestamps via encoder
+        wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
+        wgpu::Features::VERTEX_WRITABLE_STORAGE;
     required | (adapter_features & optional)
 }
 
