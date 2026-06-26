@@ -219,9 +219,9 @@ fn cs_build_indirect() {
 // ── Vertex shader (camera-facing billboard) ─────────────────────────────────
 
 struct CameraUniforms {
-    view_proj: mat4x4<f32>,
     view: mat4x4<f32>,
     proj: mat4x4<f32>,
+    view_proj: mat4x4<f32>,
     inv_view_proj: mat4x4<f32>,
     position_near: vec4<f32>,
     forward_far: vec4<f32>,
