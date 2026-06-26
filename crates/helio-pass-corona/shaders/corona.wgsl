@@ -1,46 +1,59 @@
 // ── Corona GPU Particle System ────────────────────────────────────────────────
 //
-// Compute pipeline (in order per frame):
+// Compute pipeline (per frame):
 //   1. cs_simulate        — physics, aging, kill expired
-//   2. cs_emit            — ring-buffer spawn per emitter
-//   3. cs_compact_reset   — zero per-emitter alive counters
-//   4. cs_compact         — scatter alive indices into compact_buf sub-ranges
-//   5. cs_build_multi     — write one DrawArgs per emitter from alive counts
+//   2. cs_emit            — ring-buffer spawn per emitter (stores emitter_idx in velocity.w)
+//   3. cs_scan_local      — Hillis-Steele inclusive prefix scan per 256-block + sort-key reset
+//   4. cs_scan_blocks     — sequential cumulative sum per emitter; writes emitter_alive totals
+//   5. cs_scatter         — scatter alive indices into compact_buf + write view-depth to sort_key_buf
+//   6. cs_build_multi     — write one DrawArgs per emitter
+//   copy draw_args_staging → draw_args_buf
+//   7. cs_sort_local      — bitonic sort within 256-element blocks (shared memory)
+//   8. cs_sort_global     — one compare-swap step for large j (global memory, per dispatch)
+//   9. cs_sort_local_merge— j < 256 steps for large-k stages (shared memory, per k-stage)
 //
-// Render pipeline:
-//   vs_main reads compact_buf[instance_index] → the actual particle index,
-//   then reads particles[that_index].  Each emitter issues its own draw_indirect
-//   with first_instance = emitter.particle_offset, instance_count = alive_count.
-//   Only alive particles are drawn; the vertex shader never sees dead ones.
+// Render:
+//   vs_main reads compact_buf[ii] → particle index, looks up emitter for sprite atlas.
+//   fs_main samples 4×4 sprite atlas at the sprite selected by the emitter's texture_index.
 
-const PI: f32 = 3.14159265359;
+const PI:          f32 = 3.14159265359;
 const INV_MAX_U32: f32 = 1.0 / 4294967295.0;
+const F32_MAX:     f32 = 3.4028235e38;
+const WG:          u32 = 256u;
+const ATLAS_COLS:  u32 = 4u;
 
-// ── Shared structs ────────────────────────────────────────────────────────────
+// ── Structs ───────────────────────────────────────────────────────────────────
 
 struct GpuCoronaUniforms {
     delta_time:      f32,
     total_particles: u32,
     emitter_count:   u32,
     frame_count:     u32,
+    // Sort params: written per-dispatch via partial copy into this uniform buffer.
+    // Only valid inside cs_sort_* entry points.
+    sort_k:          u32,
+    sort_j:          u32,
+    sort_lo:         u32,
+    sort_n:          u32,
 }
 
 struct Particle {
-    pos_and_alive:     vec4<f32>,
+    pos_and_alive:     vec4<f32>,  // xyz=position, w=alive (0 or 1)
+    // velocity xyz + w=emitter_index (f32-encoded u32, written by cs_emit)
     velocity:          vec4<f32>,
     color:             vec4<f32>,
-    size_lifetime_age: vec4<f32>,
+    size_lifetime_age: vec4<f32>,  // x=size, y=unused, z=lifetime, w=age
 }
 
 struct EmitterDef {
     transform:          mat4x4<f32>,
-    emit_params:        vec4<f32>,
-    size_params:        vec4<f32>,
+    emit_params:        vec4<f32>,        // emit_rate, lifetime, lifetime_var, gravity
+    size_params:        vec4<f32>,        // start_size.xy, end_size.xy
     start_color:        vec4<f32>,
     end_color:          vec4<f32>,
     velocity:           vec4<f32>,
     velocity_variation: vec4<f32>,
-    extras:             vec4<f32>,
+    extras:             vec4<f32>,        // shape_type, radius, pad, active
     texture_index:      i32,
     particle_offset:    u32,
     particle_count:     u32,
@@ -55,25 +68,46 @@ struct DrawArgs {
     first_instance: u32,
 }
 
-// ── Bindings (shared by all entry points) ─────────────────────────────────────
-//
-// b0-b5 are used by compute entry points.
-// b6-b8 are used by vs_main / fs_main.
-// The render bind group layout includes all nine so the pipeline layout is
-// satisfied even though the VS/FS don't touch b0-b5's compute-only globals.
+struct CameraUniforms {
+    view:           mat4x4<f32>,   // offset   0
+    proj:           mat4x4<f32>,   // offset  64
+    view_proj:      mat4x4<f32>,   // offset 128
+    inv_view_proj:  mat4x4<f32>,   // offset 192
+    position_near:  vec4<f32>,
+    forward_far:    vec4<f32>,
+    jitter_frame:   vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
+}
 
-@group(0) @binding(0) var<uniform>             uniforms:        GpuCoronaUniforms;
-@group(0) @binding(1) var<storage, read_write> particles:       array<Particle>;
-@group(0) @binding(2) var<storage, read_write> emitters:        array<EmitterDef>;
-// compact_buf[emitter.particle_offset .. +alive_count] = alive particle indices
-@group(0) @binding(3) var<storage, read_write> compact_buf:     array<u32>;
-// one atomic alive-counter per emitter, reset each frame
-@group(0) @binding(4) var<storage, read_write> emitter_alive:   array<atomic<u32>>;
-// written by cs_build_multi, then CPU copies to the INDIRECT draw_args_buf
-@group(0) @binding(5) var<storage, read_write> draw_args_staging: array<DrawArgs>;
-@group(0) @binding(6) var<uniform>             camera:          CameraUniforms;
-@group(0) @binding(7) var                      particle_tex:    texture_2d<f32>;
-@group(0) @binding(8) var                      particle_sampler: sampler;
+// ── Bindings (shared across all entry points) ─────────────────────────────────
+//
+// One unified bind group layout so all pipelines share the same bind group.
+// Unused bindings for a given entry point are simply not accessed.
+
+@group(0) @binding(0)  var<uniform>             uniforms:          GpuCoronaUniforms;
+@group(0) @binding(1)  var<storage, read_write>  particles:         array<Particle>;
+@group(0) @binding(2)  var<storage, read_write>  emitters:          array<EmitterDef>;
+@group(0) @binding(3)  var<storage, read_write>  compact_buf:       array<u32>;
+// Non-atomic now; written by cs_scan_blocks, read by cs_build_multi.
+@group(0) @binding(4)  var<storage, read_write>  emitter_alive:     array<u32>;
+@group(0) @binding(5)  var<storage, read_write>  draw_args_staging: array<DrawArgs>;
+@group(0) @binding(6)  var<uniform>              camera:            CameraUniforms;
+// exclusive prefix within each 256-block (written by cs_scan_local, read by cs_scatter)
+@group(0) @binding(7)  var<storage, read_write>  prefix_buf:        array<u32>;
+// per-block alive totals (cs_scan_local) → per-block cumulative offsets (cs_scan_blocks)
+@group(0) @binding(8)  var<storage, read_write>  block_sums_buf:    array<u32>;
+// view-space depth key per compact_buf slot; reset to -F32_MAX, then written by cs_scatter
+@group(0) @binding(9)  var<storage, read_write>  sort_key_buf:      array<f32>;
+@group(0) @binding(10) var                       particle_tex:      texture_2d<f32>;
+@group(0) @binding(11) var                       particle_sampler:  sampler;
+
+// ── Workgroup shared memory ───────────────────────────────────────────────────
+
+// Used by cs_scan_local (prefix scan) and cs_sort_local / cs_sort_local_merge.
+// These entry points never run concurrently, so it's safe to share the arrays.
+var<workgroup> wg_scratch: array<u32, 256>;  // scratch for prefix scan
+var<workgroup> sh_keys:    array<f32, 256>;  // sort keys (depths)
+var<workgroup> sh_vals:    array<u32, 256>;  // sort values (compact_buf indices)
 
 // ── RNG ───────────────────────────────────────────────────────────────────────
 
@@ -83,7 +117,7 @@ fn hash(x: u32) -> u32 {
     h = (h ^ (h >> 13u)) * 0xc2b2ae35u;
     return h ^ (h >> 16u);
 }
-fn rng_f32(seed: u32) -> f32  { return f32(hash(seed)) * INV_MAX_U32; }
+fn rng_f32(seed: u32) -> f32 { return f32(hash(seed)) * INV_MAX_U32; }
 fn rng_range(seed: u32, lo: f32, hi: f32) -> f32 { return lo + rng_f32(seed) * (hi - lo); }
 
 // ── cs_simulate ───────────────────────────────────────────────────────────────
@@ -188,7 +222,8 @@ fn cs_emit(@builtin(workgroup_id) id: vec3<u32>) {
 
         var p: Particle;
         p.pos_and_alive     = vec4<f32>(spawn_pos, 1.0);
-        p.velocity          = vec4<f32>(vel, 0.0);
+        // Store emitter index in velocity.w for atlas lookup in vs_main.
+        p.velocity          = vec4<f32>(vel, f32(eidx));
         p.color             = em.start_color;
         p.size_lifetime_age = vec4<f32>(em.size_params.x, em.size_params.y, max(life, 0.01), 0.0);
         particles[pidx] = p;
@@ -197,25 +232,93 @@ fn cs_emit(@builtin(workgroup_id) id: vec3<u32>) {
     emitters[eidx].spawn_cursor = em.spawn_cursor;
 }
 
-// ── cs_compact_reset ─────────────────────────────────────────────────────────
-// One workgroup per emitter; zeroes the per-emitter alive counter.
-
-@compute @workgroup_size(1)
-fn cs_compact_reset(@builtin(workgroup_id) wid: vec3<u32>) {
-    let eidx = wid.x;
-    if eidx >= uniforms.emitter_count { return; }
-    atomicStore(&emitter_alive[eidx], 0u);
-}
-
-// ── cs_compact ───────────────────────────────────────────────────────────────
-// For each alive particle, atomically claim a slot in its emitter's
-// compact_buf sub-range [particle_offset .. particle_offset+alive_count).
-// After this pass, draw_indirect(first_instance=particle_offset,
-// instance_count=alive_count) makes vs_main read compact_buf[ii] → particle.
+// ── cs_scan_local ─────────────────────────────────────────────────────────────
+// Hillis-Steele inclusive prefix scan over alive flags within each 256-element
+// block. Writes:
+//   - prefix_buf[idx]      = exclusive prefix (alive count before this slot in block)
+//   - block_sums_buf[wid]  = total alive in this block
+//   - sort_key_buf[idx]    = -F32_MAX (sentinel for dead slots; overwritten by cs_scatter)
 
 @compute @workgroup_size(256)
-fn cs_compact(@builtin(global_invocation_id) id: vec3<u32>) {
-    let idx = id.x;
+fn cs_scan_local(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_id)  lid: vec3<u32>,
+    @builtin(workgroup_id)         wid: vec3<u32>,
+) {
+    let idx = gid.x;
+    let alive_flag = select(0u, 1u,
+        idx < uniforms.total_particles && particles[idx].pos_and_alive.w >= 0.5);
+
+    // Reset sort key sentinel so dead/stale compact_buf slots sort to the end.
+    if idx < uniforms.total_particles {
+        sort_key_buf[idx] = -F32_MAX;
+    }
+
+    wg_scratch[lid.x] = alive_flag;
+    workgroupBarrier();
+
+    // Hillis-Steele inclusive scan: O(log N) steps, O(N log N) work.
+    var step = 1u;
+    loop {
+        if step >= WG { break; }
+        let val = select(0u, wg_scratch[lid.x - step], lid.x >= step);
+        workgroupBarrier();
+        wg_scratch[lid.x] += val;
+        workgroupBarrier();
+        step <<= 1u;
+    }
+    // wg_scratch[lid.x] = inclusive prefix sum for this thread.
+
+    if lid.x == WG - 1u {
+        block_sums_buf[wid.x] = wg_scratch[WG - 1u];
+    }
+
+    // Convert inclusive to exclusive: shift right by 1.
+    let excl = select(wg_scratch[lid.x - 1u], 0u, lid.x == 0u);
+    if idx < uniforms.total_particles {
+        prefix_buf[idx] = excl;
+    }
+}
+
+// ── cs_scan_blocks ────────────────────────────────────────────────────────────
+// One workgroup per emitter. Sequentially scans the block_sums within the
+// emitter's block range to produce cumulative emitter-relative offsets.
+// After this pass:
+//   block_sums_buf[b] = how many alive particles are in blocks [block_lo .. b)
+//                       within this emitter's range.
+//   emitter_alive[eidx] = total alive particles for this emitter.
+
+@compute @workgroup_size(1)
+fn cs_scan_blocks(@builtin(workgroup_id) wid: vec3<u32>) {
+    let eidx = wid.x;
+    if eidx >= uniforms.emitter_count { return; }
+
+    let em       = emitters[eidx];
+    let block_lo = em.particle_offset / WG;
+    let block_hi = (em.particle_offset + em.particle_count + WG - 1u) / WG;
+
+    var cumsum = 0u;
+    for (var b = block_lo; b < block_hi; b++) {
+        let block_total   = block_sums_buf[b];
+        block_sums_buf[b] = cumsum;   // replace total with emitter-relative offset
+        cumsum            += block_total;
+    }
+
+    emitter_alive[eidx] = cumsum;
+}
+
+// ── cs_scatter ────────────────────────────────────────────────────────────────
+// For each alive particle, computes its position in compact_buf using the
+// block cumulative offset + local exclusive prefix (no global atomics).
+// Also writes the particle's negated view-space z to sort_key_buf at that
+// position, so bitonic sort (descending) produces back-to-front order.
+
+@compute @workgroup_size(256)
+fn cs_scatter(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(workgroup_id)         wid: vec3<u32>,
+) {
+    let idx = gid.x;
     if idx >= uniforms.total_particles { return; }
 
     let p = particles[idx];
@@ -224,47 +327,201 @@ fn cs_compact(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var e = 0u; e < uniforms.emitter_count; e++) {
         let em = emitters[e];
         if idx >= em.particle_offset && idx < em.particle_offset + em.particle_count {
-            let slot = atomicAdd(&emitter_alive[e], 1u);
-            // slot < particle_count is guaranteed since alive ≤ total in range
-            compact_buf[em.particle_offset + slot] = idx;
+            // Position within this emitter's compact sub-range:
+            //   block_sums_buf[wid.x] = alive count in emitter blocks before this one.
+            //   prefix_buf[idx]       = alive count before idx in this block.
+            let pos_in_emitter = block_sums_buf[wid.x] + prefix_buf[idx];
+            let compact_pos    = em.particle_offset + pos_in_emitter;
+
+            compact_buf[compact_pos] = idx;
+
+            // Negated view-space z: positive = far from camera.
+            // Bitonic descending sort puts max (furthest) at position 0.
+            let view_pos = camera.view * vec4<f32>(p.pos_and_alive.xyz, 1.0);
+            sort_key_buf[compact_pos] = -view_pos.z;
             return;
         }
     }
 }
 
-// ── cs_build_multi ───────────────────────────────────────────────────────────
-// One workgroup per emitter; writes a DrawArgs to the staging buffer.
-// CPU copies staging → INDIRECT draw_args_buf after this pass completes.
+// ── cs_build_multi ────────────────────────────────────────────────────────────
 
 @compute @workgroup_size(1)
 fn cs_build_multi(@builtin(workgroup_id) wid: vec3<u32>) {
     let eidx = wid.x;
     if eidx >= uniforms.emitter_count { return; }
     let em    = emitters[eidx];
-    let alive = atomicLoad(&emitter_alive[eidx]);
+    let alive = emitter_alive[eidx];
     draw_args_staging[eidx].vertex_count   = 6u;
     draw_args_staging[eidx].instance_count = alive;
     draw_args_staging[eidx].first_vertex   = 0u;
     draw_args_staging[eidx].first_instance = em.particle_offset;
 }
 
-// ── Render ────────────────────────────────────────────────────────────────────
+// ── cs_sort_local ─────────────────────────────────────────────────────────────
+// Bitonic sort within each 256-element block (all stages k=2..256 in shared
+// memory). After this pass, every 256-element sub-range is independently sorted
+// descending (max depth at position 0 within the block).
+// sort_params: sort_lo = particle_offset, sort_n = particle_count (from uniforms).
 
-struct CameraUniforms {
-    view:         mat4x4<f32>,
-    proj:         mat4x4<f32>,
-    view_proj:    mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    position_near: vec4<f32>,
-    forward_far:  vec4<f32>,
-    jitter_frame: vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
+@compute @workgroup_size(256)
+fn cs_sort_local(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id)        wid: vec3<u32>,
+) {
+    let lo     = uniforms.sort_lo;
+    let n      = uniforms.sort_n;
+    let base_t = wid.x * WG;          // emitter-relative index of this block's first element
+    let t      = base_t + lid.x;      // emitter-relative index for this thread
+    let gi     = lo + t;              // global compact_buf / sort_key_buf index
+
+    if t < n {
+        sh_keys[lid.x] = sort_key_buf[gi];
+        sh_vals[lid.x] = compact_buf[gi];
+    } else {
+        sh_keys[lid.x] = -F32_MAX;
+        sh_vals[lid.x] = 0u;
+    }
+    workgroupBarrier();
+
+    // All stages for k = 2 .. 256 using shared memory.
+    // Descending sort: position 0 = maximum.
+    // Direction at (k, t): if (t & k) == 0 → descending sub-sequence.
+    //   → swap if sh_keys[lid] < sh_keys[buddy]
+    // Direction at (k, t): if (t & k) != 0 → ascending sub-sequence.
+    //   → swap if sh_keys[lid] > sh_keys[buddy]
+    var k = 2u;
+    loop {
+        if k > WG { break; }
+        var j = k >> 1u;
+        loop {
+            if j == 0u { break; }
+            let buddy_lid = lid.x ^ j;
+            if lid.x < buddy_lid {
+                let desc   = (t & k) == 0u;
+                let a = sh_keys[lid.x];
+                let b_key = sh_keys[buddy_lid];
+                let swap   = select(a > b_key, a < b_key, desc);
+                if swap {
+                    sh_keys[lid.x]   = b_key;
+                    sh_keys[buddy_lid] = a;
+                    let va = sh_vals[lid.x];
+                    sh_vals[lid.x]   = sh_vals[buddy_lid];
+                    sh_vals[buddy_lid] = va;
+                }
+            }
+            workgroupBarrier();
+            j >>= 1u;
+        }
+        k <<= 1u;
+    }
+
+    if t < n {
+        sort_key_buf[gi] = sh_keys[lid.x];
+        compact_buf[gi]  = sh_vals[lid.x];
+    }
 }
 
+// ── cs_sort_global ────────────────────────────────────────────────────────────
+// One compare-swap step for stages where j >= 256 (global memory reads).
+// sort_k and sort_j are written into uniforms before each dispatch.
+// sort_lo = particle_offset, sort_n = particle_count.
+// Dispatch: ceil(sort_n / WG) workgroups, each thread handles one element.
+
+@compute @workgroup_size(256)
+fn cs_sort_global(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;               // emitter-relative index
+    let k = uniforms.sort_k;
+    let j = uniforms.sort_j;
+    let lo = uniforms.sort_lo;
+    let n  = uniforms.sort_n;
+
+    if i >= n { return; }
+    let buddy = i ^ j;
+    if buddy >= n || buddy <= i { return; }
+
+    let ti = lo + i;
+    let tb = lo + buddy;
+
+    let ka = sort_key_buf[ti];
+    let kb = sort_key_buf[tb];
+
+    // Descending sort: (i & k)==0 → descending sub-seq → swap if a < b.
+    let desc = (i & k) == 0u;
+    let swap = select(ka > kb, ka < kb, desc);
+    if swap {
+        sort_key_buf[ti] = kb; sort_key_buf[tb] = ka;
+        let va = compact_buf[ti];
+        compact_buf[ti] = compact_buf[tb];
+        compact_buf[tb] = va;
+    }
+}
+
+// ── cs_sort_local_merge ───────────────────────────────────────────────────────
+// For global k-stages: handles the tail steps (j = 128 down to 1) in shared
+// memory. Called once per emitter per k-stage after all global (j>=256) steps.
+// sort_k is the current stage; sort_lo and sort_n identify the emitter range.
+// Within a 256-element block during a global k-stage (k >= 512), all threads
+// in the block have the same (t & k) because k >= 256, so the direction is
+// uniform across the entire workgroup.
+
+@compute @workgroup_size(256)
+fn cs_sort_local_merge(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id)        wid: vec3<u32>,
+) {
+    let k      = uniforms.sort_k;
+    let lo     = uniforms.sort_lo;
+    let n      = uniforms.sort_n;
+    let base_t = wid.x * WG;
+    let t      = base_t + lid.x;
+    let gi     = lo + t;
+
+    if t < n {
+        sh_keys[lid.x] = sort_key_buf[gi];
+        sh_vals[lid.x] = compact_buf[gi];
+    } else {
+        sh_keys[lid.x] = -F32_MAX;
+        sh_vals[lid.x] = 0u;
+    }
+    workgroupBarrier();
+
+    // All threads in this block share the same direction because k >= 512 > 256.
+    let desc = (base_t & k) == 0u;
+
+    var j = WG >> 1u;  // start at j=128
+    loop {
+        if j == 0u { break; }
+        let buddy_lid = lid.x ^ j;
+        if lid.x < buddy_lid {
+            let a     = sh_keys[lid.x];
+            let b_key = sh_keys[buddy_lid];
+            let swap  = select(a > b_key, a < b_key, desc);
+            if swap {
+                sh_keys[lid.x]     = b_key;
+                sh_keys[buddy_lid] = a;
+                let va = sh_vals[lid.x];
+                sh_vals[lid.x]     = sh_vals[buddy_lid];
+                sh_vals[buddy_lid] = va;
+            }
+        }
+        workgroupBarrier();
+        j >>= 1u;
+    }
+
+    if t < n {
+        sort_key_buf[gi] = sh_keys[lid.x];
+        compact_buf[gi]  = sh_vals[lid.x];
+    }
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+
 struct VOut {
-    @builtin(position) pos:   vec4<f32>,
-    @location(0)       uv:    vec2<f32>,
-    @location(1)       color: vec4<f32>,
+    @builtin(position)              pos:          vec4<f32>,
+    @location(0)                    uv:           vec2<f32>,
+    @location(1)                    color:        vec4<f32>,
+    @location(2) @interpolate(flat) sprite_index: u32,
 }
 
 fn quad_corner(idx: u32) -> vec2<f32> {
@@ -285,31 +542,41 @@ fn quad_uv(idx: u32) -> vec2<f32> {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
-    // ii = first_instance + local_instance_index
-    // compact_buf[ii] is the actual particle buffer index for this draw
-    let pidx  = compact_buf[ii];
-    let p     = particles[pidx];
+    let pidx = compact_buf[ii];
+    let p    = particles[pidx];
 
-    let corner = quad_corner(vi);
-    // Extract world-space right/up from view matrix columns
     let right = vec3<f32>(camera.view[0].x, camera.view[1].x, camera.view[2].x);
     let up    = vec3<f32>(camera.view[0].y, camera.view[1].y, camera.view[2].y);
     let size  = max(p.size_lifetime_age.x, 0.001);
+    let corner = quad_corner(vi);
 
     let world_pos = p.pos_and_alive.xyz
         + right * corner.x * size
         + up    * corner.y * size;
 
+    // velocity.w holds the emitter index written by cs_emit.
+    let emitter_idx = min(u32(p.velocity.w + 0.5), uniforms.emitter_count - 1u);
+    let tex_raw     = emitters[emitter_idx].texture_index;
+    let sprite      = select(u32(tex_raw) % 16u, 0u, tex_raw < 0);
+
     var out: VOut;
-    out.pos   = camera.view_proj * vec4<f32>(world_pos, 1.0);
-    out.uv    = quad_uv(vi);
-    out.color = p.color;
+    out.pos          = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.uv           = quad_uv(vi);
+    out.color        = p.color;
+    out.sprite_index = sprite;
     return out;
 }
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    let tex   = textureSample(particle_tex, particle_sampler, in.uv);
+    // Sample the 4×4 sprite atlas. Each cell is 0.25×0.25 in UV space.
+    let col    = in.sprite_index % ATLAS_COLS;
+    let row    = in.sprite_index / ATLAS_COLS;
+    let atlas_uv = vec2<f32>(
+        (f32(col) + in.uv.x) * 0.25,
+        (f32(row) + in.uv.y) * 0.25,
+    );
+    let tex   = textureSample(particle_tex, particle_sampler, atlas_uv);
     let alpha = tex.a * in.color.a;
     if alpha < 0.005 { discard; }
     return vec4<f32>(in.color.rgb * tex.rgb, alpha);
