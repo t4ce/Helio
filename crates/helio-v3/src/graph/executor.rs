@@ -463,6 +463,11 @@ impl RenderGraph {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Graph"),
             });
+        let mut compute_encoder = scene
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Compute Graph"),
+            });
 
         let mut visible_frame_resources = *frame_resources;
 
@@ -470,7 +475,7 @@ impl RenderGraph {
             // GPU-only prebuilt path.
             if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
                 let pass_name = pass.name();
-                self.profiler.begin_gpu_pass(&mut encoder, pass_name);
+                self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
 
                 if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources) {
                     let mut pass_encoder = encoder.begin_render_pass(&desc);
@@ -479,6 +484,7 @@ impl RenderGraph {
                     let scene_resources = scene.resources();
                     let mut ctx = PassContext {
                         encoder_ptr: &mut encoder as *mut _,
+                        compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                         target,
                         depth,
                         scene: scene_resources,
@@ -497,7 +503,7 @@ impl RenderGraph {
                     pass.execute(&mut ctx)?;
                 }
 
-                self.profiler.end_gpu_pass(&mut encoder, pass_name);
+                self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
                 pass.publish(&mut visible_frame_resources);
                 continue;
             }
@@ -538,7 +544,7 @@ impl RenderGraph {
 
             // execute()
             let pass_name = pass.name();
-            self.profiler.begin_gpu_pass(&mut encoder, pass_name);
+            self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
 
             // Migrated path: executor manages render pass (pass implements render_pass_descriptor).
             if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources) {
@@ -550,6 +556,7 @@ impl RenderGraph {
                     let scene_resources = scene.resources();
                     let mut ctx = PassContext {
                         encoder_ptr: std::ptr::addr_of_mut!(encoder),
+                        compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                         target,
                         depth,
                         scene: scene_resources,
@@ -572,6 +579,7 @@ impl RenderGraph {
                 let scene_resources = scene.resources();
                 let mut ctx = PassContext {
                     encoder_ptr: std::ptr::addr_of_mut!(encoder),
+                        compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                     target,
                     depth,
                     scene: scene_resources,
@@ -590,13 +598,13 @@ impl RenderGraph {
                 pass.execute(&mut ctx)?;
             }
 
-            self.profiler.end_gpu_pass(&mut encoder, pass_name);
+            self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
 
             pass.publish(&mut visible_frame_resources);
         }
 
-        self.profiler.resolve_gpu_queries(&mut encoder);
-        scene.queue.submit([encoder.finish()]);
+        self.profiler.resolve_gpu_queries(&mut compute_encoder);
+        scene.queue.submit([compute_encoder.finish(), encoder.finish()]);
         crate::upload::finish_frame();
 
         if self.owns_device {

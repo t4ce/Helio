@@ -712,7 +712,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 1: Simulate ─────────────────────────────────────────────────
         {
-            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona Simulate"), timestamp_writes: None,
             });
             p.set_pipeline(&self.simulate_pipeline);
@@ -722,7 +722,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 2: Emit ─────────────────────────────────────────────────────
         {
-            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona Emit"), timestamp_writes: None,
             });
             p.set_pipeline(&self.emit_pipeline);
@@ -732,7 +732,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 3: Scan local (prefix scan + sort-key sentinel reset) ────────
         {
-            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona ScanLocal"), timestamp_writes: None,
             });
             p.set_pipeline(&self.scan_local_pipeline);
@@ -742,7 +742,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 4: Scan blocks (cumulative per-emitter offsets) ──────────────
         {
-            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona ScanBlocks"), timestamp_writes: None,
             });
             p.set_pipeline(&self.scan_blocks_pipeline);
@@ -752,7 +752,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 5: Scatter (compact_buf + sort_key_buf) ─────────────────────
         {
-            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona Scatter"), timestamp_writes: None,
             });
             p.set_pipeline(&self.scatter_pipeline);
@@ -762,7 +762,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 6: Build draw args ───────────────────────────────────────────
         {
-            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona BuildMulti"), timestamp_writes: None,
             });
             p.set_pipeline(&self.build_multi_pipeline);
@@ -804,7 +804,7 @@ impl RenderPass for CoronaPass {
 
             if step.j == 0 {
                 // cs_sort_local: initial block sort (k=2..256 in shared memory).
-                let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut p = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Corona SortLocal"), timestamp_writes: None,
                 });
                 p.set_pipeline(&self.sort_local_pipeline);
@@ -812,7 +812,7 @@ impl RenderPass for CoronaPass {
                 p.dispatch_workgroups(blocks, 1, 1);
             } else if step.j == u32::MAX {
                 // cs_sort_local_merge: tail steps (j=128..1) for a global k-stage.
-                let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut p = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Corona SortLocalMerge"), timestamp_writes: None,
                 });
                 p.set_pipeline(&self.sort_local_merge_pipeline);
@@ -820,7 +820,7 @@ impl RenderPass for CoronaPass {
                 p.dispatch_workgroups(blocks, 1, 1);
             } else {
                 // cs_sort_global: one compare-swap step for j >= 256.
-                let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut p = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Corona SortGlobal"), timestamp_writes: None,
                 });
                 p.set_pipeline(&self.sort_global_pipeline);

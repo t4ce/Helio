@@ -936,7 +936,7 @@ impl RenderPass for VirtualGeometryPass {
 
         // ── Cull compute pass ─────────────────────────────────────────────────
         {
-            let mut cpass = unsafe { &mut *ctx.encoder_ptr }
+            let mut cpass = unsafe { &mut *ctx.compute_encoder_ptr }
                 .begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("VG Cull"),
                     timestamp_writes: None,

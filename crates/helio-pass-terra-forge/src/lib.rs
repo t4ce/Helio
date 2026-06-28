@@ -1457,7 +1457,7 @@ impl RenderPass for TerraForgePass {
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         // Compute ray march.
         {
-            let mut cpass = unsafe { &mut *ctx.encoder_ptr }
+            let mut cpass = unsafe { &mut *ctx.compute_encoder_ptr }
                 .begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("TerraForge RayMarch"),
                     timestamp_writes: None,

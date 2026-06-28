@@ -168,6 +168,10 @@ pub struct PassContext<'a> {
     /// Access via `unsafe { &mut *ctx.encoder_ptr }`.
     pub encoder_ptr: *mut wgpu::CommandEncoder,
 
+    /// Separate compute encoder for compute dispatches (always available, even
+    /// during a render pass on the render encoder).  Access via unsafe.
+    pub compute_encoder_ptr: *mut wgpu::CommandEncoder,
+
     /// Color render target (main framebuffer or offscreen texture).
     pub target: &'a wgpu::TextureView,
 
