@@ -282,11 +282,12 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
 
     /// Resources this pass reads. Checked at graph construction time.
     /// Override to declare dependencies on prior-pass outputs.
-    fn reads(&self) -> &'static [crate::graph::ResourceSlot] { &[] }
+    /// Return graph resource name strings (e.g. `"pre_aa"`, `"gbuffer"`).
+    fn reads(&self) -> &'static [&'static str] { &[] }
 
     /// Resources this pass writes/publishes. Checked at graph construction time.
     /// Override to declare outputs for downstream passes.
-    fn writes(&self) -> &'static [crate::graph::ResourceSlot] { &[] }
+    fn writes(&self) -> &'static [&'static str] { &[] }
 
     /// Executes the pass by recording GPU commands.
     ///

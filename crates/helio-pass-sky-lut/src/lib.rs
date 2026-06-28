@@ -5,7 +5,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const LUT_WIDTH: u32 = 192;
 const LUT_HEIGHT: u32 = 108;
@@ -197,8 +197,8 @@ impl RenderPass for SkyLutPass {
         "SkyLUT"
     }
 
-    fn writes(&self) -> &'static [ResourceSlot] {
-        &[ResourceSlot::SkyLut]
+    fn writes(&self) -> &'static [&'static str] {
+        &["sky_lut"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

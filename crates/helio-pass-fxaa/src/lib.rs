@@ -7,6 +7,7 @@
 //! ## O(1) guarantee
 //! `execute()` records exactly one `draw(0..3, 0..1)`.
 
+use helio_v3::graph::ResourceBuilder;
 use helio_v3::{PassContext, RenderPass, Result as HelioResult};
 
 pub struct FxaaPass {
@@ -112,8 +113,12 @@ impl RenderPass for FxaaPass {
         "FXAA"
     }
 
-    fn reads(&self) -> &'static [helio_v3::ResourceSlot] {
-        &[helio_v3::ResourceSlot::PreAa]
+    fn reads(&self) -> &'static [&'static str] {
+        &["pre_aa"]
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.read("pre_aa");
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {

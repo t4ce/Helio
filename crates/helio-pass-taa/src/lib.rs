@@ -25,6 +25,7 @@
 //! pointer changes (i.e. on resize). No views are required at construction time.
 
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::ResourceBuilder;
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// R1/R2 low-discrepancy jitter offset for a given frame index.
@@ -389,8 +390,12 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
 impl RenderPass for TaaPass {
     fn name(&self) -> &'static str { "TAA" }
 
-    fn reads(&self) -> &'static [helio_v3::ResourceSlot] {
-        &[helio_v3::ResourceSlot::PreAa]
+    fn reads(&self) -> &'static [&'static str] {
+        &["pre_aa"]
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.read("pre_aa");
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {

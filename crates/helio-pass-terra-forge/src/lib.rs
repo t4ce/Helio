@@ -1242,8 +1242,8 @@ impl RenderPass for TerraForgePass {
         // pre_aa is auto-routed by the graph
     }
 
-    fn writes(&self) -> &'static [helio_v3::ResourceSlot] {
-        &[helio_v3::ResourceSlot::PreAa]
+    fn writes(&self) -> &'static [&'static str] {
+        &["pre_aa"]
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {

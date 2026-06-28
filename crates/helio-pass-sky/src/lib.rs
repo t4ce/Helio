@@ -333,8 +333,8 @@ impl RenderPass for SkyPass {
     fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {
     }
 
-    fn writes(&self) -> &'static [helio_v3::ResourceSlot] {
-        &[helio_v3::ResourceSlot::PreAa]
+    fn writes(&self) -> &'static [&'static str] {
+        &["pre_aa"]
     }
 
 }

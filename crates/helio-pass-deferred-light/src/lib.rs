@@ -503,26 +503,26 @@ impl RenderPass for DeferredLightPass {
         "DeferredLight"
     }
 
-    fn reads(&self) -> &'static [helio_v3::ResourceSlot] {
+    fn reads(&self) -> &'static [&'static str] {
         &[
-            helio_v3::ResourceSlot::GBuffer,
-            helio_v3::ResourceSlot::GBufferLightmapUv,
-            helio_v3::ResourceSlot::Depth,
-            helio_v3::ResourceSlot::ShadowAtlas,
-            helio_v3::ResourceSlot::StaticShadowAtlas,
-            helio_v3::ResourceSlot::ShadowSampler,
-            helio_v3::ResourceSlot::Ssao,
-            helio_v3::ResourceSlot::SkyLut,
-            helio_v3::ResourceSlot::TileLightLists,
-            helio_v3::ResourceSlot::TileLightCounts,
-            helio_v3::ResourceSlot::MainScene,
-            helio_v3::ResourceSlot::WaterCaustics,
-            helio_v3::ResourceSlot::WaterVolumes,
+            "gbuffer",
+            "gbuffer_lightmap_uv",
+            "depth",
+            "shadow_atlas",
+            "static_shadow_atlas",
+            "shadow_sampler",
+            "ssao",
+            "sky_lut",
+            "tile_light_lists",
+            "tile_light_counts",
+            "main_scene",
+            "water_caustics",
+            "water_volumes",
         ]
     }
 
-    fn writes(&self) -> &'static [helio_v3::ResourceSlot] {
-        &[helio_v3::ResourceSlot::PreAa]
+    fn writes(&self) -> &'static [&'static str] {
+        &["pre_aa"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

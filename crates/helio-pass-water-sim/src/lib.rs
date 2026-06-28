@@ -1305,21 +1305,11 @@ impl RenderPass for WaterSimPass {
         builder.write_color_raw("water_caustics", wgpu::TextureFormat::Rgba16Float, ResourceSize::Absolute { width: CAUSTICS_SIZE, height: CAUSTICS_SIZE });
     }
 
-    fn reads(&self) -> &'static [helio_v3::graph::ResourceSlot] {
-        &[
-            helio_v3::graph::ResourceSlot::GBuffer,
-            helio_v3::graph::ResourceSlot::Depth,
-            helio_v3::graph::ResourceSlot::PreAa,
-            helio_v3::graph::ResourceSlot::DepthTexture,
-        ]
+    fn reads(&self) -> &'static [&'static str] {
+        &["gbuffer", "depth", "pre_aa", "depth_texture"]
     }
-    fn writes(&self) -> &'static [helio_v3::graph::ResourceSlot] {
-        &[
-            helio_v3::graph::ResourceSlot::WaterSimTexture,
-            helio_v3::graph::ResourceSlot::WaterSimSampler,
-            helio_v3::graph::ResourceSlot::WaterCaustics,
-            helio_v3::graph::ResourceSlot::PreAa,
-        ]
+    fn writes(&self) -> &'static [&'static str] {
+        &["water_sim_texture", "water_sim_sampler", "water_caustics", "pre_aa"]
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {

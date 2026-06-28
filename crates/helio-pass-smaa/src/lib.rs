@@ -14,6 +14,7 @@
 //! (e.g. after resize). `blend` bind group is rebuilt in `on_resize()` since it references
 //! the internal `edge_view` which is recreated then.
 
+use helio_v3::graph::ResourceBuilder;
 use helio_v3::{PassContext, RenderPass, Result as HelioResult};
 
 /// SMAA pass (3 sequential fullscreen draws).
@@ -273,8 +274,12 @@ impl RenderPass for SmaaPass {
         "SMAA"
     }
 
-    fn reads(&self) -> &'static [helio_v3::ResourceSlot] {
-        &[helio_v3::ResourceSlot::PreAa]
+    fn reads(&self) -> &'static [&'static str] {
+        &["pre_aa"]
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.read("pre_aa");
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {

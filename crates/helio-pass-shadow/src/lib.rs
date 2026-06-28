@@ -47,7 +47,7 @@
 //! negligible).  Light-dirty faces use `LoadOp::Clear` + full movable geometry draws.
 
 use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -398,12 +398,12 @@ impl RenderPass for ShadowPass {
         "Shadow"
     }
 
-    fn reads(&self) -> &'static [ResourceSlot] {
-        &[ResourceSlot::MainScene]
+    fn reads(&self) -> &'static [&'static str] {
+        &["main_scene"]
     }
 
-    fn writes(&self) -> &'static [ResourceSlot] {
-        &[ResourceSlot::ShadowAtlas, ResourceSlot::ShadowSampler, ResourceSlot::StaticShadowAtlas]
+    fn writes(&self) -> &'static [&'static str] {
+        &["shadow_atlas", "shadow_sampler", "static_shadow_atlas"]
     }
 
     fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {

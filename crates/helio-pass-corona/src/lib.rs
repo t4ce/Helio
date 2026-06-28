@@ -12,6 +12,7 @@
 //!   8.  Render      — one draw_indirect per emitter; atlas sprite from emitter.texture_index
 
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::ResourceBuilder;
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -580,12 +581,14 @@ impl CoronaPass {
 impl RenderPass for CoronaPass {
     fn name(&self) -> &'static str { "Corona" }
 
-    fn reads(&self) -> &'static [helio_v3::graph::ResourceSlot] {
-        &[
-            helio_v3::graph::ResourceSlot::PreAa,
-            helio_v3::graph::ResourceSlot::FullResDepth,
-            helio_v3::graph::ResourceSlot::CoronaEmitters,
-        ]
+    fn reads(&self) -> &'static [&'static str] {
+        &["pre_aa", "full_res_depth", "corona_emitters"]
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.read("pre_aa");
+        builder.read("full_res_depth");
+        builder.read("corona_emitters");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {

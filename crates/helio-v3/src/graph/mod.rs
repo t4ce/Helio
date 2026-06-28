@@ -1,10 +1,8 @@
 mod executor;
 mod resource;
-mod resource_slot;
 
 pub use executor::RenderGraph;
-pub use resource_slot::ResourceSlot;
 pub use resource::{
-    GraphTexture, GraphTexturePool, ResSize, ResourceAllocator, TextureDescriptor,
-    ResourceAccess, ResourceDecl, ResourceBuilder, ResourceFormat, ResourceSize, ResourceHandle,
+    GraphTexture, GraphTexturePool, ResSize, ResourceAccess, ResourceAllocator, ResourceBuilder,
+    ResourceDecl, ResourceFormat, ResourceHandle, ResourceSize, TextureDescriptor,
 };

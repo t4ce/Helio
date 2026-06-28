@@ -5,6 +5,7 @@
 //! a single instanced draw call. O(1) CPU.
 
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::ResourceBuilder;
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const MAX_BILLBOARDS: u32 = 65536;
@@ -443,12 +444,14 @@ impl RenderPass for BillboardPass {
         "Billboard"
     }
 
-    fn reads(&self) -> &'static [helio_v3::graph::ResourceSlot] {
-        &[
-            helio_v3::graph::ResourceSlot::PreAa,
-            helio_v3::graph::ResourceSlot::FullResDepth,
-            helio_v3::graph::ResourceSlot::Billboards,
-        ]
+    fn reads(&self) -> &'static [&'static str] {
+        &["pre_aa", "full_res_depth", "billboards"]
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.read("pre_aa");
+        builder.read("full_res_depth");
+        builder.read("billboards");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {

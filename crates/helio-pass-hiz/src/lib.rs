@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{FrameResources, PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
+use helio_v3::{FrameResources, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use wgpu::util::DeviceExt;
 
 const WORKGROUP_SIZE: u32 = 8;
@@ -373,12 +373,12 @@ impl RenderPass for HiZBuildPass {
         "HiZBuild"
     }
 
-    fn reads(&self) -> &'static [ResourceSlot] {
-        &[ResourceSlot::Depth]
+    fn reads(&self) -> &'static [&'static str] {
+        &["depth"]
     }
 
-    fn writes(&self) -> &'static [ResourceSlot] {
-        &[ResourceSlot::HiZ, ResourceSlot::HiZSampler]
+    fn writes(&self) -> &'static [&'static str] {
+        &["hiz", "hiz_sampler"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

@@ -15,7 +15,8 @@
 //! A future OIT (Order-Independent Transparency) implementation would eliminate this sort.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
+use helio_v3::graph::ResourceBuilder;
+use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -223,8 +224,12 @@ impl RenderPass for TransparentPass {
         "Transparent"
     }
 
-    fn reads(&self) -> &'static [ResourceSlot] {
-        &[ResourceSlot::MainScene, ResourceSlot::Depth]
+    fn reads(&self) -> &'static [&'static str] {
+        &["main_scene", "depth"]
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.read("depth");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {

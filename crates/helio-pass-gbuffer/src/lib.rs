@@ -27,7 +27,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
+use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::num::NonZeroU32;
 
 /// Bindless texture array size per shader stage.
@@ -649,12 +649,12 @@ impl RenderPass for GBufferPass {
         VIEWS
     }
 
-    fn reads(&self) -> &'static [ResourceSlot] {
-        &[ResourceSlot::MainScene]
+    fn reads(&self) -> &'static [&'static str] {
+        &["main_scene"]
     }
 
-    fn writes(&self) -> &'static [ResourceSlot] {
-        &[ResourceSlot::GBuffer, ResourceSlot::GBufferLightmapUv]
+    fn writes(&self) -> &'static [&'static str] {
+        &["gbuffer", "gbuffer_lightmap_uv"]
     }
 }
 

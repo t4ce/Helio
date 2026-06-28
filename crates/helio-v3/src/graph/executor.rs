@@ -130,6 +130,11 @@ impl RenderGraph {
             .collect();
         for (i, pass) in self.passes.iter().enumerate() {
             pass.declare_resources(&mut builders[i]);
+            // Inject read declarations from legacy reads() so the graph sees
+            // every pass's resource dependencies for chain detection.
+            for &name in pass.reads() {
+                builders[i].read(name);
+            }
         }
         self.build_resource_lifetimes(&builders);
     }
@@ -335,17 +340,12 @@ impl RenderGraph {
     fn detect_subpass_chains(&mut self) {
         self.subpass_chains.clear();
         for i in 0..self.passes.len().saturating_sub(1) {
-            let writes_to: Vec<&str> = self.resources.iter()
-                .filter(|(_, rl)| rl.first_write_pass == i)
-                .map(|(name, _)| name.as_str())
-                .collect();
-            let reads_from: Vec<&str> = self.resources.iter()
-                .filter(|(_, rl)| rl.last_read_pass == i + 1 && rl.first_write_pass < i + 1)
-                .map(|(name, _)| name.as_str())
-                .collect();
-            // If any resource written by pass i is read by pass i+1, they can fuse.
-            // Conservative: only catches cases where i+1 is the LAST reader.
-            if writes_to.iter().any(|w| reads_from.contains(w)) {
+            // Check if pass i writes any resource that is read by at least one
+            // later pass (last_read_pass > i means some pass after i reads it).
+            let can_fuse = self.resources.values().any(|rl| {
+                rl.first_write_pass == i && rl.last_read_pass > i
+            });
+            if can_fuse {
                 self.subpass_chains.push(i..i + 2);
             }
         }
@@ -383,27 +383,26 @@ impl RenderGraph {
 
     pub fn validate_dependencies(&self) -> std::result::Result<(), String> {
         use std::collections::HashSet;
-        use crate::graph::ResourceSlot;
-        let mut available: HashSet<ResourceSlot> = HashSet::new();
-        available.insert(ResourceSlot::MainScene);
-        available.insert(ResourceSlot::Vg);
-        available.insert(ResourceSlot::Billboards);
-        available.insert(ResourceSlot::CoronaEmitters);
-        available.insert(ResourceSlot::DepthTexture);
+        let mut available: HashSet<&str> = HashSet::new();
+        available.insert("main_scene");
+        available.insert("vg");
+        available.insert("billboards");
+        available.insert("corona_emitters");
+        available.insert("depth_texture");
 
         for (i, pass) in self.passes.iter().enumerate() {
             let name = pass.name();
-            for &slot in pass.reads() {
-                if !available.contains(&slot) {
+            for &resource in pass.reads() {
+                if !available.contains(resource) {
                     return Err(format!(
-                        "RenderGraph validation failed: pass '{}' (index {}) reads {:?} \
+                        "RenderGraph validation failed: pass '{}' (index {}) reads '{}' \
                          but no prior pass writes it. Available: {:?}",
-                        name, i, slot, available
+                        name, i, resource, available
                     ));
                 }
             }
-            for &slot in pass.writes() {
-                available.insert(slot);
+            for &resource in pass.writes() {
+                available.insert(resource);
             }
         }
         Ok(())
@@ -413,10 +412,10 @@ impl RenderGraph {
         eprintln!("digraph RenderGraph {{");
         for (i, pass) in self.passes.iter().enumerate() {
             eprintln!("  {} [label=\"{}\"];", i, pass.name());
-            for &slot in pass.reads() {
+            for &resource in pass.reads() {
                 for j in (0..i).rev() {
-                    if self.passes[j].writes().contains(&slot) {
-                        eprintln!("  {} -> {} [label=\"{:?}\"];", j, i, slot);
+                    if self.passes[j].writes().contains(&resource) {
+                        eprintln!("  {} -> {} [label=\"{}\"];", j, i, resource);
                         break;
                     }
                 }

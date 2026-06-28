@@ -11,6 +11,7 @@
 //! 4. Final shading using field + direct samples
 
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::{ResourceBuilder, ResourceSize};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const CLIP_STACK_LEVELS: usize = 4;
@@ -524,8 +525,12 @@ impl RenderPass for HlfsPass {
         frame.pre_aa.write(&self.output_view, "HLFS");
     }
 
-    fn writes(&self) -> &'static [helio_v3::ResourceSlot] {
-        &[helio_v3::ResourceSlot::PreAa]
+    fn writes(&self) -> &'static [&'static str] {
+        &["pre_aa"]
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("pre_aa", self.output_format, ResourceSize::MatchSurface);
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {

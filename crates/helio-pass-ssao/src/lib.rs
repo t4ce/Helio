@@ -6,7 +6,7 @@
 use bytemuck::{Pod, Zeroable};
 use helio_v3::graph::ResourceBuilder;
 use helio_v3::graph::ResourceSize;
-use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const KERNEL_SIZE: usize = 64;
 const NOISE_DIM: u32 = 4;
@@ -394,8 +394,8 @@ impl RenderPass for SsaoPass {
         builder.write_color_raw("ssao", wgpu::TextureFormat::R8Unorm, ResourceSize::MatchSurface);
     }
 
-    fn writes(&self) -> &'static [ResourceSlot] {
-        &[ResourceSlot::Ssao]
+    fn writes(&self) -> &'static [&'static str] {
+        &["ssao"]
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
