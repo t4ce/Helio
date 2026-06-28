@@ -256,6 +256,9 @@ pub struct FrameResources<'a> {
     /// Number of hitboxes in water_hitboxes
     pub water_hitbox_count: u32,
 
+    /// Radiance Cascades cascade atlas texture view
+    pub rc_view: Tracked<&'a wgpu::TextureView>,
+
     /// Main depth texture (for passes that need to copy/sample it)
     pub depth_texture: Tracked<&'a wgpu::Texture>,
 
@@ -394,6 +397,7 @@ impl<'a> FrameResources<'a> {
             water_hitboxes: Tracked::empty(),
             water_hitbox_count: 0,
             depth_texture: Tracked::empty(),
+            rc_view: Tracked::empty(),
             baked_ao: Tracked::empty(),
             baked_ao_sampler: Tracked::empty(),
             baked_lightmap: Tracked::empty(),
@@ -449,6 +453,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(water_sim_sampler);
             reset_field!(water_hitboxes);
             reset_field!(depth_texture);
+            reset_field!(rc_view);
             reset_field!(baked_ao);
             reset_field!(baked_ao_sampler);
             reset_field!(baked_lightmap);

@@ -4,6 +4,8 @@
 //! O(1) CPU: single fullscreen draw.
 
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::ResourceBuilder;
+use helio_v3::graph::ResourceSize;
 use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 
 const KERNEL_SIZE: usize = 64;
@@ -63,10 +65,6 @@ pub struct SsaoPass {
     sample_kernel_buf: wgpu::Buffer,
     noise_texture: wgpu::Texture,
     noise_sampler: wgpu::Sampler,
-    pub ssao_texture: wgpu::Texture,
-    pub ssao_view: wgpu::TextureView,
-    width: u32,
-    height: u32,
     /// When set, replaces the runtime SSAO computation with a pre-baked AO texture.
     /// The pass skips GPU execution and publishes this view into `frame.ssao` instead.
     baked_ao_override: Option<std::sync::Arc<wgpu::TextureView>>,
@@ -76,8 +74,6 @@ impl SsaoPass {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
         gbuf_albedo: &wgpu::TextureView,
         gbuf_normal: &wgpu::TextureView,
         gbuf_orm: &wgpu::TextureView,
@@ -171,9 +167,6 @@ impl SsaoPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-
-        // ── SSAO output texture ────────────────────────────────────────────────
-        let (ssao_texture, ssao_view) = make_ssao_texture(device, width, height);
 
         // ── Bind group layouts ─────────────────────────────────────────────────
 
@@ -387,10 +380,6 @@ impl SsaoPass {
             sample_kernel_buf,
             noise_texture,
             noise_sampler,
-            ssao_texture,
-            ssao_view,
-            width,
-            height,
             baked_ao_override: None,
         }
     }
@@ -399,6 +388,10 @@ impl SsaoPass {
 impl RenderPass for SsaoPass {
     fn name(&self) -> &'static str {
         "SSAO"
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("ssao", wgpu::TextureFormat::R8Unorm, ResourceSize::MatchSurface);
     }
 
     fn writes(&self) -> &'static [ResourceSlot] {
@@ -410,11 +403,10 @@ impl RenderPass for SsaoPass {
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        // Use baked AO if available — avoids runtime screen-space computation entirely.
+        // The graph already populated frame.ssao with the graph-owned texture.
+        // Only override if a pre-baked AO texture is in use.
         if let Some(ref baked) = self.baked_ao_override {
             frame.ssao.write(baked.as_ref(), "SSAO");
-        } else {
-            frame.ssao.write(&self.ssao_view, "SSAO");
         }
     }
 
@@ -430,8 +422,8 @@ impl RenderPass for SsaoPass {
             power: 2.0,
             samples: KERNEL_SIZE as u32,
             noise_scale: [
-                self.width as f32 / NOISE_DIM as f32,
-                self.height as f32 / NOISE_DIM as f32,
+                ctx.width as f32 / NOISE_DIM as f32,
+                ctx.height as f32 / NOISE_DIM as f32,
             ],
             _pad: [0.0; 2],
         };
@@ -445,9 +437,11 @@ impl RenderPass for SsaoPass {
             return Ok(());
         }
 
+        let ssao_view = ctx.resources.ssao.read("SSAO").unwrap();
+
         // O(1): single fullscreen draw — GPU samples GBuffer and accumulates AO.
         let color_attachment = wgpu::RenderPassColorAttachment {
-            view: &self.ssao_view,
+            view: ssao_view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
@@ -476,14 +470,8 @@ impl RenderPass for SsaoPass {
 }
 
 impl SsaoPass {
-    /// Recreates the SSAO output texture at a new resolution (call on window resize).
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let (tex, view) = make_ssao_texture(device, width, height);
-        self.ssao_texture = tex;
-        self.ssao_view = view;
-        self.width = width;
-        self.height = height;
-    }
+    /// Resize is handled by the graph — this is a no-op.
+    pub fn resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
 
     /// Replace runtime SSAO with a pre-baked AO texture.
     ///
@@ -496,29 +484,6 @@ impl SsaoPass {
 }
 
 // ── Private helpers ────────────────────────────────────────────────────────────
-
-fn make_ssao_texture(
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-) -> (wgpu::Texture, wgpu::TextureView) {
-    let tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("SSAO"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let view = tex.create_view(&Default::default());
-    (tex, view)
-}
 
 fn gbuf_float_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {

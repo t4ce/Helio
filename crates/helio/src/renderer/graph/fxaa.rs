@@ -57,11 +57,11 @@ fn build_fxaa_graph_internal(
 
     graph.add_pass(Box::new(LightCullPass::new(device, w, h)));
 
-    add_geometry_passes(&mut graph, device, scene, &config, &perf, w, h);
+    add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
     let camera_buf = scene.gpu_scene().camera.buffer();
     let mut deferred_light_pass = DeferredLightPass::new(
-        device, queue, camera_buf, w, h, config.surface_format,
+        device, queue, camera_buf, config.surface_format,
     );
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;

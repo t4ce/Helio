@@ -30,13 +30,12 @@ pub struct OcclusionCullPass {
     pipeline:        wgpu::ComputePipeline,
     bgl:             wgpu::BindGroupLayout,
     cull_params_buf: wgpu::Buffer,
-    hiz_view:        Arc<wgpu::TextureView>,
     hiz_sampler:     Arc<wgpu::Sampler>,
 
     /// Cached bind group, invalidated when buffer pointers change.
     bind_group:     Option<wgpu::BindGroup>,
-    /// (camera_ptr, instances_ptr, indirect_ptr)
-    bind_group_key: Option<(usize, usize, usize)>,
+    /// (camera_ptr, instances_ptr, indirect_ptr, hiz_view_ptr)
+    bind_group_key: Option<(usize, usize, usize, usize)>,
     screen_width:   u32,
     screen_height:  u32,
 }
@@ -44,12 +43,10 @@ pub struct OcclusionCullPass {
 impl OcclusionCullPass {
     /// Create the occlusion-cull pass.
     ///
-    /// `hiz_view` and `hiz_sampler` are Arc-wrapped GPU resources owned by
-    /// `HiZBuildPass`. The bind group for each frame's scene buffers is built
-    /// lazily in `execute()`.
+    /// The HiZ texture view is read from `ctx.resources.hiz` each frame (routed
+    /// by the graph). `hiz_sampler` is owned by HiZBuildPass and shared via Arc.
     pub fn new(
         device: &wgpu::Device,
-        hiz_view: Arc<wgpu::TextureView>,
         hiz_sampler: Arc<wgpu::Sampler>,
         screen_width: u32,
         screen_height: u32,
@@ -156,26 +153,12 @@ impl OcclusionCullPass {
             pipeline,
             bgl,
             cull_params_buf,
-            hiz_view,
             hiz_sampler,
             bind_group:     None,
             bind_group_key: None,
             screen_width,
             screen_height,
         }
-    }
-
-    /// Update the shared HiZ texture view after HiZBuildPass recreates it on resize.
-    /// Clears the cached bind group so it gets rebuilt with the new view next frame.
-    pub fn update_hiz_view(
-        &mut self,
-        hiz_view: Arc<wgpu::TextureView>,
-        hiz_sampler: Arc<wgpu::Sampler>,
-    ) {
-        self.hiz_view = hiz_view;
-        self.hiz_sampler = hiz_sampler;
-        self.bind_group = None;
-        self.bind_group_key = None;
     }
 
     /// Update internal-resolution dimensions used by cull uniforms.
@@ -219,12 +202,15 @@ impl RenderPass for OcclusionCullPass {
             return Ok(());
         }
 
-        // Lazy bind-group rebuild: rebuild whenever any buffer pointer changes
-        // (e.g. scene grows and GrowableBuffer reallocates its wgpu::Buffer).
+        // Lazy bind-group rebuild: rebuild whenever any buffer pointer or the
+        // HiZ texture view changes (e.g. scene grows, graph reallocates on resize).
+        let hiz_view = ctx.resources.hiz.as_ref()
+            .expect("OcclusionCull: 'hiz' view not routed by graph — is HiZBuildPass declared?");
         let key = (
             ctx.scene.camera   as *const _ as usize,
             ctx.scene.instances as *const _ as usize,
             ctx.scene.indirect  as *const _ as usize,
+            hiz_view as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -245,7 +231,7 @@ impl RenderPass for OcclusionCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding:  3,
-                        resource: wgpu::BindingResource::TextureView(&self.hiz_view),
+                        resource: wgpu::BindingResource::TextureView(hiz_view),
                     },
                     wgpu::BindGroupEntry {
                         binding:  4,

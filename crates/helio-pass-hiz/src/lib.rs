@@ -14,12 +14,14 @@
 //! The finished pyramid is consumed NEXT FRAME by OcclusionCullPass (temporal
 //! approach: frame N-1 depth tests visibility of frame N geometry).
 //!
-//! `hiz_view` and `hiz_sampler` are Arc-wrapped so OcclusionCullPass can hold
-//! its own reference to the persistent texture without lifetime issues.
+//! The HiZ texture is owned by the render graph and declared via `declare_resources`.
+//! The pass recreates mip views and bind groups lazily during `execute()` from the
+//! graph-owned texture accessed via `ctx.resource_pool`.
 
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::{ResourceBuilder, ResourceSize};
 use helio_v3::{FrameResources, PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 use wgpu::util::DeviceExt;
 
@@ -45,11 +47,9 @@ struct StaticHizMetadata {
 pub struct HiZBuildPass {
     // Mip-chain downsampling pipeline
     mip_pipeline: wgpu::ComputePipeline,
-    #[allow(dead_code)]
     mip_bgl: wgpu::BindGroupLayout,
     mip_bind_groups: Vec<wgpu::BindGroup>,
-    #[allow(dead_code)]
-    mip_uniforms: Vec<wgpu::Buffer>, // own the buffers so bind groups remain valid
+    mip_uniforms: Vec<wgpu::Buffer>,
     mip_dispatch_groups: Vec<(u32, u32)>,
 
     // Depth-copy pipeline (Depth32Float -> R32Float mip-0)
@@ -58,9 +58,9 @@ pub struct HiZBuildPass {
     copy_bind_group: Option<wgpu::BindGroup>,
     copy_bind_group_key: Option<usize>,
 
-    // Shared HiZ texture resources (Arc so OcclusionCullPass can co-own)
-    pub hiz_view: Arc<wgpu::TextureView>,
+    // HiZ sampler (always owned by this pass)
     pub hiz_sampler: Arc<wgpu::Sampler>,
+    // Per-mip views created from graph-owned texture; rebuilt on resize
     mip_views: Vec<wgpu::TextureView>,
     width: u32,
     height: u32,
@@ -81,29 +81,6 @@ pub struct HiZBuildPass {
 
 impl HiZBuildPass {
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
-        let mip_count = mip_levels(width, height).min(MAX_MIP_LEVELS);
-
-        // HiZ texture
-        let hiz_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("HiZ Texture"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: mip_count,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-            view_formats: &[],
-        });
-
-        let hiz_view = Arc::new(hiz_texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("HiZ Full View"),
-            ..Default::default()
-        }));
-
         let hiz_sampler = Arc::new(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("HiZ Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -114,17 +91,6 @@ impl HiZBuildPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         }));
-
-        // Per-mip single-level views
-        let mut mip_views = Vec::with_capacity(mip_count as usize);
-        for mip in 0..mip_count {
-            mip_views.push(hiz_texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("HiZ Mip View"),
-                base_mip_level: mip,
-                mip_level_count: Some(1),
-                ..Default::default()
-            }));
-        }
 
         // Phase 2: mip-chain downsampling pipeline
         let mip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -183,50 +149,6 @@ impl HiZBuildPass {
             cache: None,
         });
 
-        // Build per-mip bind groups for mip[i]->mip[i+1] downsampling
-        let mut mip_bind_groups = Vec::with_capacity((mip_count - 1) as usize);
-        let mut mip_uniforms = Vec::with_capacity((mip_count - 1) as usize);
-        let mut mip_dispatch_groups = Vec::with_capacity((mip_count - 1) as usize);
-        for mip in 0..(mip_count - 1) {
-            let src_w = (width >> mip).max(1);
-            let src_h = (height >> mip).max(1);
-            let dst_w = (width >> (mip + 1)).max(1);
-            let dst_h = (height >> (mip + 1)).max(1);
-
-            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("HiZ Mip Uniform"),
-                contents: bytemuck::bytes_of(&HiZUniforms {
-                    src_size: [src_w, src_h],
-                    dst_size: [dst_w, dst_h],
-                }),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("HiZ Mip BG"),
-                layout: &mip_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: ub.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&mip_views[mip as usize]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(
-                            &mip_views[(mip + 1) as usize],
-                        ),
-                    },
-                ],
-            });
-            mip_uniforms.push(ub);
-            mip_bind_groups.push(bg);
-            mip_dispatch_groups.push((dst_w.div_ceil(WORKGROUP_SIZE), dst_h.div_ceil(WORKGROUP_SIZE)));
-        }
-
         // Phase 1: depth-copy pipeline
         let copy_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("HiZ Depth Copy Shader"),
@@ -276,19 +198,22 @@ impl HiZBuildPass {
             cache: None,
         });
 
+        // Mip uniforms and bind groups are built lazily from the graph-owned texture.
+        // Mip uniforms and dispatch groups (width/height-dependent only) are built
+        // in on_resize(). mip_views and mip_bind_groups need the wgpu::Texture
+        // handle which is available via ctx.resource_pool in execute().
         Self {
             mip_pipeline,
             mip_bgl,
-            mip_bind_groups,
-            mip_uniforms,
-            mip_dispatch_groups,
+            mip_bind_groups: Vec::new(),
+            mip_uniforms: Vec::new(),
+            mip_dispatch_groups: Vec::new(),
             copy_pipeline,
             copy_bgl,
             copy_bind_group: None,
             copy_bind_group_key: None,
-            hiz_view,
             hiz_sampler,
-            mip_views,
+            mip_views: Vec::new(),
             width,
             height,
             prev_camera_generation: 0,
@@ -436,43 +361,16 @@ impl RenderPass for HiZBuildPass {
         &[ResourceSlot::HiZ, ResourceSlot::HiZSampler]
     }
 
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("hiz", wgpu::TextureFormat::R32Float, ResourceSize::MatchSurface);
+    }
+
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+
+        // Rebuild uniforms and dispatch groups (width/height-dependent, no texture needed).
         let mip_count = mip_levels(width, height).min(MAX_MIP_LEVELS);
-
-        // Recreate the HiZ texture at the new resolution.
-        let hiz_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("HiZ Texture"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: mip_count,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-            view_formats: &[],
-        });
-
-        self.hiz_view = Arc::new(hiz_texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("HiZ Full View"),
-            ..Default::default()
-        }));
-
-        // Per-mip single-level views.
-        let mut mip_views = Vec::with_capacity(mip_count as usize);
-        for mip in 0..mip_count {
-            mip_views.push(hiz_texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("HiZ Mip View"),
-                base_mip_level: mip,
-                mip_level_count: Some(1),
-                ..Default::default()
-            }));
-        }
-
-        // Rebuild per-mip bind groups and dispatch sizes (reuse existing mip_bgl and mip_pipeline).
-        let mut mip_bind_groups = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
         let mut mip_uniforms = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
         let mut mip_dispatch_groups = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
         for mip in 0..(mip_count.saturating_sub(1)) {
@@ -489,39 +387,15 @@ impl RenderPass for HiZBuildPass {
                 }),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
-
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("HiZ Mip BG"),
-                layout: &self.mip_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: ub.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&mip_views[mip as usize]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(
-                            &mip_views[(mip + 1) as usize],
-                        ),
-                    },
-                ],
-            });
             mip_uniforms.push(ub);
-            mip_bind_groups.push(bg);
             mip_dispatch_groups.push((dst_w.div_ceil(WORKGROUP_SIZE), dst_h.div_ceil(WORKGROUP_SIZE)));
         }
 
-        self.mip_views = mip_views;
-        self.mip_bind_groups = mip_bind_groups;
         self.mip_uniforms = mip_uniforms;
         self.mip_dispatch_groups = mip_dispatch_groups;
-        self.width = width;
-        self.height = height;
-        // Invalidate the copy bind group so it gets rebuilt with the new HiZ texture.
+        // Clear views and bind groups — rebuilt lazily from graph-owned texture in execute().
+        self.mip_views.clear();
+        self.mip_bind_groups.clear();
         self.copy_bind_group = None;
         self.copy_bind_group_key = None;
         self.first_frame = true;
@@ -534,22 +408,62 @@ impl RenderPass for HiZBuildPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // ── HiZ Reuse optimization: skip rebuild if camera static ─────────────
-        // Use camera_generation counter to detect actual camera data changes.
-        let camera_gen = ctx.scene.camera_generation;
+        // ── Lazy init: build mip views and bind groups from graph-owned texture ──
+        if self.mip_views.is_empty() {
+            let hiz_texture = ctx.resource_pool.get_texture("hiz")
+                .expect("HiZ texture 'hiz' must be declared as a graph resource");
+            let mip_count = mip_levels(self.width, self.height).min(MAX_MIP_LEVELS);
 
-        // `self.width/height` are the authoritative internal-resolution values
-        // managed via on_resize. Do not compare against ctx.width/height here
-        // (those are full output resolution in this renderer setup).
+            // Create per-mip single-level views
+            let mut mip_views = Vec::with_capacity(mip_count as usize);
+            for mip in 0..mip_count {
+                mip_views.push(hiz_texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("HiZ Mip View"),
+                    base_mip_level: mip,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                }));
+            }
+            self.mip_views = mip_views;
+
+            // Build mip bind groups from the existing uniforms + new views
+            let mut mip_bind_groups = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
+            for mip in 0..(mip_count.saturating_sub(1)) {
+                let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("HiZ Mip BG"),
+                    layout: &self.mip_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.mip_uniforms[mip as usize].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.mip_views[mip as usize],
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.mip_views[(mip + 1) as usize],
+                            ),
+                        },
+                    ],
+                });
+                mip_bind_groups.push(bg);
+            }
+            self.mip_bind_groups = mip_bind_groups;
+        }
+
+        // ── HiZ Reuse optimization: skip rebuild if camera static ─────────────
+        let camera_gen = ctx.scene.camera_generation;
         let resolution_changed = false;
 
-        // Skip HiZ rebuild if camera hasn't changed and resolution is the same
         if !self.first_frame && camera_gen == self.prev_camera_generation && self.copy_bind_group.is_some() && !resolution_changed {
-            // Camera static and resolution unchanged - reuse existing HiZ pyramid from previous frame
             return Ok(());
         }
 
-        // Camera moved or resolution changed - update generation and rebuild pyramid
         self.first_frame = false;
         self.prev_camera_generation = camera_gen;
 
@@ -574,8 +488,6 @@ impl RenderPass for HiZBuildPass {
         }
 
         // Phase 1: copy depth -> HiZ mip-0
-        // A separate compute pass provides an implicit GPU barrier so Phase 2
-        // sees the freshly written mip-0 data.
         {
             let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HiZ DepthCopy"),
@@ -586,10 +498,9 @@ impl RenderPass for HiZBuildPass {
             let wg_x = self.width.div_ceil(WORKGROUP_SIZE);
             let wg_y = self.height.div_ceil(WORKGROUP_SIZE);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
-        } // pass drops here -> implicit GPU barrier
+        }
 
         // Phase 2: build the remaining mip levels via MAX-reduction
-        // O(log resolution) dispatches, fixed at ~10 for <= 4K resolution.
         {
             let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HiZ MipChain"),
@@ -609,10 +520,8 @@ impl RenderPass for HiZBuildPass {
     }
 
     fn publish<'a>(&'a self, frame: &mut FrameResources<'a>) {
-        // Expose the current frame's HiZ for any downstream pass that needs it.
-        // OcclusionCullPass uses its own Arc ref so it always reads the
-        // previous frame's data (temporal), not this freshly built pyramid.
-        frame.hiz.write(&*self.hiz_view, "HiZBuild");
+        // The graph routes "hiz" texture view via pre_pass_actions before execute().
+        // We only need to publish the sampler (not owned by the graph).
         frame.hiz_sampler.write(&*self.hiz_sampler, "HiZBuild");
 
         // Expose static HiZ if loaded

@@ -17,6 +17,7 @@ use gpu_types::{
     BRICK_DIM, BRICK_EMPTY, CHUNK_DIM_BRICKS, INDIR_EMPTY, INDIR_GRID_DIM, MAX_EDITS,
     MAX_LOADED_CHUNKS, MAX_MIXED_BRICKS_PER_CHUNK, WORDS_PER_BRICK,
 };
+use helio_v3::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_v3::{traits::RenderPass, PassContext, PrepareContext, Result};
 
 /// Default voxel size in world units (0.1 m = 10 cm).
@@ -254,9 +255,6 @@ pub struct TerraForgePass {
     edits: Vec<EditOp>,
     edits_dirty: bool,
 
-    // Pre-AA render target (published to frame resources so TaaPass can accumulate)
-    pre_aa_texture: wgpu::Texture,
-    pre_aa_view: wgpu::TextureView,
     surface_format: wgpu::TextureFormat,
 
     // Config
@@ -509,19 +507,6 @@ impl TerraForgePass {
             "Normal Half",
         );
 
-        // Pre-AA texture: shade output at full resolution, published to TAA.
-        let pre_aa_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("TerraForge PreAA"),
-            size: wgpu::Extent3d { width: ray_w, height: ray_h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let pre_aa_view = pre_aa_texture.create_view(&Default::default());
-
         // ── Ray march compute pipeline (9 bindings: +edit_buf) ──────────
 
         let ray_march_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -689,8 +674,6 @@ impl TerraForgePass {
             mat_view_half,
             norm_tex_half,
             norm_view_half,
-            pre_aa_texture,
-            pre_aa_view,
             surface_format,
         }
     }
@@ -1251,10 +1234,12 @@ impl RenderPass for TerraForgePass {
         "TerraForge"
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        if frame.pre_aa.is_none() {
-            frame.pre_aa.write(&self.pre_aa_view, "TerraForge");
-        }
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color("pre_aa", ResourceFormat::from(self.surface_format), ResourceSize::MatchSurface);
+    }
+
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {
+        // pre_aa is auto-routed by the graph
     }
 
     fn writes(&self) -> &'static [helio_v3::ResourceSlot] {
@@ -1455,12 +1440,13 @@ impl RenderPass for TerraForgePass {
             cpass.dispatch_workgroups((self.ray_w_half + 7) / 8, (self.ray_h_half + 7) / 8, 1);
         }
 
-        // Fullscreen shade → pre_aa (published so TaaPass can accumulate this frame).
+        // Fullscreen shade → pre_aa (graph-managed, auto-routed to TaaPass).
         {
+            let pre_aa_view = ctx.resources.pre_aa.read("TerraForge").unwrap();
             let mut rpass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TerraForge Shade"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.pre_aa_view,
+                    view: pre_aa_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1524,19 +1510,6 @@ impl RenderPass for TerraForgePass {
         self.mat_view_half = mvh;
         self.norm_tex_half = nth;
         self.norm_view_half = nvh;
-
-        // Recreate pre_aa texture at new full resolution.
-        self.pre_aa_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("TerraForge PreAA"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        self.pre_aa_view = self.pre_aa_texture.create_view(&Default::default());
     }
 }
 

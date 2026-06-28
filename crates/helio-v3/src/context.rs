@@ -191,6 +191,7 @@ pub struct PassContext<'a> {
     ///
     /// Used internally by `begin_render_pass()` and `begin_compute_pass()` to
     /// inject GPU timestamp queries. Not directly accessible to passes.
+    #[allow(dead_code)]
     pub(crate) profiler: &'a mut Profiler,
 
     /// Current frame number (starts at 0).
@@ -210,11 +211,22 @@ pub struct PassContext<'a> {
     /// Per-frame transient resource views (GBuffer, HiZ, shadow atlas, sky LUT, etc.)
     pub resources: &'a libhelio::FrameResources<'a>,
 
+    /// Subpass index within a fused render-pass chain.
+    /// 0 = not in a subpass chain (standalone render pass).
+    /// >0 = pass is part of a fused chain; calls to `begin_render_pass()`
+    /// should return the active subpass encoder instead of opening a new pass.
+    pub subpass_index: u32,
+
     /// When `false`, Helio does **not** own the wgpu device (e.g. it is owned
     /// by GPUI).  Passes must not call `device.poll(wait_indefinitely)` in
     /// this mode — the device owner drives its own polling loop and a
     /// concurrent poll from the render thread will corrupt driver state.
     pub owns_device: bool,
+
+    /// Graph-owned texture pool for accessing transient inter-pass textures.
+    /// Passes that need the raw `wgpu::Texture` handle (e.g. to create mip views)
+    /// can look it up by name: `ctx.resource_pool.get_texture("hiz")`.
+    pub resource_pool: &'a crate::graph::GraphTexturePool,
 }
 
 impl<'a> PassContext<'a> {

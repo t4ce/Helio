@@ -965,6 +965,7 @@ impl Renderer {
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
             perf_overlay_mode: self.perf_overlay_mode,
+            shadow_atlas_size: 1024,
         };
         
         let depth_start = Instant::now();
@@ -1116,6 +1117,7 @@ impl Renderer {
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
             perf_overlay_mode: self.perf_overlay_mode,
+            shadow_atlas_size: 1024,
         };
         self.graph = if self.owns_device {
             build_default_graph(

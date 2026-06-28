@@ -75,6 +75,9 @@ pub struct RendererConfig {
     pub debug_mode: u32,
     pub render_scale: f32,
     pub perf_overlay_mode: PerfOverlayMode,
+    /// Resolution of each shadow atlas face (width × height). Default 1024.
+    /// Higher values improve shadow quality at the cost of VRAM (N² scaling).
+    pub shadow_atlas_size: u32,
 }
 
 impl RendererConfig {
@@ -88,6 +91,7 @@ impl RendererConfig {
             debug_mode: 0,
             render_scale: 0.75,
             perf_overlay_mode: PerfOverlayMode::Disabled,
+            shadow_atlas_size: 1024,
         }
     }
 

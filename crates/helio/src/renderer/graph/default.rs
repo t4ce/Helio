@@ -57,11 +57,11 @@ fn build_default_graph_internal(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    add_geometry_passes(&mut graph, device, scene, &config, &perf, iw, ih);
+    add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
     let camera_buf = scene.gpu_scene().camera.buffer();
     let mut deferred_light_pass = DeferredLightPass::new(
-        device, queue, camera_buf, iw, ih, config.surface_format,
+        device, queue, camera_buf, config.surface_format,
     );
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;

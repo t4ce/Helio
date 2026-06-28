@@ -53,7 +53,7 @@ fn build_fxaa_hlfs_graph_internal(
         &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, w, h,
     );
 
-    add_geometry_passes(&mut graph, device, scene, &config, &perf, w, h);
+    add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
     let mut hlfs_pass = HlfsPass::new(device, w, h, config.surface_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);

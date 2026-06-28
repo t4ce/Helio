@@ -1,4 +1,5 @@
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::{ResourceBuilder, ResourceSize};
 use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 #[repr(C)]
@@ -34,12 +35,8 @@ pub struct DeferredLightPass {
     bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
     bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_3_key: Option<(usize, usize)>,
-    width: u32,
-    height: u32,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
-    pre_aa_texture: wgpu::Texture,
-    pre_aa_view: wgpu::TextureView,
     pre_aa_format: wgpu::TextureFormat,
     fallback_shadow_view: wgpu::TextureView,
     fallback_static_shadow_view: wgpu::TextureView,
@@ -67,11 +64,8 @@ impl DeferredLightPass {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera_buf: &wgpu::Buffer,
-        width: u32,
-        height: u32,
         pre_aa_format: wgpu::TextureFormat,
     ) -> Self {
-        let _height = height; // kept for future use (resize)
 
         // Fallback 1-entry storage buffers used when LightCullPass is absent.
         let fallback_tile_lists = device.create_buffer(&wgpu::BufferDescriptor {
@@ -320,8 +314,6 @@ impl DeferredLightPass {
             cache: None,
         });
 
-        let (pre_aa_texture, pre_aa_view) =
-            color_texture(device, width, height, pre_aa_format, "Deferred PreAA");
         let (_fallback_shadow_tex, fallback_shadow_view) = fallback_shadow_texture(device);
         let (_fallback_static_shadow_tex, fallback_static_shadow_view) = fallback_shadow_texture(device);
         let fallback_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -469,12 +461,8 @@ impl DeferredLightPass {
             bind_group_1_key: None,
             bind_group_2_key: None,
             bind_group_3_key: None,
-            width,
-            height,
             fallback_tile_lists,
             fallback_tile_counts,
-            pre_aa_texture,
-            pre_aa_view,
             pre_aa_format,
             fallback_shadow_view,
             fallback_static_shadow_view,
@@ -501,15 +489,6 @@ impl DeferredLightPass {
     /// - 11 = raw shadow atlas depth slice 0 (unmipped, linear)
     pub fn set_debug_mode(&mut self, mode: u32) {
         self.debug_mode = mode;
-    }
-
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let (texture, view) =
-            color_texture(device, width, height, self.pre_aa_format, "Deferred PreAA");
-        self.pre_aa_texture = texture;
-        self.pre_aa_view = view;
-        self.width = width;
-        self.height = height;
     }
 
     /// Set shadow quality at runtime (zero CPU cost per frame, one-time buffer write).
@@ -546,15 +525,13 @@ impl RenderPass for DeferredLightPass {
         &[helio_v3::ResourceSlot::PreAa]
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.resize(device, width, height);
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("pre_aa", self.pre_aa_format, ResourceSize::MatchSurface);
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        if frame.pre_aa.is_none() {
-            frame.pre_aa.write(&self.pre_aa_view, "DeferredLight");
-        }
-    }
+    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
+
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let main_scene_opt = ctx.frame_resources.main_scene.get();
@@ -585,7 +562,7 @@ impl RenderPass for DeferredLightPass {
             csm_splits: libhelio::CSM_SPLITS,
             debug_mode: self.debug_mode,
             _pad0: 0,
-            num_tiles_x: self.width.div_ceil(16),
+            num_tiles_x: ctx.width.div_ceil(16),
             _pad2: 0,
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -647,7 +624,7 @@ impl RenderPass for DeferredLightPass {
             .resources
             .shadow_sampler
             .get().unwrap_or(&self.fallback_shadow_sampler);
-        let rc_view = &self.fallback_rc_view;
+        let rc_view = ctx.resources.rc_view.get().unwrap_or(&self.fallback_rc_view);
         let env_view = &self.fallback_env_view;
         
         // Baked lightmap atlas from bake inject pass
@@ -742,7 +719,7 @@ impl RenderPass for DeferredLightPass {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
         };
 
-        let pre_aa_view = ctx.resources.pre_aa.get().unwrap_or(&self.pre_aa_view);
+        let pre_aa_view = ctx.resources.pre_aa.read("DeferredLight").unwrap();
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
             view: pre_aa_view,
             resolve_target: None,
@@ -828,31 +805,6 @@ fn texture_view_entry<'a>(binding: u32, view: &'a wgpu::TextureView) -> wgpu::Bi
         binding,
         resource: wgpu::BindingResource::TextureView(view),
     }
-}
-
-fn color_texture(
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-    format: wgpu::TextureFormat,
-    label: &str,
-) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
 }
 
 fn fallback_shadow_texture(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {

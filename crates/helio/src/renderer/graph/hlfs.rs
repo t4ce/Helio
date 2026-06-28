@@ -27,7 +27,7 @@ pub fn build_hlfs_graph(
         &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, iw, ih,
     );
 
-    add_geometry_passes(&mut graph, device, scene, &config, &perf, iw, ih);
+    add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
     let mut hlfs_pass = HlfsPass::new(device, iw, ih, config.surface_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);

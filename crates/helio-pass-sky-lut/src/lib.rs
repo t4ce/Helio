@@ -4,6 +4,7 @@
 //! O(1) CPU: single fullscreen draw.
 
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::{ResourceBuilder, ResourceSize};
 use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 
 const LUT_WIDTH: u32 = 192;
@@ -81,8 +82,6 @@ pub struct SkyLutPass {
     bind_group_0: wgpu::BindGroup,
     bind_group_1: wgpu::BindGroup,
     sky_uniform_buf: wgpu::Buffer,
-    pub sky_lut_texture: wgpu::Texture,
-    pub sky_lut_view: wgpu::TextureView,
 }
 
 impl SkyLutPass {
@@ -98,22 +97,6 @@ impl SkyLutPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
-        let sky_lut_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Sky LUT"),
-            size: wgpu::Extent3d {
-                width: LUT_WIDTH,
-                height: LUT_HEIGHT,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let sky_lut_view = sky_lut_texture.create_view(&Default::default());
 
         // Group 0: camera uniform
         let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -205,8 +188,6 @@ impl SkyLutPass {
             bind_group_0,
             bind_group_1,
             sky_uniform_buf,
-            sky_lut_texture,
-            sky_lut_view,
         }
     }
 }
@@ -220,8 +201,11 @@ impl RenderPass for SkyLutPass {
         &[ResourceSlot::SkyLut]
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        frame.sky_lut.write(&self.sky_lut_view, "SkyLUT");
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("sky_lut", wgpu::TextureFormat::Rgba16Float, ResourceSize::Absolute { width: LUT_WIDTH, height: LUT_HEIGHT });
+    }
+
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -253,8 +237,9 @@ impl RenderPass for SkyLutPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // O(1): single fullscreen draw — GPU integrates atmosphere per LUT texel.
+        let sky_lut_view = ctx.resources.sky_lut.read("SkyLUT").unwrap();
         let color_attachment = wgpu::RenderPassColorAttachment {
-            view: &self.sky_lut_view,
+            view: sky_lut_view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {

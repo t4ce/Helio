@@ -10,9 +10,10 @@
 //! the current Rust implementation uses a lightweight fallback compute shader that writes
 //! a black cascade atlas so downstream passes have a valid texture to sample.
 //!
-//! The `cascade_texture` / `cascade_view` public API is fully functional; swapping in
-//! the real shader requires upgrading the `wgpu` dependency and rebuilding the bind group
-//! with a `wgpu::Tlas`.
+//! The cascade atlas is graph-managed as `"rc_cascades"` (Rgba16Float, 32×256).
+//! Downstream passes sample it via `ctx.resources.rc_view`.
+//! Swapping in the real shader requires upgrading the `wgpu` dependency and rebuilding
+//! the bind group with a `wgpu::Tlas`.
 //!
 //! O(1) CPU — single `dispatch_workgroups` call.
 
@@ -21,6 +22,7 @@
 const _RC_TRACE_WGSL: &str = include_str!("../shaders/rc_trace.wgsl");
 
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::{ResourceBuilder, ResourceSize};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// Probe grid dimension (one axis). Probes are PROBE_DIM³.
@@ -50,11 +52,9 @@ struct RCDynamic {
 
 pub struct RadianceCascadesPass {
     pipeline: wgpu::ComputePipeline,
-    bind_group: wgpu::BindGroup,
+    bind_group: Option<wgpu::BindGroup>,
+    bgl: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
-    /// Main cascade atlas texture (Rgba16Float). Downstream passes sample this for GI.
-    pub cascade_texture: wgpu::Texture,
-    pub cascade_view: wgpu::TextureView,
 }
 
 /// Minimal fallback WGSL shader — clears the cascade atlas to black.
@@ -97,23 +97,6 @@ impl RadianceCascadesPass {
             source: wgpu::ShaderSource::Wgsl(FALLBACK_WGSL.into()),
         });
 
-        // ── Cascade atlas texture ─────────────────────────────────────────────
-        let cascade_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("RC Cascade"),
-            size: wgpu::Extent3d {
-                width: ATLAS_W,
-                height: ATLAS_H,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let cascade_view = cascade_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         // ── Dynamic uniform buffer ────────────────────────────────────────────
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("RC Dynamic Uniform"),
@@ -151,21 +134,6 @@ impl RadianceCascadesPass {
             ],
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("RC Fallback BG"),
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&cascade_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: uniform_buf.as_entire_binding(),
-                },
-            ],
-        });
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("RC Fallback PL"),
             bind_group_layouts: &[Some(&bgl)],
@@ -183,10 +151,9 @@ impl RadianceCascadesPass {
 
         Self {
             pipeline,
-            bind_group,
+            bind_group: None,
+            bgl,
             uniform_buf,
-            cascade_texture,
-            cascade_view,
         }
     }
 }
@@ -194,6 +161,11 @@ impl RadianceCascadesPass {
 impl RenderPass for RadianceCascadesPass {
     fn name(&self) -> &'static str {
         "RadianceCascades"
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("rc_cascades", wgpu::TextureFormat::Rgba16Float, ResourceSize::Absolute { width: ATLAS_W, height: ATLAS_H });
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -213,6 +185,28 @@ impl RenderPass for RadianceCascadesPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        // Lazily create bind group from graph-managed cascade texture.
+        if self.bind_group.is_none() {
+            let tex = ctx.resource_pool.get_texture("rc_cascades").ok_or_else(|| {
+                helio_v3::Error::InvalidPassConfig("RadianceCascades: missing rc_cascades texture".into())
+            })?;
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("RC Fallback BG"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.uniform_buf.as_entire_binding(),
+                    },
+                ],
+            }));
+        }
+
         // O(1): single compute dispatch — constant workgroup count for fixed atlas size.
         let wg_x = ATLAS_W.div_ceil(WORKGROUP_SIZE_X); // 32 / 8 = 4
         let wg_y = ATLAS_H.div_ceil(WORKGROUP_SIZE_Y); // 256 / 8 = 32
@@ -223,7 +217,7 @@ impl RenderPass for RadianceCascadesPass {
         };
         let mut pass = ctx.encoder.begin_compute_pass(&desc);
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
         Ok(())
     }

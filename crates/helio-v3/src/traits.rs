@@ -97,6 +97,7 @@ pub trait MaybeSync {}
 #[cfg(target_arch = "wasm32")]
 impl<T> MaybeSync for T {}
 
+use crate::graph::ResourceBuilder;
 use crate::{PassContext, PrepareContext, Result};
 
 /// Describes a debug visualisation mode that a render pass provides.
@@ -405,5 +406,28 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// The renderer aggregates these from all passes to build a discoverable
     /// list of debug views that can be cycled at runtime.
     fn debug_views(&self) -> &'static [DebugViewDescriptor] { &[] }
+
+    /// Declares the inter-pass resources this pass reads and writes.
+    ///
+    /// The graph uses these declarations to:
+    /// - Create and own all inter-pass textures (removing per-pass allocation)
+    /// - Route texture views through `FrameResources` automatically
+    /// - Alias non-overlapping resources to reduce peak VRAM
+    /// - Fuse linear A→B chains into subpasses (zero intermediate storage)
+    ///
+    /// Override this to declare dependencies:
+    ///
+    /// ```rust,ignore
+    /// fn declare_resources(&self, builder: &mut ResourceBuilder) {
+    ///     builder.read("gbuffer_albedo");
+    ///     builder.read("depth");
+    ///     builder.write_color("pre_aa", wgpu::TextureFormat::Rgba16Float, ResSize::Internal);
+    /// }
+    /// ```
+    ///
+    /// The default implementation returns reads/writes from the legacy
+    /// `ResourceSlot`-based [`reads`](Self::reads) / [`writes`](Self::writes)
+    /// methods for backward compatibility.
+    fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
 }
 

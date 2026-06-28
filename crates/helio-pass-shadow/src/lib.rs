@@ -46,6 +46,7 @@
 //! Light movement is still detected CPU-side via `per_caster_dirty_gen` (O(N_lights),
 //! negligible).  Light-dirty faces use `LoadOp::Clear` + full movable geometry draws.
 
+use helio_v3::graph::{ResourceBuilder, ResourceSize};
 use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 use std::sync::Arc;
 
@@ -53,9 +54,6 @@ use std::sync::Arc;
 
 /// Maximum shadow atlas faces (42 point lights × 6 cube-faces = 252; 4 CSM cascades; ceiling = 256).
 const MAX_SHADOW_FACES: usize = 256;
-
-/// Texel resolution per atlas face.  1024² balances quality and VRAM (~256 MB).
-const SHADOW_RES: u32 = 1024;
 
 /// Byte stride between consecutive face-index entries in `face_idx_buf`.
 ///
@@ -86,15 +84,11 @@ pub struct ShadowPass {
 
     // ── Dynamic shadow atlas (Movable objects only) ───────────────────────────
     face_views: Box<[wgpu::TextureView]>,
-    pub atlas_tex: wgpu::Texture,
-    pub atlas_view: wgpu::TextureView,
     bg_0: Option<wgpu::BindGroup>,
     bg_0_key: Option<(usize, usize)>,
 
     // ── Static shadow atlas (Static/Stationary objects only) ─────────────────
     static_face_views: Box<[wgpu::TextureView]>,
-    pub static_atlas_tex: wgpu::Texture,
-    pub static_atlas_view: wgpu::TextureView,
     /// Last `static_objects_generation` rendered.  `None` = never rendered.
     static_atlas_cache_gen: Option<u64>,
 
@@ -107,6 +101,9 @@ pub struct ShadowPass {
     /// `array<u32, 256>` — 0 = clean, movable_draw_count = dirty (written by ShadowDirtyPass).
     /// Used as indirect draw count for movable geometry (`multi_draw_indexed_indirect_count`).
     face_geom_count_buf: Arc<wgpu::Buffer>,
+
+    /// Resolution of each atlas face (width × height).
+    atlas_size: u32,
 
     // ── Per-caster CPU dirty tracking (light movement only) ──────────────────
     /// Per-caster last-rendered generation, compared against `per_caster_dirty_gen`.
@@ -134,6 +131,7 @@ impl ShadowPass {
         device: &wgpu::Device,
         face_dirty_buf: Arc<wgpu::Buffer>,
         face_geom_count_buf: Arc<wgpu::Buffer>,
+        atlas_size: u32,
     ) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -328,74 +326,9 @@ impl ShadowPass {
         }
         face_idx_buf.unmap();
 
-        // ── Atlas texture ──────────────────────────────────────────────────────
-        // Dynamic (Movable objects) atlas — re-rendered when Movable entities move.
-        let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Shadow/DynamicAtlas"),
-            size: wgpu::Extent3d {
-                width: SHADOW_RES,
-                height: SHADOW_RES,
-                depth_or_array_layers: MAX_SHADOW_FACES as u32,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let face_views: Box<[wgpu::TextureView]> = (0..MAX_SHADOW_FACES as u32)
-            .map(|i| {
-                atlas_tex.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("Shadow/DynamicFace"),
-                    format: Some(wgpu::TextureFormat::Depth32Float),
-                    dimension: Some(wgpu::TextureViewDimension::D2),
-                    base_array_layer: i,
-                    array_layer_count: Some(1),
-                    ..Default::default()
-                })
-            })
-            .collect();
-        let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("Shadow/DynamicAtlasArray"),
-            format: Some(wgpu::TextureFormat::Depth32Float),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-
-        // Static (Static/Stationary objects) atlas — re-rendered only when static topology changes.
-        let static_atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Shadow/StaticAtlas"),
-            size: wgpu::Extent3d {
-                width: SHADOW_RES,
-                height: SHADOW_RES,
-                depth_or_array_layers: MAX_SHADOW_FACES as u32,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let static_face_views: Box<[wgpu::TextureView]> = (0..MAX_SHADOW_FACES as u32)
-            .map(|i| {
-                static_atlas_tex.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("Shadow/StaticFace"),
-                    format: Some(wgpu::TextureFormat::Depth32Float),
-                    dimension: Some(wgpu::TextureViewDimension::D2),
-                    base_array_layer: i,
-                    array_layer_count: Some(1),
-                    ..Default::default()
-                })
-            })
-            .collect();
-        let static_atlas_view = static_atlas_tex.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("Shadow/StaticAtlasArray"),
-            format: Some(wgpu::TextureFormat::Depth32Float),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
+        // ── Face views (lazily initialized from graph-owned textures) ──────────
+        let face_views = Box::default();
+        let static_face_views = Box::default();
 
         // Comparison sampler for PCF shadow lookups in the lighting pass.
         let compare_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -420,11 +353,7 @@ impl ShadowPass {
             face_idx_buf,
             clear_indirect_buf,
             face_views,
-            atlas_tex,
-            atlas_view,
             static_face_views,
-            static_atlas_tex,
-            static_atlas_view,
             compare_sampler,
             face_dirty_buf,
             face_geom_count_buf,
@@ -434,13 +363,37 @@ impl ShadowPass {
             supports_multi_draw_count: device
                 .features()
                 .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
+            atlas_size,
         }
+    }
+
+    fn create_face_views(texture: &wgpu::Texture, label: &str) -> Box<[wgpu::TextureView]> {
+        (0..MAX_SHADOW_FACES as u32)
+            .map(|i| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some(label),
+                    format: Some(wgpu::TextureFormat::Depth32Float),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: i,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect()
     }
 }
 
 // ── RenderPass impl ───────────────────────────────────────────────────────────
 
 impl RenderPass for ShadowPass {
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        let sz = ResourceSize::Absolute { width: self.atlas_size, height: self.atlas_size };
+        builder.write_color_raw("shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
+        builder.with_layers(256);
+        builder.write_color_raw("static_shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
+        builder.with_layers(256);
+    }
+
     fn name(&self) -> &'static str {
         "Shadow"
     }
@@ -453,12 +406,10 @@ impl RenderPass for ShadowPass {
         &[ResourceSlot::ShadowAtlas, ResourceSlot::ShadowSampler, ResourceSlot::StaticShadowAtlas]
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        // The dynamic atlas contains movable-object shadows.
-        frame.shadow_atlas.write(&self.atlas_view, "Shadow");
-        frame.shadow_sampler.write(&self.compare_sampler, "Shadow");
-        // The static atlas contains static-object shadows (cached between frames).
-        frame.static_shadow_atlas.write(&self.static_atlas_view, "Shadow");
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {
+        // Graph pre-populated these; this is redundant but safe.
+        // We write from ctx.resources in execute, but publish doesn't have ctx.
+        // publish can be a no-op since the graph already populated frame.shadow_atlas.
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
@@ -469,6 +420,18 @@ impl RenderPass for ShadowPass {
         let face_count = (ctx.scene.shadow_count as usize).min(MAX_SHADOW_FACES);
         let static_draw_count = ctx.scene.shadow_static_draw_count;
         let movable_draw_count = ctx.scene.shadow_movable_draw_count;
+
+        // ── Lazily initialize per-face views from graph-owned textures ─────────
+        if self.face_views.is_empty() {
+            if let Some(tex) = ctx.resource_pool.get_texture("shadow_atlas") {
+                self.face_views = Self::create_face_views(tex, "Shadow/DynamicFace");
+            }
+        }
+        if self.static_face_views.is_empty() {
+            if let Some(tex) = ctx.resource_pool.get_texture("static_shadow_atlas") {
+                self.static_face_views = Self::create_face_views(tex, "Shadow/StaticFace");
+            }
+        }
 
         if face_count == 0 {
             self.per_caster_last_gen = [0u64; 42];

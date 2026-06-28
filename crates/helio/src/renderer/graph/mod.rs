@@ -76,7 +76,6 @@ fn add_common_early_passes(
     let camera_buf = gpu_scene.camera.buffer();
 
     let hiz_pass = HiZBuildPass::new(device, w, h);
-    let hiz_view = Arc::clone(&hiz_pass.hiz_view);
     let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
 
     let shadow_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -105,19 +104,14 @@ fn add_common_early_passes(
     let face_geom_count_buf = Arc::clone(&shadow_dirty_pass.face_geom_count_buf);
     graph.add_pass(Box::new(shadow_dirty_pass));
 
-    graph.add_pass(Box::new(ShadowPass::new(device, face_dirty_buf, face_geom_count_buf)));
+    graph.add_pass(Box::new(ShadowPass::new(device, face_dirty_buf, face_geom_count_buf, config.shadow_atlas_size)));
 
     if scene.sky_context().has_sky {
-        let sky_lut_pass = SkyLutPass::new(device, camera_buf);
-        let sky_lut_view = sky_lut_pass.sky_lut_view.clone();
-        graph.add_pass(Box::new(sky_lut_pass));
+        graph.add_pass(Box::new(SkyLutPass::new(device, camera_buf)));
 
         graph.add_pass(Box::new(SkyPass::new(
             device,
             camera_buf,
-            &sky_lut_view,
-            w,
-            h,
             config.surface_format,
         )));
     }
@@ -132,9 +126,9 @@ fn add_common_early_passes(
     )));
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(device)));
+    graph.add_pass(Box::new(hiz_pass));
     graph.add_pass(Box::new(OcclusionCullPass::new(
         device,
-        hiz_view,
         hiz_sampler,
         w,
         h,
@@ -142,8 +136,6 @@ fn add_common_early_passes(
 
     let perf_overlay_shared = PerfOverlayShared::new(device, w, h);
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
-
-    graph.add_pass(Box::new(hiz_pass));
 
     perf_overlay_shared
 }
@@ -155,12 +147,10 @@ fn add_geometry_passes(
     scene: &Scene,
     config: &RendererConfig,
     perf: &Arc<std::sync::Mutex<PerfOverlayShared>>,
-    w: u32,
-    h: u32,
 ) {
     let camera_buf = scene.gpu_scene().camera.buffer();
 
-    graph.add_pass(Box::new(GBufferPass::new(device, w, h)));
+    graph.add_pass(Box::new(GBufferPass::new(device)));
 
     let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);
     vg_pass.debug_mode = config.debug_mode;

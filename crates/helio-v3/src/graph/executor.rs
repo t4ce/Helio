@@ -1,482 +1,353 @@
-//! Render graph executor with automatic profiling.
-//!
-//! The render graph orchestrates pass execution with automatic profiling injection.
-//! It is the top-level coordinator of the rendering pipeline.
-//!
-//! # Design Pattern: Graph Execution
-//!
-//! Helio v3 uses a **linear graph executor** (future: DAG with parallelism):
-//!
-//! 1. **Add passes**: `graph.add_pass(Box::new(ShadowPass::new(...)))`
-//! 2. **Execute in order**: Passes run sequentially in the order they were added
-//! 3. **Automatic profiling**: CPU scopes and GPU timestamps injected per-pass
-//! 4. **Zero-copy contexts**: Each pass receives a `PassContext` with borrowed references
-//!
-//! # Architecture
-//!
-//! ```text
-//! RenderGraph
-//! ├── passes: Vec<Box<dyn RenderPass>>
-//! ├── profiler: Profiler (automatic CPU/GPU profiling)
-//! └── execute()
-//!     ├── Create command encoder
-//!     ├── For each pass:
-//!     │   ├── profiler.scope(pass.name()) (CPU profiling)
-//!     │   ├── pass.prepare(&ctx)          (upload uniforms)
-//!     │   ├── pass.execute(&mut ctx)      (record GPU commands)
-//!     │   │   ├── ctx.begin_render_pass() (GPU profiling)
-//!     │   │   └── GPU commands
-//!     │   └── ScopeGuard::drop()          (CPU profiling end)
-//!     └── queue.submit(encoder.finish())
-//! ```
-//!
-//! # Performance
-//!
-//! - **O(passes)**: Linear execution (future: parallel with DAG)
-//! - **Zero allocations**: Passes and profiler are pre-allocated
-//! - **Zero clones**: PassContext uses borrowed references
-//!
-//! # Example
-//!
-//! ```rust,no_run
-//! use helio_v3::{RenderGraph, GpuScene};
-//! use std::sync::Arc;
-//!
-//! let mut graph = RenderGraph::new(&device, &queue);
-//! let scene = GpuScene::new(Arc::new(device), Arc::new(queue));
-//!
-//! // Add passes (order matters)
-//! // graph.add_pass(Box::new(ShadowPass::new(&device)));
-//! // graph.add_pass(Box::new(GBufferPass::new(&device)));
-//! // graph.add_pass(Box::new(DeferredLightPass::new(&device)));
-//! // graph.add_pass(Box::new(BloomPass::new(&device)));
-//!
-//! // Render loop
-//! // loop {
-//! //     let target = surface.get_current_texture().unwrap();
-//! //     let view = target.texture.create_view(&Default::default());
-//! //     graph.execute(&scene, &view, &depth_view).unwrap();
-//! //     target.present();
-//! // }
-//! ```
-
+use crate::graph::resource::{GraphTexturePool, TextureDescriptor};
+use crate::graph::ResourceBuilder;
 use crate::{GpuScene, PassContext, PrepareContext, Profiler, RenderPass, Result};
+use libhelio::GBufferViews;
 use std::any::TypeId;
 use std::collections::HashMap;
 
-/// Type-erased routing function: wires a graph-managed transient texture view
-/// into the appropriate field of `FrameResources` each frame.
-///
-/// Registered via `RenderGraph::register_transient_route`.
-type TransientRoute = Box<
-    dyn for<'frame> Fn(
-        &'frame wgpu::TextureView,
-        &mut libhelio::FrameResources<'frame>,
-    ) + Send + Sync,
->;
-
-/// Transient texture managed by the render graph.
-///
-/// Created based on pass resource declarations, owned by the graph,
-/// and borrowed during execution via FrameResources.
-///
-/// # Performance
-///
-/// - **Zero-copy**: Texture views borrowed via references
-/// - **Persistent allocation**: Textures created once at graph construction
-struct TransientTexture {
-    /// The GPU texture (owned by the graph)
-    texture: wgpu::Texture,
-    /// Texture view for binding (created once, reused every frame)
-    view: wgpu::TextureView,
-    /// Resource name (matches declaration name)
-    name: &'static str,
+/// Per-resource metadata: which pass first writes it and which pass last reads it.
+struct ResourceLifetime {
+    first_write_pass: usize,
+    #[allow(dead_code)]
+    last_read_pass: usize,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    depth_or_array_layers: u32,
+    mip_level_count: u32,
+    extra_usage: wgpu::TextureUsages,
+    alias_group: Option<String>,
 }
 
-/// Render graph executor with automatic profiling and resource management.
-///
-/// `RenderGraph` orchestrates pass execution with:
-/// - **Automatic profiling**: CPU scopes and GPU timestamps injected per-pass
-/// - **Automatic resource management**: Transient textures created from declarations
-/// - **Zero-copy contexts**: Passes receive borrowed references to scene resources
-/// - **Linear execution**: Passes run in the order they were added
-///
-/// # Design
-///
-/// The graph maintains:
-/// 1. A list of passes (`Vec<Box<dyn RenderPass>>`)
-/// 2. Transient textures created from resource declarations
-/// 3. A profiler for automatic CPU/GPU profiling
-///
-/// # Lifecycle
-///
-/// ```text
-/// RenderGraph::new(device, queue)
-/// ├── Add passes: graph.add_pass(Box::new(...))
-/// │   ├── Call pass.declare_resources() to collect declarations
-/// │   ├── Create transient textures for declared writes
-/// │   └── Store pass in passes vector
-/// └── Execute: graph.execute(&scene, target, depth)
-///     ├── Create command encoder
-///     ├── Populate FrameResources with transient texture views
-///     ├── For each pass:
-///     │   ├── CPU scope (automatic profiling)
-///     │   ├── pass.prepare(&ctx) (upload uniforms)
-///     │   ├── pass.execute(&mut ctx) (record GPU commands)
-///     │   └── GPU timestamps (automatic profiling)
-///     └── Submit to queue
-/// ```
-///
-/// # Performance
-///
-/// - **O(passes)**: Linear execution (sequential, not parallel yet)
-/// - **Zero allocations** in render loop: All textures pre-allocated
-/// - **Zero clones**: PassContext uses borrowed references
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use helio_v3::{RenderGraph, GpuScene, RenderPass, PassContext, Result};
-/// use helio_v3::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
-/// use std::sync::Arc;
-///
-/// // Define a pass with resource declarations
-/// struct BloomPass {
-///     pipeline: wgpu::RenderPipeline,
-/// }
-///
-/// impl RenderPass for BloomPass {
-///     fn name(&self) -> &'static str { "BloomPass" }
-///
-///     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-///         builder.read("hdr_main");  // Read from deferred lighting
-///         builder.write_color("bloom_result", ResourceFormat::Rgba16Float, ResourceSize::MatchSurface);
-///     }
-///
-///     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-///         // Graph automatically provides "hdr_main" and creates "bloom_result"
-///         Ok(())
-///     }
-/// }
-///
-/// // Build the render graph
-/// let mut graph = RenderGraph::new(&device, &queue);
-/// let scene = GpuScene::new(Arc::new(device), Arc::new(queue));
-///
-/// // Add passes (graph auto-creates transient textures)
-/// // graph.add_pass(Box::new(BloomPass { pipeline }));
-///
-/// // Execute (zero allocations, auto resource routing)
-/// // graph.execute(&scene, &target_view, &depth_view);
-/// ```
+/// An action to perform on FrameResources before a pass executes.
+enum PrePassAction {
+    /// Route a single named view into the appropriate FrameResources slot.
+    Route { name: String, view: wgpu::TextureView },
+    /// Write a GBufferViews struct composed of 4 individual views.
+    Gbuffer {
+        albedo: wgpu::TextureView,
+        normal: wgpu::TextureView,
+        orm: wgpu::TextureView,
+        emissive: wgpu::TextureView,
+    },
+}
+
 pub struct RenderGraph {
-    /// List of render passes (executed in order).
-    ///
-    /// Passes are stored as trait objects (`Box<dyn RenderPass>`) for polymorphism.
     passes: Vec<Box<dyn RenderPass>>,
-
-    /// TypeId → pass index map for true O(1) `find_pass` / `find_pass_mut` lookups.
-    /// Only the first pass of each type is stored; duplicates are harmlessly ignored.
     pass_index_map: HashMap<TypeId, usize>,
-
-    /// Profiler for automatic CPU/GPU profiling.
-    ///
-    /// Injected into `PassContext` to provide automatic profiling for passes.
     profiler: Profiler,
-
-    /// Transient textures created from resource declarations.
-    ///
-    /// Maps resource name → texture/view. Created during add_pass(),
-    /// borrowed during execute() via FrameResources.
-    ///
-    /// # Performance
-    ///
-    /// - **Pre-allocated**: Created once during graph construction
-    /// - **Zero-copy**: Views borrowed via FrameResources
-    transient_textures: HashMap<&'static str, TransientTexture>,
-
-    /// Prebuilt render bundles for GPU-only passes.
-    ///
-    /// Passes may optionally record static GPU draw commands once at graph
-    /// initialization/resize. These bundles are replayed every frame, avoiding
-    /// the per-pass CPU execute dispatch for pure GPU work.
-    gpu_render_bundles: Vec<Option<wgpu::RenderBundle>>,
-
-    /// GPU device (needed for creating transient textures)
+    pool: GraphTexturePool,
+    resources: HashMap<String, ResourceLifetime>,
+    /// Per-pass index: actions to perform before that pass runs.
+    pre_pass_actions: Vec<Vec<PrePassAction>>,
     device: std::sync::Arc<wgpu::Device>,
-
-    /// Surface width (for ResourceSize::MatchSurface)
-    width: u32,
-
-    /// Surface height (for ResourceSize::MatchSurface)
-    height: u32,
-
-    /// Elapsed frame time in seconds, set by `set_delta_time()` before `execute()`.
-    ///
-    /// Forwarded into `PrepareContext::delta_time` so passes can implement
-    /// frame-rate-independent updates without querying a global clock.
+    internal_w: u32,
+    internal_h: u32,
+    output_w: u32,
+    output_h: u32,
     delta_time: f32,
-
-    /// Registered name → FrameResources routing functions for transient textures.
-    ///
-    /// The three legacy names ("pre_aa", "sky_lut", "ssao") are pre-registered in
-    /// `new()`.  Custom passes add their own routes via `register_transient_route()`.
-    resource_routes: Vec<(&'static str, TransientRoute)>,
-
-    /// Whether Helio owns the wgpu device (`true`) or it was provided externally
-    /// (`false`, e.g. by GPUI).
-    ///
-    /// When `false`, blocking `device.poll(wait_indefinitely)` calls are
-    /// replaced with a single non-blocking `PollType::Poll` tick.  The
-    /// external owner is responsible for driving the device event loop and
-    /// must call `device.poll` regularly (GPUI does this through winit's
-    /// `RedrawRequested` handler).
     owns_device: bool,
+    gpu_render_bundles: Vec<Option<wgpu::RenderBundle>>,
+    resources_allocated: bool,
+    /// Detected subpass-fusible chains. Each entry is a contiguous range of
+    /// pass indices whose resources could theoretically share a single render
+    /// pass. Currently unused — actual fusion requires a new `RenderPass` method
+    /// so the executor can open one render pass and call `next_subpass()` between
+    /// passes instead of each pass calling `ctx.begin_render_pass()`.
+    subpass_chains: Vec<std::ops::Range<usize>>,
 }
 
 impl RenderGraph {
-    /// Creates a new render graph.
-    ///
-    /// Initializes an empty pass list, profiler, and prepares for transient texture creation.
-    ///
-    /// # Parameters
-    ///
-    /// - `device`: GPU device for creating profiler query sets and transient textures
-    /// - `queue`: GPU queue (reserved for async profiling readback)
-    ///
-    /// # Performance
-    ///
-    /// - **O(1)**: Initializes empty vectors and profiler
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use helio_v3::RenderGraph;
-    /// use std::sync::Arc;
-    ///
-    /// let graph = RenderGraph::new(&Arc::new(device), &queue);
-    /// ```
     pub fn new(device: &std::sync::Arc<wgpu::Device>, queue: &wgpu::Queue) -> Self {
-        // Pre-register the three built-in transient routes so existing graphs
-        // that rely on these names continue to work without any changes.
-        let mut resource_routes: Vec<(&'static str, TransientRoute)> = Vec::new();
-        resource_routes.push(("pre_aa",  Box::new(|view, fr| fr.pre_aa.write(view, "TransientTexture"))));
-        resource_routes.push(("sky_lut", Box::new(|view, fr| fr.sky_lut.write(view, "TransientTexture"))));
-        resource_routes.push(("ssao",    Box::new(|view, fr| fr.ssao.write(view, "TransientTexture"))));
-
         Self {
             passes: Vec::new(),
             pass_index_map: HashMap::new(),
             profiler: Profiler::new(device, queue),
-            transient_textures: HashMap::new(),
+            pool: GraphTexturePool::new(),
+            resources: HashMap::new(),
+            pre_pass_actions: Vec::new(),
             device: device.clone(),
-            width: 0,  // Set via set_render_size() before first execute()
-            height: 0, // Set via set_render_size() before first execute()
+            internal_w: 0,
+            internal_h: 0,
+            output_w: 0,
+            output_h: 0,
             delta_time: 0.0,
-            resource_routes,
-            gpu_render_bundles: Vec::new(),
             owns_device: true,
+            gpu_render_bundles: Vec::new(),
+            resources_allocated: false,
+            subpass_chains: Vec::new(),
         }
     }
 
-    /// Creates a render graph that operates against an **externally-owned** wgpu device.
-    ///
-    /// Identical to [`new`](Self::new) except that blocking `device.poll` calls
-    /// are replaced with a single non-blocking tick.  The caller (e.g. GPUI) is
-    /// responsible for driving the device event loop; Helio must never call
-    /// `poll(wait_indefinitely)` on a device it does not own or it will race
-    /// with the owner's event loop and corrupt driver state ("Parent device is
-    /// lost" on DX12/Vulkan).
-    ///
-    /// # When to use
-    ///
-    /// Use this whenever you pass `surface_handle.device().clone()` (or any
-    /// device you did not create yourself) to `Renderer::new_with_external_device`.
     pub fn new_with_external_device(device: &std::sync::Arc<wgpu::Device>, queue: &wgpu::Queue) -> Self {
         let mut graph = Self::new(device, queue);
         graph.owns_device = false;
         graph
     }
 
-    /// Sets the elapsed frame time (seconds) forwarded to `PrepareContext::delta_time`.
-    ///
-    /// Call once per frame, **before** `execute()`.  The high-level `Renderer` does
-    /// this automatically.  Direct `RenderGraph` users should call this themselves:
-    ///
-    /// ```rust,ignore
-    /// let dt = last_frame.elapsed().as_secs_f32().min(0.1);
-    /// last_frame = Instant::now();
-    /// graph.set_delta_time(dt);
-    /// graph.execute(&scene, &target, &depth)?;
-    /// ```
     pub fn set_delta_time(&mut self, dt: f32) {
         self.delta_time = dt;
     }
 
-    /// Registers a routing function that populates a `FrameResources` field from
-    /// a graph-managed transient texture each frame.
-    ///
-    /// Call this in your graph builder after adding a pass that declares a
-    /// transient texture write.  Without a route, the texture is created and
-    /// resized correctly but never wired into `ctx.frame` for downstream passes.
-    ///
-    /// The three built-in names (`"pre_aa"`, `"sky_lut"`, `"ssao"`) are already
-    /// registered in `RenderGraph::new()` for backward compatibility.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// graph.register_transient_route("ssr_result", |view, fr| {
-    ///     fr.ssr_result = Some(view);
-    /// });
-    /// ```
-    pub fn register_transient_route<F>(&mut self, name: &'static str, route: F)
-    where
-        F: for<'frame> Fn(
-                &'frame wgpu::TextureView,
-                &mut libhelio::FrameResources<'frame>,
-            ) + Send + Sync + 'static,
-    {
-        self.resource_routes.push((name, Box::new(route)));
+    // ── Declaration collection ──────────────────────────────────────────
+
+    fn collect_declarations(&mut self) {
+        self.resources.clear();
+        let mut builders: Vec<ResourceBuilder> = (0..self.passes.len())
+            .map(|_| ResourceBuilder::new())
+            .collect();
+        for (i, pass) in self.passes.iter().enumerate() {
+            pass.declare_resources(&mut builders[i]);
+        }
+        self.build_resource_lifetimes(&builders);
     }
 
-    // TODO: Automate the additional calls of this method internally such that
-    //       the end user only ever calls it at resize time. Document this when
-    //       it is confirmed to be the case.
-    /// Sets the render target size and recreates transient textures.
-    ///
-    /// Must be called after adding passes and before first execute().
-    /// Call again when window is resized to recreate size-dependent textures.
-    ///
-    /// # Parameters
-    ///
-    /// - `width`: Render target width in pixels
-    /// - `height`: Render target height in pixels
-    ///
-    /// # Performance
-    ///
-    /// - **O(transient_textures)**: Recreates all graph-managed textures
-    /// - Call only on resize, not every frame
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use helio_v3::RenderGraph;
-    /// # use std::sync::Arc;
-    /// # let device = Arc::new(todo!());
-    /// # let queue = todo!();
-    /// let mut graph = RenderGraph::new(&device, &queue);
-    /// // Add passes...
-    /// graph.set_render_size(1920, 1080);  // Before first execute()
-    /// ```
-    pub fn set_render_size(&mut self, width: u32, height: u32) {
-        if self.width == width && self.height == height {
-            return; // No change, avoid recreation
+    fn build_resource_lifetimes(&mut self, builders: &[ResourceBuilder]) {
+        #[derive(Clone)]
+        struct DeclWrite {
+            name: String,
+            format: Option<wgpu::TextureFormat>,
+            size: crate::graph::ResourceSize,
+            pass_index: usize,
+            layers: u32,
+            extra_usage: wgpu::TextureUsages,
         }
-        self.width = width;
-        self.height = height;
+        let mut writes: Vec<DeclWrite> = Vec::new();
+
+        for (i, builder) in builders.iter().enumerate() {
+            for d in builder.declarations() {
+                if matches!(d.access, crate::graph::ResourceAccess::Write) {
+                    let fmt = d.format.map(|f| f.to_wgpu());
+                    writes.push(DeclWrite {
+                        name: d.name.to_string(),
+                        format: fmt,
+                        size: d.size.unwrap_or(crate::graph::ResourceSize::MatchSurface),
+                        pass_index: i,
+                        layers: d.layers,
+                        extra_usage: d.extra_usage,
+                    });
+                }
+            }
+        }
+
+        for w in &writes {
+            let mut last_read = w.pass_index;
+            for (j, builder) in builders.iter().enumerate() {
+                for d in builder.declarations() {
+                    if d.access == crate::graph::ResourceAccess::Read && d.name == w.name && j > last_read {
+                        last_read = j;
+                    }
+                }
+            }
+
+            let (width, height) = match w.size {
+                crate::graph::ResourceSize::MatchSurface => (self.output_w, self.output_h),
+                crate::graph::ResourceSize::Absolute { width, height } => (width, height),
+                crate::graph::ResourceSize::Scaled { divisor } => {
+                    (self.output_w / divisor.max(1), self.output_h / divisor.max(1))
+                }
+            };
+            let fmt = w.format.unwrap_or(wgpu::TextureFormat::Rgba16Float);
+
+            let mip_level_count = if fmt == wgpu::TextureFormat::R32Float {
+                let max_dim = width.max(height);
+                (u32::BITS - max_dim.leading_zeros()).max(1).min(12)
+            } else {
+                1
+            };
+
+            self.resources.entry(w.name.clone()).or_insert(ResourceLifetime {
+                first_write_pass: w.pass_index,
+                last_read_pass: last_read,
+                format: fmt,
+                width,
+                height,
+                depth_or_array_layers: w.layers.max(1),
+                mip_level_count,
+                extra_usage: w.extra_usage,
+                alias_group: None,
+            });
+        }
+    }
+
+    // ── Texture allocation ──────────────────────────────────────────────
+
+    fn allocate_textures(&mut self) {
+        self.pre_pass_actions.clear();
+        if self.resources.is_empty() {
+            return;
+        }
+
+        // Allocate all textures into the pool.
+        for (name, rl) in &self.resources {
+            let usage = if rl.format == wgpu::TextureFormat::R32Float {
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING
+            } else {
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+            } | rl.extra_usage;
+            let tex_desc = TextureDescriptor {
+                name: name.clone(),
+                format: rl.format,
+                width: rl.width,
+                height: rl.height,
+                depth_or_array_layers: rl.depth_or_array_layers,
+                mip_level_count: rl.mip_level_count,
+                sample_count: 1,
+                usage,
+                alias_group: rl.alias_group.clone(),
+            };
+            self.pool.allocate(&self.device, tex_desc);
+        }
+
+        // Build per-pass pre-populate actions.
+        let mut actions: Vec<Vec<PrePassAction>> = (0..self.passes.len()).map(|_| Vec::new()).collect();
+        for (name, rl) in &self.resources {
+            let pi = rl.first_write_pass;
+            if pi >= actions.len() { continue; }
+            if let Some(view) = self.pool.get_view(name) {
+                actions[pi].push(PrePassAction::Route {
+                    name: name.clone(),
+                    view: wgpu::TextureView::clone(view),
+                });
+            }
+        }
+
+        // Post-process: detect compound resources (e.g. GBuffer) and replace
+        // individual Route actions with a single Gbuffer action.
+        for pi in 0..actions.len() {
+            let mut albedo_idx = None;
+            let mut normal_idx = None;
+            let mut orm_idx = None;
+            let mut emissive_idx = None;
+
+            for (j, action) in actions[pi].iter().enumerate() {
+                if let PrePassAction::Route { name, .. } = action {
+                    match name.as_str() {
+                        "gbuffer_albedo" => albedo_idx = Some(j),
+                        "gbuffer_normal" => normal_idx = Some(j),
+                        "gbuffer_orm" => orm_idx = Some(j),
+                        "gbuffer_emissive" => emissive_idx = Some(j),
+                        _ => {}
+                    }
+                }
+            }
+
+            if let (Some(a), Some(n), Some(o), Some(e)) = (albedo_idx, normal_idx, orm_idx, emissive_idx) {
+                // Extract the views. We need to take ownership; since the Vec
+                // will be rebuilt, we clone them from the existing Route entries.
+                let albedo_v = match &actions[pi][a] { PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view), _ => unreachable!() };
+                let normal_v = match &actions[pi][n] { PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view), _ => unreachable!() };
+                let orm_v = match &actions[pi][o] { PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view), _ => unreachable!() };
+                let emissive_v = match &actions[pi][e] { PrePassAction::Route { view, .. } => wgpu::TextureView::clone(view), _ => unreachable!() };
+
+                // Remove the individual Route entries (pop larger indices first).
+                let mut indices = vec![a, n, o, e];
+                indices.sort_by(|a, b| b.cmp(a));
+                for idx in indices {
+                    actions[pi].remove(idx);
+                }
+
+                // Add the compound Gbuffer entry.
+                actions[pi].push(PrePassAction::Gbuffer {
+                    albedo: albedo_v,
+                    normal: normal_v,
+                    orm: orm_v,
+                    emissive: emissive_v,
+                });
+            }
+        }
+
+        self.pre_pass_actions = actions;
+    }
+
+    // ── Public API ──────────────────────────────────────────────────────
+
+    pub fn set_render_size(&mut self, width: u32, height: u32) {
+        let internal_w = width;
+        let internal_h = height;
+        if self.internal_w == internal_w && self.internal_h == internal_h && self.resources_allocated {
+            return;
+        }
+        self.internal_w = internal_w;
+        self.internal_h = internal_h;
+        self.output_w = width;
+        self.output_h = height;
+
+        self.pool.clear();
+        self.collect_declarations();
+        self.allocate_textures();
+        self.detect_subpass_chains();
+        self.resources_allocated = true;
+
         for pass in &mut self.passes {
             pass.on_resize(&self.device, width, height);
         }
-        self.recreate_transient_textures();
         self.rebuild_gpu_render_bundles();
     }
 
-    /// Initialise the graph's render dimensions and create transient textures **without**
-    /// calling `on_resize` on any pass.
-    ///
-    /// Use this instead of `set_render_size` when constructing a graph whose passes
-    /// have already been built at the correct resolution.  Calling `set_render_size`
-    /// at construction time would invoke `on_resize` on every pass, potentially
-    /// overwriting their constructor-provided sizes with the wrong (e.g. full-output)
-    /// dimensions.
-    ///
-    /// During an actual window resize use `set_render_size` as normal.
     pub fn init_transients(&mut self, width: u32, height: u32) {
-        self.width = width;
-        self.height = height;
-        self.recreate_transient_textures();
+        self.internal_w = width;
+        self.internal_h = height;
+        self.output_w = width;
+        self.output_h = height;
+        self.pool.clear();
+        self.collect_declarations();
+        self.allocate_textures();
+        self.detect_subpass_chains();
+        self.resources_allocated = true;
+        for pass in &mut self.passes {
+            pass.on_resize(&self.device, width, height);
+        }
         self.rebuild_gpu_render_bundles();
     }
 
-    /// Adds a render pass to the graph.
-    ///
-    /// Collects resource declarations from the pass and prepares for transient texture creation.
-    /// Transient textures are created when `set_render_size()` is called.
-    ///
-    /// Passes are executed in the order they are added. For a typical deferred pipeline:
-    /// 1. Shadow passes (depth-only)
-    /// 2. GBuffer pass (geometry)
-    /// 3. Deferred lighting pass (fullscreen quad)
-    /// 4. Post-process passes (bloom, TAA, FXAA, etc.)
-    ///
-    /// # Parameters
-    ///
-    /// - `pass`: Boxed trait object implementing `RenderPass`
-    ///
-    /// # Performance
-    ///
-    /// - **O(1)**: Appends to vector (amortized)
-    /// - Declarations collected but textures not created until set_render_size()
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use helio_v3::{RenderGraph, RenderPass, PassContext, Result};
-    /// # use helio_v3::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
-    /// # struct DeferredLightPass;
-    /// # impl RenderPass for DeferredLightPass {
-    /// #     fn name(&self) -> &'static str { "DeferredLightPass" }
-    /// #     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-    /// #         builder.write_color("hdr_main", ResourceFormat::Rgba16Float, ResourceSize::MatchSurface);
-    /// #     }
-    /// #     fn execute(&mut self, _: &mut PassContext) -> Result<()> { Ok(()) }
-    /// # }
-    /// # use std::sync::Arc;
-    /// # let device = Arc::new(todo!());
-    /// # let queue = todo!();
-    /// # let mut graph = RenderGraph::new(&device, &queue);
-    /// graph.add_pass(Box::new(DeferredLightPass));
-    /// graph.set_render_size(1920, 1080);  // Creates transient textures
-    /// ```
+    /// Detect adjacent passes where the first writes a resource the second reads.
+    /// These CAN be fused into a single render pass with `next_subpass()` but
+    /// actual fusion requires a new `RenderPass` method so the executor opens
+    /// one render pass and calls `next_subpass()` between fused passes instead
+    /// of each pass calling `ctx.begin_render_pass()` independently.
+    fn detect_subpass_chains(&mut self) {
+        self.subpass_chains.clear();
+        for i in 0..self.passes.len().saturating_sub(1) {
+            let writes_to: Vec<&str> = self.resources.iter()
+                .filter(|(_, rl)| rl.first_write_pass == i)
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let reads_from: Vec<&str> = self.resources.iter()
+                .filter(|(_, rl)| rl.last_read_pass == i + 1 && rl.first_write_pass < i + 1)
+                .map(|(name, _)| name.as_str())
+                .collect();
+            // If any resource written by pass i is read by pass i+1, they can fuse.
+            // Conservative: only catches cases where i+1 is the LAST reader.
+            if writes_to.iter().any(|w| reads_from.contains(w)) {
+                self.subpass_chains.push(i..i + 2);
+            }
+        }
+    }
+
     pub fn add_pass(&mut self, pass: Box<dyn RenderPass>) {
-        // Note: We just push the pass for now. Declarations are collected
-        // and textures created in set_render_size() by iterating all passes.
         let type_id = pass.as_any().type_id();
-        // Only store the first occurrence so find_pass() returns the first matching pass.
         self.pass_index_map.entry(type_id).or_insert(self.passes.len());
         self.passes.push(pass);
         self.gpu_render_bundles.push(None);
     }
 
-    /// Returns a mutable reference to the first pass of type `T`, if present.
-    ///
-    /// Uses `pass_index_map` for true O(1) lookup by `TypeId`.
     pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
         let idx = *self.pass_index_map.get(&TypeId::of::<T>())?;
         self.passes[idx].as_any_mut().downcast_mut::<T>()
     }
 
-    /// Returns an immutable reference to the first pass of type `T`, if present.
-    ///
-    /// Uses `pass_index_map` for true O(1) lookup by `TypeId`.
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
         let idx = *self.pass_index_map.get(&TypeId::of::<T>())?;
         self.passes[idx].as_any().downcast_ref::<T>()
     }
 
-    /// Returns mutable references to **all** passes of type `T`.
-    ///
-    /// Unlike `find_pass_mut`, which returns only the first match, this iterates
-    /// the full pass list. Use when multiple instances of the same pass type exist
-    /// in the graph (e.g., two `DebugDrawPass` nodes).
     pub fn iter_passes_mut<T: RenderPass + 'static>(&mut self) -> impl Iterator<Item = &mut T> {
         self.passes
             .iter_mut()
             .filter_map(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
-    /// Collects all debug view descriptors from every pass in the graph.
     pub fn collect_debug_views(&self) -> Vec<crate::DebugViewDescriptor> {
         self.passes
             .iter()
@@ -484,19 +355,15 @@ impl RenderGraph {
             .collect()
     }
 
-    /// Validates that all pass resource dependencies are satisfied.
-    /// Called once after all passes are added to the graph.
-    /// Panics at startup with a clear message on invalid orderings.
     pub fn validate_dependencies(&self) -> std::result::Result<(), String> {
         use std::collections::HashSet;
-        let mut available: HashSet<super::ResourceSlot> = HashSet::new();
-
-        // Resources provided by the Renderer from the start
-        available.insert(super::ResourceSlot::MainScene);
-        available.insert(super::ResourceSlot::Vg);
-        available.insert(super::ResourceSlot::Billboards);
-        available.insert(super::ResourceSlot::CoronaEmitters);
-        available.insert(super::ResourceSlot::DepthTexture);
+        use crate::graph::ResourceSlot;
+        let mut available: HashSet<ResourceSlot> = HashSet::new();
+        available.insert(ResourceSlot::MainScene);
+        available.insert(ResourceSlot::Vg);
+        available.insert(ResourceSlot::Billboards);
+        available.insert(ResourceSlot::CoronaEmitters);
+        available.insert(ResourceSlot::DepthTexture);
 
         for (i, pass) in self.passes.iter().enumerate() {
             let name = pass.name();
@@ -516,7 +383,6 @@ impl RenderGraph {
         Ok(())
     }
 
-    /// Prints a DOT-format dependency graph to stderr for visualization.
     pub fn dump_dependency_graph(&self) {
         eprintln!("digraph RenderGraph {{");
         for (i, pass) in self.passes.iter().enumerate() {
@@ -533,95 +399,10 @@ impl RenderGraph {
         eprintln!("}}");
     }
 
-    /// Returns a reference to the profiler for reading timing data.
-    ///
-    /// Use this to access CPU and GPU profiling results after calling `execute()`.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use helio_v3::RenderGraph;
-    /// # let mut graph = RenderGraph::new(&device, &queue);
-    /// graph.execute(&scene, &target, &depth).unwrap();
-    ///
-    /// // Print timing results
-    /// graph.profiler().print_frame_timings();
-    ///
-    /// // Or access raw data
-    /// for (name, duration) in graph.profiler().get_cpu_timings() {
-    ///     println!("{}: {:?}", name, duration);
-    /// }
-    /// ```
     pub fn profiler(&self) -> &Profiler {
         &self.profiler
     }
 
-    /// Executes the render graph with automatic profiling.
-    ///
-    /// This is the main entry point for rendering. It:
-    /// 1. Creates a command encoder
-    /// 2. Executes each pass in order with automatic profiling
-    /// 3. Submits the command buffer to the GPU queue
-    ///
-    /// # Parameters
-    ///
-    /// - `scene`: GPU scene with dirty-tracked state (must call `scene.flush()` first)
-    /// - `target`: Color render target (swapchain texture or offscreen buffer)
-    /// - `depth`: Depth/stencil buffer (shared across all passes)
-    ///
-    /// # Performance
-    ///
-    /// - **O(passes)**: Linear execution (sequential, not parallel yet)
-    /// - **Zero allocations**: Encoder and context are stack-allocated
-    /// - **Zero clones**: All resource access is by reference
-    ///
-    /// # Profiling
-    ///
-    /// - CPU scopes created automatically for each pass (using `pass.name()`)
-    /// - GPU timestamps injected via `PassContext::begin_render_pass()`
-    /// - Results exported to `helio-live-portal` for real-time telemetry
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if any pass fails (rare - typically shader compilation errors).
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use helio_v3::{RenderGraph, GpuScene};
-    /// # use std::sync::Arc;
-    /// # let mut graph = RenderGraph::new(&device, &queue);
-    /// # let mut scene = GpuScene::new(Arc::new(device), Arc::new(queue));
-    /// # let target = &view;
-    /// # let depth = &depth_view;
-    /// // Update scene objects
-    /// // scene.lights.add(light);
-    /// // scene.meshes.update(id, mesh);
-    ///
-    /// // Flush changes to GPU (zero-cost if nothing changed)
-    /// scene.flush();
-    ///
-    /// // Execute render graph (automatic profiling)
-    /// graph.execute(&scene, target, depth).unwrap();
-    /// ```
-    ///
-    /// # Profiling Flow
-    ///
-    /// ```text
-    /// execute()
-    /// ├── Create encoder
-    /// ├── Pass 1: "ShadowPass"
-    /// │   ├── CPU scope start (automatic)
-    /// │   ├── prepare(&ctx)
-    /// │   ├── execute(&mut ctx)
-    /// │   │   ├── GPU timestamp start (automatic)
-    /// │   │   ├── GPU commands
-    /// │   │   └── GPU timestamp end (automatic)
-    /// │   └── CPU scope end (automatic)
-    /// ├── Pass 2: "GBufferPass"
-    /// │   └── ...
-    /// └── Submit to queue
-    /// ```
     pub fn execute(
         &mut self,
         scene: &GpuScene,
@@ -639,7 +420,10 @@ impl RenderGraph {
         depth: &wgpu::TextureView,
         frame_resources: &libhelio::FrameResources<'_>,
     ) -> Result<()> {
-        // Clear CPU timings from previous frame
+        if !self.resources_allocated {
+            self.init_transients(scene.width.max(1), scene.height.max(1));
+        }
+
         self.profiler.clear_cpu_timings();
 
         let mut encoder = scene
@@ -648,21 +432,10 @@ impl RenderGraph {
                 label: Some("Render Graph"),
             });
 
-        // Apply resource routes once (transient texture pointer → FrameResources field).
-        // Routes are stable across passes, so there is no reason to re-apply them inside
-        // the per-pass loop (previously O(passes × routes), now O(routes)).
         let mut visible_frame_resources = *frame_resources;
-        // Reset debug tracking so stale writes from last frame don't carry over.
-        // Renderer-provided fields are re-marked below.
-        visible_frame_resources.reset_tracking("Renderer");
-        for (name, route) in &self.resource_routes {
-            if let Some(tex) = self.transient_textures.get(name) {
-                route(&tex.view, &mut visible_frame_resources);
-            }
-        }
 
         for (pass_index, pass) in self.passes.iter_mut().enumerate() {
-            // GPU-only prebuilt path: replay a render bundle if the pass opted in.
+            // GPU-only prebuilt path.
             if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
                 let pass_name = pass.name();
                 self.profiler.begin_gpu_pass(&mut encoder, pass_name);
@@ -671,7 +444,6 @@ impl RenderGraph {
                     let mut pass_encoder = encoder.begin_render_pass(&desc);
                     pass_encoder.execute_bundles(std::iter::once(bundle));
                 } else {
-                    // Fallback to dynamic execution if the render bundle cannot be replayed.
                     let scene_resources = scene.resources();
                     let mut ctx = PassContext {
                         encoder: &mut encoder,
@@ -685,6 +457,8 @@ impl RenderGraph {
                         device: &scene.device,
                         resources: &visible_frame_resources,
                         owns_device: self.owns_device,
+                        resource_pool: &self.pool,
+                        subpass_index: 0,
                     };
                     pass.execute(&mut ctx)?;
                 }
@@ -694,7 +468,7 @@ impl RenderGraph {
                 continue;
             }
 
-            // CPU profiling scope for prepare()
+            // prepare()
             {
                 let _scope = self.profiler.scope(pass.name());
                 let prepare_ctx = PrepareContext {
@@ -709,13 +483,29 @@ impl RenderGraph {
                     delta_time: self.delta_time,
                 };
                 pass.prepare(&prepare_ctx)?;
-            } // Scope ends here, profiler is released
+            }
 
-            // GPU profiling: write start timestamp
+            // Populate graph-owned output textures into FrameResources BEFORE execute().
+            if let Some(actions) = self.pre_pass_actions.get(pass_index) {
+                for action in actions {
+                    match action {
+                        PrePassAction::Route { name, view } => {
+                            route_named_texture(name, view, &mut visible_frame_resources);
+                        }
+                        PrePassAction::Gbuffer { albedo, normal, orm, emissive } => {
+                            visible_frame_resources.gbuffer.write(
+                                GBufferViews { albedo, normal, orm, emissive },
+                                "Graph",
+                            );
+                        }
+                    }
+                }
+            }
+
+            // execute()
             let pass_name = pass.name();
             self.profiler.begin_gpu_pass(&mut encoder, pass_name);
 
-            // execute() with GPU profiling (handled via PassContext)
             {
                 let scene_resources = scene.resources();
                 let mut ctx = PassContext {
@@ -730,29 +520,21 @@ impl RenderGraph {
                     device: &scene.device,
                     resources: &visible_frame_resources,
                     owns_device: self.owns_device,
+                    resource_pool: &self.pool,
+                    subpass_index: 0,
                 };
-
                 pass.execute(&mut ctx)?;
             }
 
-            // GPU profiling: write end timestamp
             self.profiler.end_gpu_pass(&mut encoder, pass_name);
 
-            // Publish resources for downstream passes.
             pass.publish(&mut visible_frame_resources);
         }
 
-        // Resolve GPU timestamp queries
         self.profiler.resolve_gpu_queries(&mut encoder);
-
         scene.queue.submit([encoder.finish()]);
         crate::upload::finish_frame();
 
-        // Read back GPU timestamps.
-        // When Helio owns the device it is safe to block until the GPU is done.
-        // When the device is external (e.g. GPUI) never call device.poll() —
-        // the device owner drives its own polling loop. Use deferred readback
-        // which relies on the owner's poll to deliver the map_async callback.
         if self.owns_device {
             self.profiler.read_gpu_timestamps_blocking(&scene.device);
         } else {
@@ -762,40 +544,33 @@ impl RenderGraph {
         Ok(())
     }
 
-    /// Recreates all transient textures based on pass resource declarations.
-    ///
-    /// Called by `set_render_size()` when size changes or after adding all passes.
-    /// Collects write declarations from all passes and creates GPU textures.
-    ///
-    /// # Performance
-    ///
-    /// - **O(passes × declarations)**: Iterates all passes, collects all writes
-    /// - Call only on size change, not every frame
-    /// - Textures owned by graph, views borrowed zero-copy during execute()
-    fn recreate_transient_textures(&mut self) {
-        // Clear existing textures
-        self.transient_textures.clear();
-    }
-
-    /// Rebuilds prebuilt GPU render bundles for GPU-only passes.
-    ///
-    /// This is called after size/texture changes so any pass that can fully
-    /// describe its work ahead of time can avoid dynamic per-frame execution.
     fn rebuild_gpu_render_bundles(&mut self) {
         self.gpu_render_bundles.clear();
-
-        let mut base_frame_resources = libhelio::FrameResources::empty();
-        for (name, route) in &self.resource_routes {
-            if let Some(tex) = self.transient_textures.get(name) {
-                route(&tex.view, &mut base_frame_resources);
-            }
-        }
-
+        let mut base = libhelio::FrameResources::empty();
         for pass in &mut self.passes {
-            let bundle = pass.build_gpu_render_bundle(&self.device, &base_frame_resources);
+            let bundle = pass.build_gpu_render_bundle(&self.device, &base);
             self.gpu_render_bundles.push(bundle);
-            pass.publish(&mut base_frame_resources);
+            pass.publish(&mut base);
         }
     }
 }
 
+// ── Standalone routing function ───────────────────────────────────────
+
+fn route_named_texture<'a>(name: &str, view: &'a wgpu::TextureView, frame: &mut libhelio::FrameResources<'a>) {
+    match name {
+        "pre_aa" => frame.pre_aa.write(view, "Graph"),
+        "ssao" => frame.ssao.write(view, "Graph"),
+        "hiz" => frame.hiz.write(view, "Graph"),
+        "sky_lut" => frame.sky_lut.write(view, "Graph"),
+        "gbuffer_lightmap_uv" => frame.gbuffer_lightmap_uv.write(view, "Graph"),
+        "water_sim_texture" => frame.water_sim_texture.write(view, "Graph"),
+        "water_caustics" => frame.water_caustics.write(view, "Graph"),
+        "rc_cascades" => frame.rc_view.write(view, "Graph"),
+        "shadow_atlas" => frame.shadow_atlas.write(view, "Graph"),
+        "static_shadow_atlas" => frame.static_shadow_atlas.write(view, "Graph"),
+        // Individual GBuffer textures are handled by Gbuffer action, not here.
+        "gbuffer_albedo" | "gbuffer_normal" | "gbuffer_orm" | "gbuffer_emissive" => {}
+        _ => {}
+    }
+}

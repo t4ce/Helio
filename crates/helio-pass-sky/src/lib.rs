@@ -4,6 +4,7 @@
 //! O(1) CPU: single fullscreen draw.
 
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::{ResourceBuilder, ResourceSize};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// Sky uniforms matching the WGSL shader layout (112 bytes, 16-byte aligned).
@@ -77,29 +78,25 @@ pub struct SkyPass {
     #[allow(dead_code)]
     bgl_1: wgpu::BindGroupLayout,
     bind_group_0: wgpu::BindGroup,
-    bind_group_1: wgpu::BindGroup,
+    bind_group_1: Option<wgpu::BindGroup>,
+    bind_group_1_key: Option<usize>,
     sky_uniform_buf: wgpu::Buffer,
+    sky_lut_sampler: wgpu::Sampler,
+    #[allow(dead_code)]
     width: u32,
+    #[allow(dead_code)]
     height: u32,
     target_format: wgpu::TextureFormat,
-    /// Owned pre-AA render target — written by sky, published for downstream passes.
-    pre_aa_tex: wgpu::Texture,
-    pre_aa_view: wgpu::TextureView,
 }
 
 impl SkyPass {
     /// Creates the sky pass.
     ///
     /// - `camera_buf`: buffer whose first bytes match the sky.wgsl Camera struct
-    /// - `sky_lut_view`: the Rgba16Float sky LUT produced by `SkyLutPass`
     /// - `target_format`: format of the HDR render target
-    /// - `width/height`: render target size (internal scaled resolution)
     pub fn new(
         device: &wgpu::Device,
         camera_buf: &wgpu::Buffer,
-        sky_lut_view: &wgpu::TextureView,
-        width: u32,
-        height: u32,
         target_format: wgpu::TextureFormat,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -186,25 +183,6 @@ impl SkyPass {
             }],
         });
 
-        let bind_group_1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Sky BG1"),
-            layout: &bgl_1,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: sky_uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(sky_lut_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sky_lut_sampler),
-                },
-            ],
-        });
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Sky PL"),
             bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1)],
@@ -240,41 +218,19 @@ impl SkyPass {
             cache: None,
         });
 
-        let (pre_aa_tex, pre_aa_view) = Self::create_pre_aa(device, width, height, target_format);
-
         Self {
             pipeline,
             bgl_0,
             bgl_1,
             bind_group_0,
-            bind_group_1,
+            bind_group_1: None,
+            bind_group_1_key: None,
             sky_uniform_buf,
-            width,
-            height,
+            sky_lut_sampler,
+            width: 0,
+            height: 0,
             target_format,
-            pre_aa_tex,
-            pre_aa_view,
         }
-    }
-
-    fn create_pre_aa(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-        format: wgpu::TextureFormat,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
-        let tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Sky pre_aa"),
-            size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        (tex, view)
     }
 
 }
@@ -284,12 +240,11 @@ impl RenderPass for SkyPass {
         "Sky"
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let (tex, view) = Self::create_pre_aa(device, width, height, self.target_format);
-        self.pre_aa_tex = tex;
-        self.pre_aa_view = view;
-        self.width = width;
-        self.height = height;
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("pre_aa", self.target_format, ResourceSize::MatchSurface);
+    }
+
+    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -318,11 +273,9 @@ impl RenderPass for SkyPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // O(1): single fullscreen draw — GPU samples LUT and composites sky.
-        // Always render to the owned pre_aa texture so downstream passes see
-        // the sky background via FrameResources::pre_aa (published below).
+        let pre_aa_view = ctx.resources.pre_aa.read("Sky").unwrap();
         let color_attachment = wgpu::RenderPassColorAttachment {
-            view: &self.pre_aa_view,
+            view: pre_aa_view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
@@ -340,20 +293,44 @@ impl RenderPass for SkyPass {
             multiview_mask: None,
         };
 
+        // Lazy init: build sky LUT bind group from graph-owned sky_lut texture.
+        if let Some(sky_lut_view) = ctx.resources.sky_lut.read("Sky") {
+            let key = sky_lut_view as *const _ as usize;
+            if self.bind_group_1_key != Some(key) {
+                self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Sky BG1"),
+                    layout: &self.bgl_1,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.sky_uniform_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(sky_lut_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sky_lut_sampler),
+                        },
+                    ],
+                }));
+                self.bind_group_1_key = Some(key);
+            }
+        }
+
         let mut pass = ctx.encoder.begin_render_pass(&desc);
         if ctx.resources.sky.has_sky {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group_0, &[]);
-            pass.set_bind_group(1, &self.bind_group_1, &[]);
+            if let Some(ref bg) = self.bind_group_1 {
+                pass.set_bind_group(1, bg, &[]);
+            }
             pass.draw(0..3, 0..1);
         }
         Ok(())
     }
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        // Make the sky background available to all passes that run after this one.
-        if frame.pre_aa.is_none() {
-            frame.pre_aa.write(&self.pre_aa_view, "Sky");
-        }
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {
     }
 
     fn writes(&self) -> &'static [helio_v3::ResourceSlot] {

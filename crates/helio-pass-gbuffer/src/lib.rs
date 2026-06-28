@@ -26,6 +26,7 @@
 //! buffer (slot 0) and index buffer before this pass executes.
 
 use bytemuck::{Pod, Zeroable};
+use helio_v3::graph::{ResourceBuilder, ResourceSize};
 use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 use std::num::NonZeroU32;
 
@@ -76,28 +77,13 @@ pub struct GBufferPass {
     pub csm_splits: [f32; 4],
     /// Debug visualisation mode forwarded to the GBuffer shader (0 = off).
     pub debug_mode: u32,
-    // ── GBuffer textures (owned; exposed for downstream passes) ───────────────
-    pub albedo_tex: wgpu::Texture,
-    pub albedo_view: wgpu::TextureView,
-    pub normal_tex: wgpu::Texture,
-    pub normal_view: wgpu::TextureView,
-    pub orm_tex: wgpu::Texture,
-    pub orm_view: wgpu::TextureView,
-    pub emissive_tex: wgpu::Texture,
-    pub emissive_view: wgpu::TextureView,
-    pub lightmap_uv_tex: wgpu::Texture,
-    pub lightmap_uv_view: wgpu::TextureView,
     /// Lightmap atlas regions buffer (empty until bake data is loaded)
     lightmap_atlas_regions_buf: wgpu::Buffer,
 }
 
 impl GBufferPass {
     /// Create the GBuffer pass.
-    ///
-    /// * `camera_buf`    – scene camera uniform buffer
-    /// * `instances_buf` – per-instance transform storage buffer
-    /// * `width/height`  – initial render resolution
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+    pub fn new(device: &wgpu::Device) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
         let shader_src = include_str!("../shaders/gbuffer.wgsl")
             .replace(
@@ -308,43 +294,6 @@ impl GBufferPass {
             cache: None,
         });
 
-        // ── GBuffer textures ──────────────────────────────────────────────────
-        let (albedo_tex, albedo_view) = gbuffer_texture(
-            device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba8Unorm,
-            "GBuffer/Albedo",
-        );
-        let (normal_tex, normal_view) = gbuffer_texture(
-            device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba16Float,
-            "GBuffer/Normal",
-        );
-        let (orm_tex, orm_view) = gbuffer_texture(
-            device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba8Unorm,
-            "GBuffer/ORM",
-        );
-        let (emissive_tex, emissive_view) = gbuffer_texture(
-            device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba16Float,
-            "GBuffer/Emissive",
-        );
-        let (lightmap_uv_tex, lightmap_uv_view) = gbuffer_texture(
-            device,
-            width,
-            height,
-            wgpu::TextureFormat::Rg16Float,
-            "GBuffer/LightmapUV",
-        );
-        
         // Create empty lightmap atlas regions buffer (populated when bake data is loaded).
         // Each region is 32 bytes: uv_offset(8) + uv_scale(8) + uv_clamp_min(8) + uv_clamp_max(8).
         let lightmap_atlas_regions_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -366,16 +315,6 @@ impl GBufferPass {
             // Default CSM splits — single source of truth is libhelio::CSM_SPLITS.
             csm_splits: libhelio::CSM_SPLITS,
             debug_mode: 0,
-            albedo_tex,
-            albedo_view,
-            normal_tex,
-            normal_view,
-            orm_tex,
-            orm_view,
-            emissive_tex,
-            emissive_view,
-            lightmap_uv_tex,
-            lightmap_uv_view,
             lightmap_atlas_regions_buf,
         }
     }
@@ -386,19 +325,15 @@ impl RenderPass for GBufferPass {
         "GBuffer"
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.resize(device, width, height);
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("gbuffer_albedo", wgpu::TextureFormat::Rgba8Unorm, ResourceSize::MatchSurface);
+        builder.write_color_raw("gbuffer_normal", wgpu::TextureFormat::Rgba16Float, ResourceSize::MatchSurface);
+        builder.write_color_raw("gbuffer_orm", wgpu::TextureFormat::Rgba8Unorm, ResourceSize::MatchSurface);
+        builder.write_color_raw("gbuffer_emissive", wgpu::TextureFormat::Rgba16Float, ResourceSize::MatchSurface);
+        builder.write_color_raw("gbuffer_lightmap_uv", wgpu::TextureFormat::Rg16Float, ResourceSize::MatchSurface);
     }
 
-    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        frame.gbuffer.write(libhelio::GBufferViews {
-            albedo: &self.albedo_view,
-            normal: &self.normal_view,
-            orm: &self.orm_view,
-            emissive: &self.emissive_view,
-        }, "GBuffer");
-        frame.gbuffer_lightmap_uv.write(&self.lightmap_uv_view, "GBuffer");
-    }
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // Read per-scene values from frame_resources so the GBuffer globals match
@@ -439,6 +374,17 @@ impl RenderPass for GBufferPass {
         let draw_count = ctx.scene.draw_count;
         let main_scene = ctx.resources.main_scene;
 
+        let gbuffer = ctx.resources.gbuffer.read("GBuffer").ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig(
+                "GBuffer requires published gbuffer resources (circular dependency)".to_string(),
+            )
+        })?;
+        let lightmap_uv = ctx.resources.gbuffer_lightmap_uv.read("GBuffer").ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig(
+                "GBuffer requires published gbuffer_lightmap_uv (circular dependency)".to_string(),
+            )
+        })?;
+
         // Always clear the GBuffer + depth so downstream passes (VG, deferred
         // lighting) see a clean slate even when there are no regular draw calls.
         {
@@ -446,7 +392,7 @@ impl RenderPass for GBufferPass {
                 label: Some("GBuffer Clear"),
                 color_attachments: &[
                     Some(wgpu::RenderPassColorAttachment {
-                        view: &self.albedo_view,
+                        view: gbuffer.albedo,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -455,7 +401,7 @@ impl RenderPass for GBufferPass {
                         },
                     }),
                     Some(wgpu::RenderPassColorAttachment {
-                        view: &self.normal_view,
+                        view: gbuffer.normal,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -464,7 +410,7 @@ impl RenderPass for GBufferPass {
                         },
                     }),
                     Some(wgpu::RenderPassColorAttachment {
-                        view: &self.orm_view,
+                        view: gbuffer.orm,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -473,7 +419,7 @@ impl RenderPass for GBufferPass {
                         },
                     }),
                     Some(wgpu::RenderPassColorAttachment {
-                        view: &self.emissive_view,
+                        view: gbuffer.emissive,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -482,7 +428,7 @@ impl RenderPass for GBufferPass {
                         },
                     }),
                     Some(wgpu::RenderPassColorAttachment {
-                        view: &self.lightmap_uv_view,
+                        view: lightmap_uv,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -607,7 +553,7 @@ impl RenderPass for GBufferPass {
             label: Some("GBuffer Draw"),
             color_attachments: &[
                 Some(wgpu::RenderPassColorAttachment {
-                    view: &self.albedo_view,
+                    view: gbuffer.albedo,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -616,7 +562,7 @@ impl RenderPass for GBufferPass {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: &self.normal_view,
+                    view: gbuffer.normal,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -625,7 +571,7 @@ impl RenderPass for GBufferPass {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: &self.orm_view,
+                    view: gbuffer.orm,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -634,7 +580,7 @@ impl RenderPass for GBufferPass {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: &self.emissive_view,
+                    view: gbuffer.emissive,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -643,7 +589,7 @@ impl RenderPass for GBufferPass {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: &self.lightmap_uv_view,
+                    view: lightmap_uv,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -713,55 +659,6 @@ impl RenderPass for GBufferPass {
 }
 
 impl GBufferPass {
-    /// Recreates GBuffer textures at a new resolution (call on window resize).
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let (albedo_tex, albedo_view) = gbuffer_texture(
-            device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba8Unorm,
-            "GBuffer/Albedo",
-        );
-        let (normal_tex, normal_view) = gbuffer_texture(
-            device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba16Float,
-            "GBuffer/Normal",
-        );
-        let (orm_tex, orm_view) = gbuffer_texture(
-            device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba8Unorm,
-            "GBuffer/ORM",
-        );
-        let (emissive_tex, emissive_view) = gbuffer_texture(
-            device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba16Float,
-            "GBuffer/Emissive",
-        );
-        let (lightmap_uv_tex, lightmap_uv_view) = gbuffer_texture(
-            device,
-            width,
-            height,
-            wgpu::TextureFormat::Rg16Float,
-            "GBuffer/LightmapUV",
-        );
-        self.albedo_tex = albedo_tex;
-        self.albedo_view = albedo_view;
-        self.normal_tex = normal_tex;
-        self.normal_view = normal_view;
-        self.orm_tex = orm_tex;
-        self.orm_view = orm_view;
-        self.emissive_tex = emissive_tex;
-        self.emissive_view = emissive_view;
-        self.lightmap_uv_tex = lightmap_uv_tex;
-        self.lightmap_uv_view = lightmap_uv_view;
-    }
-
     /// Populate the lightmap atlas regions buffer from baked data.
     ///
     /// Called by the renderer after a successful bake to upload per-mesh UV atlas regions.
@@ -810,32 +707,6 @@ impl GBufferPass {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Create a screen-sized GBuffer texture and its default view.
-fn gbuffer_texture(
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-    format: wgpu::TextureFormat,
-    label: &str,
-) -> (wgpu::Texture, wgpu::TextureView) {
-    let tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-    (tex, view)
-}
 
 /// Build the BGL for group 1 (bindless materials + textures).
 fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
