@@ -332,22 +332,29 @@ impl RenderGraph {
         self.rebuild_gpu_render_bundles();
     }
 
-    /// Detect adjacent passes where the first writes a resource the second reads.
-    /// These CAN be fused into a single render pass with `next_subpass()` but
-    /// actual fusion requires a new `RenderPass` method so the executor opens
-    /// one render pass and calls `next_subpass()` between fused passes instead
-    /// of each pass calling `ctx.begin_render_pass()` independently.
+    /// Detect chains of adjacent passes where each writes a resource the next
+    /// reads. These CAN be fused into a single render pass with `next_subpass()`.
+    /// Uses a greedy forward scan to build maximal chains.
     fn detect_subpass_chains(&mut self) {
         self.subpass_chains.clear();
-        for i in 0..self.passes.len().saturating_sub(1) {
-            // Check if pass i writes any resource that is read by at least one
-            // later pass (last_read_pass > i means some pass after i reads it).
-            let can_fuse = self.resources.values().any(|rl| {
-                rl.first_write_pass == i && rl.last_read_pass > i
-            });
-            if can_fuse {
-                self.subpass_chains.push(i..i + 2);
+        let mut i = 0;
+        while i < self.passes.len().saturating_sub(1) {
+            // Start a new chain — find the longest sequential run where each
+            // adjacent pair (k, k+1) shares a resource that k writes and k+1 reads.
+            let chain_start = i;
+            while i < self.passes.len().saturating_sub(1) {
+                let can_fuse = self.resources.values().any(|rl| {
+                    rl.first_write_pass == i && rl.last_read_pass > i
+                });
+                if !can_fuse { break; }
+                i += 1;
             }
+            // A chain must have at least 2 passes.
+            let chain_end = i + 1; // inclusive: passes[chain_start ..= chain_end]
+            if chain_end > chain_start + 1 && chain_end <= self.passes.len() {
+                self.subpass_chains.push(chain_start..chain_end);
+            }
+            i += 1;
         }
     }
 
