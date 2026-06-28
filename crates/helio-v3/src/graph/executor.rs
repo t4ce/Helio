@@ -669,7 +669,6 @@ impl RenderGraph {
         for (i, pass) in self.passes.iter().enumerate() {
             let in_chain = chain_set.contains(&i);
             let fusion = if in_chain {
-                // Find which chain
                 self.subpass_chains.iter()
                     .find(|r| r.contains(&i))
                     .map(|r| {
@@ -681,19 +680,21 @@ impl RenderGraph {
             } else {
                 ""
             };
-            let has_desc = if pass.render_pass_descriptor(
-                &wgpu::TextureView::default(),
-                &wgpu::TextureView::default(),
-                &libhelio::FrameResources::empty(),
-            ).is_some() { "D" } else { "L" };
-            eprintln!("  {:>3}. [{:>3}] {:<35} {}",
-                i,
-                has_desc,
-                pass.name(),
-                fusion,
+            // Determine pass type from the resources it writes.
+            let writes = self.resources.iter()
+                .filter(|(_, rl)| rl.first_write_pass == i)
+                .count();
+            let pass_type = if writes > 0 { "R" } else { "C" };
+            let write_names: Vec<&str> = self.resources.iter()
+                .filter(|(_, rl)| rl.first_write_pass == i)
+                .map(|(n, _)| *n)
+                .collect();
+            eprintln!("  {:>3}. [{}] {:<30} {}  {}",
+                i, pass_type, pass.name(), fusion,
+                if write_names.is_empty() { String::new() } else { format!("→ {}", write_names.join(", ")) },
             );
         }
-        eprintln!("  (D=executor-managed descriptor  L=legacy self-managed)");
+        eprintln!("  (R=render writes textures  C=compute/other)");
 
         eprintln!("─────────────────────────────────────");
     }
