@@ -79,6 +79,7 @@ fn vs_main(quad: QuadVertex, inst: BillboardInstance) -> VertexOut {
     // Perspective division uses view-depth, so: world_size = scale * view_depth
     // → projected NDC size = scale * view_depth / view_depth = scale (constant).
     // Using Euclidean distance instead causes off-axis billboards to appear larger.
+    // TODO: Can we use a branchless multiplication here somehow?
     if screen_scale {
         let view_depth = max(dot(camera.forward_far.xyz, world_pos - cam_pos), 0.001);
         offset        *= view_depth;
