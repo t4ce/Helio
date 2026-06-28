@@ -1426,11 +1426,38 @@ impl RenderPass for TerraForgePass {
         Ok(())
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let pre_aa_view = resources.pre_aa.read("TerraForge")?;
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: pre_aa_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("TerraForge Shade"),
+            color_attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         // Compute ray march.
         {
-            let mut cpass = ctx
-                .encoder
+            let mut cpass = unsafe { &mut *ctx.encoder_ptr }
                 .begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("TerraForge RayMarch"),
                     timestamp_writes: None,
@@ -1442,26 +1469,10 @@ impl RenderPass for TerraForgePass {
 
         // Fullscreen shade → pre_aa (graph-managed, auto-routed to TaaPass).
         {
-            let pre_aa_view = ctx.resources.pre_aa.read("TerraForge").unwrap();
-            let mut rpass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("TerraForge Shade"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: pre_aa_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            rpass.set_pipeline(&self.shade_pipeline);
-            rpass.set_bind_group(0, &self.shade_bind_group, &[]);
-            rpass.draw(0..3, 0..1);
+            let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+            rp.set_pipeline(&self.shade_pipeline);
+            rp.set_bind_group(0, &self.shade_bind_group, &[]);
+            rp.draw(0..3, 0..1);
         }
         Ok(())
     }

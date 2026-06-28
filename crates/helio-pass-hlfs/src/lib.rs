@@ -707,7 +707,7 @@ impl RenderPass for HlfsPass {
         let workgroups_y = self.height.div_ceil(8);
 
         {
-            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HLFS Importance Sampling"),
                 timestamp_writes: None,
             });
@@ -718,7 +718,7 @@ impl RenderPass for HlfsPass {
 
         // Step 2: Radiance injection (compute)
         {
-            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HLFS Radiance Injection"),
                 timestamp_writes: None,
             });
@@ -729,7 +729,7 @@ impl RenderPass for HlfsPass {
 
         // Step 3: Hierarchical propagation (compute)
         {
-            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HLFS Hierarchical Propagation"),
                 timestamp_writes: None,
             });

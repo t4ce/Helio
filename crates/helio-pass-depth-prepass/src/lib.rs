@@ -129,6 +129,30 @@ impl RenderPass for DepthPrepassPass {
         Ok(())
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("DepthPrepass"),
+            color_attachments,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // O(1): single multi_draw_indexed_indirect — no CPU loop over draw calls.
         let draw_count = ctx.scene.draw_count;
@@ -165,23 +189,7 @@ impl RenderPass for DepthPrepassPass {
         }
         let indirect = ctx.scene.indirect;
 
-        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("DepthPrepass"),
-            // Depth-only pass: zero color attachments.
-            color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: ctx.depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-
+        let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));

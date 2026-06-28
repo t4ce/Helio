@@ -478,7 +478,7 @@ impl RenderGraph {
                 } else {
                     let scene_resources = scene.resources();
                     let mut ctx = PassContext {
-                        encoder: &mut encoder,
+                        encoder_ptr: &mut encoder as *mut _,
                         target,
                         depth,
                         scene: scene_resources,
@@ -491,6 +491,8 @@ impl RenderGraph {
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,
                         subpass_index: 0,
+                        active_render_pass: None,
+                        active_compute_pass: None,
                     };
                     pass.execute(&mut ctx)?;
                 }
@@ -538,10 +540,38 @@ impl RenderGraph {
             let pass_name = pass.name();
             self.profiler.begin_gpu_pass(&mut encoder, pass_name);
 
-            {
+            // Migrated path: executor manages render pass (pass implements render_pass_descriptor).
+            if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources) {
+                let mut rp = unsafe {
+                    let enc = &mut *std::ptr::addr_of_mut!(encoder);
+                    enc.begin_render_pass(&desc)
+                };
+                {
+                    let scene_resources = scene.resources();
+                    let mut ctx = PassContext {
+                        encoder_ptr: std::ptr::addr_of_mut!(encoder),
+                        target,
+                        depth,
+                        scene: scene_resources,
+                        profiler: &mut self.profiler,
+                        frame_num: scene.frame_count,
+                        width: self.internal_w,
+                        height: self.internal_h,
+                        device: &scene.device,
+                        resources: &visible_frame_resources,
+                        owns_device: self.owns_device,
+                        resource_pool: &self.pool,
+                        subpass_index: 0,
+                        active_render_pass: Some(&mut rp as *mut _ as *mut _),
+                        active_compute_pass: None,
+                    };
+                    pass.execute(&mut ctx)?;
+                }
+            } else {
+                // Legacy path: pass opens its own render/compute pass via begin_render_pass.
                 let scene_resources = scene.resources();
                 let mut ctx = PassContext {
-                    encoder: &mut encoder,
+                    encoder_ptr: std::ptr::addr_of_mut!(encoder),
                     target,
                     depth,
                     scene: scene_resources,
@@ -554,6 +584,8 @@ impl RenderGraph {
                     owns_device: self.owns_device,
                     resource_pool: &self.pool,
                     subpass_index: 0,
+                    active_render_pass: None,
+                    active_compute_pass: None,
                 };
                 pass.execute(&mut ctx)?;
             }

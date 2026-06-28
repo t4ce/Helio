@@ -202,8 +202,7 @@ impl RenderPass for IndirectDispatchPass {
 
         // O(1) CPU: one dispatch, GPU culls all draw calls in parallel.
         let workgroups = draw_count.div_ceil(WORKGROUP_SIZE);
-        let mut pass = ctx
-            .encoder
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }
             .begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("IndirectDispatch"),
                 timestamp_writes: None,

@@ -272,27 +272,35 @@ impl RenderPass for SkyPass {
         Ok(())
     }
 
-    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let pre_aa_view = ctx.resources.pre_aa.read("Sky").unwrap();
-        let color_attachment = wgpu::RenderPassColorAttachment {
-            view: pre_aa_view,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                store: wgpu::StoreOp::Store,
-            },
-        };
-        let color_attachments = [Some(color_attachment)];
-        let desc = wgpu::RenderPassDescriptor {
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let pre_aa_view = resources.pre_aa.read("Sky")?;
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: pre_aa_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
             label: Some("Sky"),
-            color_attachments: &color_attachments,
+            color_attachments,
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
-        };
+        })
+    }
 
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // Lazy init: build sky LUT bind group from graph-owned sky_lut texture.
         if let Some(sky_lut_view) = ctx.resources.sky_lut.read("Sky") {
             let key = sky_lut_view as *const _ as usize;
@@ -319,14 +327,14 @@ impl RenderPass for SkyPass {
             }
         }
 
-        let mut pass = ctx.encoder.begin_render_pass(&desc);
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         if ctx.resources.sky.has_sky {
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group_0, &[]);
+            rp.set_pipeline(&self.pipeline);
+            rp.set_bind_group(0, &self.bind_group_0, &[]);
             if let Some(ref bg) = self.bind_group_1 {
-                pass.set_bind_group(1, bg, &[]);
+                rp.set_bind_group(1, bg, &[]);
             }
-            pass.draw(0..3, 0..1);
+            rp.draw(0..3, 0..1);
         }
         Ok(())
     }

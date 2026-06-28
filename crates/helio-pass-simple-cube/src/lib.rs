@@ -228,7 +228,7 @@ impl RenderPass for SimpleCubePass {
             self.bind_group_key = Some(camera_ptr);
         }
 
-        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("SimpleCube"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: ctx.target,

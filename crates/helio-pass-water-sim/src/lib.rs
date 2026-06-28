@@ -1665,7 +1665,7 @@ impl RenderPass for WaterSimPass {
                         "Water SSR requires depth_texture in FrameResources".to_string(),
                     )
                 })?;
-                ctx.encoder.copy_texture_to_texture(
+                unsafe { &mut *ctx.encoder_ptr }.copy_texture_to_texture(
                     src_depth_tex.as_image_copy(),
                     self._depth_copy_tex.as_image_copy(),
                     wgpu::Extent3d {
@@ -1723,7 +1723,7 @@ impl RenderPass for WaterSimPass {
 
                 // 1. Water volume walls (sides + bottom) - Render FIRST to establish volume depth
                 {
-                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Water Volume Walls"),
                         color_attachments: &color_attachments,
                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -1747,7 +1747,7 @@ impl RenderPass for WaterSimPass {
 
                 // 2. Water surface (top) - above-water view with refraction
                 {
-                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Water Surface Above"),
                         color_attachments: &color_attachments,
                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -1771,7 +1771,7 @@ impl RenderPass for WaterSimPass {
 
                 // 3. Water surface (bottom) - underwater view (looking up through water)
                 {
-                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Water Surface Under"),
                         color_attachments: &color_attachments,
                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -1824,7 +1824,7 @@ impl RenderPass for WaterSimPass {
                             store: wgpu::StoreOp::Store,
                         },
                     })];
-                    let mut tint_pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let mut tint_pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Water Underwater Tint"),
                         color_attachments: &tint_attachments,
                         depth_stencil_attachment: None,
@@ -1855,7 +1855,7 @@ impl RenderPass for WaterSimPass {
                             store: wgpu::StoreOp::Store,
                         },
                     })];
-                    let mut blit_pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let mut blit_pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Water Tint Blit Back"),
                         color_attachments: &blit_attachments,
                         depth_stencil_attachment: None,

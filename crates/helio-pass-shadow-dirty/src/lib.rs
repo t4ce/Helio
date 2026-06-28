@@ -340,7 +340,7 @@ impl RenderPass for ShadowDirtyPass {
         let thread_count = movable_draw_count.max(1);
         let workgroups = thread_count.div_ceil(WORKGROUP_SIZE);
 
-        let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ShadowDirty"),
             timestamp_writes: None,
         });

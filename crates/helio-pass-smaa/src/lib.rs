@@ -282,6 +282,33 @@ impl RenderPass for SmaaPass {
         builder.read("pre_aa");
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: &self.edge_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("SMAA Edge"),
+            color_attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // O(1): exactly 3 fullscreen draws regardless of scene size.
 
@@ -315,27 +342,10 @@ impl RenderPass for SmaaPass {
 
         // Pass 1 — edge detection → edge_view
         {
-            let color = [Some(wgpu::RenderPassColorAttachment {
-                view: &self.edge_view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })];
-            let desc = wgpu::RenderPassDescriptor {
-                label: Some("SMAA Edge"),
-                color_attachments: &color,
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            };
-            let mut pass = ctx.encoder.begin_render_pass(&desc);
-            pass.set_pipeline(&self.edge_pipeline);
-            pass.set_bind_group(0, self.edge_bind_group.as_ref().unwrap(), &[]);
-            pass.draw(0..3, 0..1);
+            let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+            rp.set_pipeline(&self.edge_pipeline);
+            rp.set_bind_group(0, self.edge_bind_group.as_ref().unwrap(), &[]);
+            rp.draw(0..3, 0..1);
         }
 
         // Pass 2 — blend weight calculation → blend_view
@@ -357,7 +367,7 @@ impl RenderPass for SmaaPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             };
-            let mut pass = ctx.encoder.begin_render_pass(&desc);
+            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
             pass.set_pipeline(&self.blend_pipeline);
             pass.set_bind_group(0, self.blend_bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
@@ -383,7 +393,7 @@ impl RenderPass for SmaaPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             };
-            let mut pass = ctx.encoder.begin_render_pass(&desc);
+            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
             pass.set_pipeline(&self.neighbor_pipeline);
             pass.set_bind_group(0, self.neighbor_bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);

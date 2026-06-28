@@ -267,8 +267,8 @@ impl RenderPass for LightCullPass {
         if ctx.scene.movable_light_count == 0 {
             // No active movable lights: clear light lists/counts to avoid stale data usage.
             // Static/stationary lights are baked and don't need runtime culling.
-            ctx.encoder.clear_buffer(&self.tile_light_lists, 0, None);
-            ctx.encoder.clear_buffer(&self.tile_light_counts, 0, None);
+            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_lists, 0, None);
+            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_counts, 0, None);
             self.cull_cache_key = None; // Invalidate cache
             return Ok(());
         }
@@ -332,8 +332,7 @@ impl RenderPass for LightCullPass {
         // Each workgroup has 256 threads, each thread handles one tile.
         let workgroups = total_tiles.div_ceil(256);
 
-        let mut pass = ctx
-            .encoder
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }
             .begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("LightCull"),
                 timestamp_writes: None,

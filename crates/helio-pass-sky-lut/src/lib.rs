@@ -235,34 +235,41 @@ impl RenderPass for SkyLutPass {
         Ok(())
     }
 
-    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // O(1): single fullscreen draw — GPU integrates atmosphere per LUT texel.
-        let sky_lut_view = ctx.resources.sky_lut.read("SkyLUT").unwrap();
-        let color_attachment = wgpu::RenderPassColorAttachment {
-            view: sky_lut_view,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                store: wgpu::StoreOp::Store,
-            },
-        };
-        let color_attachments = [Some(color_attachment)];
-        let desc = wgpu::RenderPassDescriptor {
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let sky_lut_view = resources.sky_lut.read("SkyLUT").unwrap();
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: sky_lut_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
             label: Some("SkyLUT"),
-            color_attachments: &color_attachments,
+            color_attachments,
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
-        };
+        })
+    }
 
-        let mut pass = ctx.encoder.begin_render_pass(&desc);
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         if ctx.resources.sky.has_sky {
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group_0, &[]);
-            pass.set_bind_group(1, &self.bind_group_1, &[]);
-            pass.draw(0..3, 0..1);
+            rp.set_pipeline(&self.pipeline);
+            rp.set_bind_group(0, &self.bind_group_0, &[]);
+            rp.set_bind_group(1, &self.bind_group_1, &[]);
+            rp.draw(0..3, 0..1);
         }
         Ok(())
     }

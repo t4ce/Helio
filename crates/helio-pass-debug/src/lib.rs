@@ -357,22 +357,36 @@ impl DebugPass {
 }
 
 impl DebugPass {
-    /// Execute applying this debug draw pass to a specific LHS render target.
-    pub fn execute_on_target(
-        &mut self,
-        ctx: &mut PassContext,
-        target: &wgpu::TextureView,
-    ) -> HelioResult<()> {
-        // O(1): single draw call — completely skipped when nothing is queued.
-        if self.vertex_count == 0 && self.tri_count == 0 {
-            return Ok(());
+    /// Common draw commands for both execute paths.
+    fn draw_commands(&self, rp: &mut wgpu::RenderPass) {
+        rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
+
+        if self.vertex_count > 0 {
+            if self.depth_test_enabled {
+                rp.set_pipeline(&self.pipeline_depth);
+            } else {
+                rp.set_pipeline(&self.pipeline_no_depth);
+            }
+            rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
+            rp.draw(0..self.vertex_count, 0..1);
         }
 
-        // Always sample from the internal depth buffer (ctx.depth) so debug lines
-        // are occluded by scene geometry, not by post-upscale sky proxies.
+        if self.tri_count > 0 {
+            if self.depth_test_enabled {
+                rp.set_pipeline(&self.pipeline_tri_depth);
+            } else {
+                rp.set_pipeline(&self.pipeline_tri_no_depth);
+            }
+            rp.set_vertex_buffer(0, self.tri_buf.slice(..));
+            rp.draw(0..self.tri_count, 0..1);
+        }
+    }
+
+    /// Ensure bind group is current for the camera buffer.
+    fn ensure_bind_group(&mut self, device: &wgpu::Device) {
         let camera_key = &self.camera_buf as *const _ as usize;
         if self.bind_group_key != Some(camera_key) {
-            self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Debug Draw BG"),
                 layout: &self.bgl,
                 entries: &[wgpu::BindGroupEntry {
@@ -382,6 +396,19 @@ impl DebugPass {
             }));
             self.bind_group_key = Some(camera_key);
         }
+    }
+
+    /// Execute applying this debug draw pass to a specific LHS render target.
+    pub fn execute_on_target(
+        &mut self,
+        ctx: &mut PassContext,
+        target: &wgpu::TextureView,
+    ) -> HelioResult<()> {
+        if self.vertex_count == 0 && self.tri_count == 0 {
+            return Ok(());
+        }
+
+        self.ensure_bind_group(ctx.device);
 
         let depth_attachment = if self.depth_test_enabled {
             let depth_view = if let Some(frd) = ctx.resources.full_res_depth.get() {
@@ -420,31 +447,8 @@ impl DebugPass {
             multiview_mask: None,
         };
 
-        let mut pass = ctx.encoder.begin_render_pass(&desc);
-        pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-
-        // ── Lines ─────────────────────────────────────────────────────────────
-        if self.vertex_count > 0 {
-            if self.depth_test_enabled {
-                pass.set_pipeline(&self.pipeline_depth);
-            } else {
-                pass.set_pipeline(&self.pipeline_no_depth);
-            }
-            pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
-            pass.draw(0..self.vertex_count, 0..1);
-        }
-
-        // ── Filled triangles (alpha-blended) ───────────────────────────────────
-        if self.tri_count > 0 {
-            if self.depth_test_enabled {
-                pass.set_pipeline(&self.pipeline_tri_depth);
-            } else {
-                pass.set_pipeline(&self.pipeline_tri_no_depth);
-            }
-            pass.set_vertex_buffer(0, self.tri_buf.slice(..));
-            pass.draw(0..self.tri_count, 0..1);
-        }
-
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
+        self.draw_commands(&mut pass);
         Ok(())
     }
 }
@@ -454,12 +458,99 @@ impl RenderPass for DebugPass {
         "DebugDraw"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        let depth_attachment = if self.depth_test_enabled {
+            let depth_view = if let Some(frd) = resources.full_res_depth.get() {
+                frd
+            } else {
+                depth
+            };
+            Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            })
+        } else {
+            None
+        };
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("DebugDraw"),
+            color_attachments,
+            depth_stencil_attachment: depth_attachment,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        self.execute_on_target(ctx, ctx.target)
+        if self.vertex_count == 0 && self.tri_count == 0 {
+            return Ok(());
+        }
+        self.ensure_bind_group(ctx.device);
+        // Use executor-managed render pass if available, otherwise open our own.
+        if let Some(rp_ptr) = ctx.active_render_pass_ptr() {
+            let rp = unsafe { &mut *rp_ptr };
+            self.draw_commands(rp);
+        } else {
+            // Legacy path — open our own render pass.
+            let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: ctx.target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let depth_attachment = if self.depth_test_enabled {
+                let depth_view = ctx.depth;
+                Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                })
+            } else {
+                None
+            };
+            let desc = wgpu::RenderPassDescriptor {
+                label: Some("DebugDraw"),
+                color_attachments: &color_attachments,
+                depth_stencil_attachment: depth_attachment,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            };
+            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
+            self.draw_commands(&mut pass);
+        }
+        Ok(())
     }
 }
 

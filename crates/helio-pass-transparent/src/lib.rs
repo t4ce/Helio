@@ -248,6 +248,40 @@ impl RenderPass for TransparentPass {
         Ok(())
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("Transparent"),
+            color_attachments,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let draw_count = ctx.scene.draw_count;
         if draw_count == 0 {
@@ -261,47 +295,19 @@ impl RenderPass for TransparentPass {
         })?;
         let indirect = ctx.scene.indirect;
 
-        // Load existing colour (preserves opaque geometry rendered earlier).
-        // Depth is read-only (depth_write_enabled = false in pipeline state).
-        let color_attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: ctx.target,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        let depth_stencil = wgpu::RenderPassDepthStencilAttachment {
-            view: ctx.depth,
-            depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            }),
-            stencil_ops: None,
-        };
-        let desc = wgpu::RenderPassDescriptor {
-            label: Some("Transparent"),
-            color_attachments: &color_attachments,
-            depth_stencil_attachment: Some(depth_stencil),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        };
-        let mut pass = ctx.begin_render_pass(&desc);
-
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
-        pass.set_index_buffer(
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        rp.set_pipeline(&self.pipeline);
+        rp.set_bind_group(0, &self.bind_group, &[]);
+        rp.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+        rp.set_index_buffer(
             main_scene.mesh_buffers.indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
         #[cfg(not(target_arch = "wasm32"))]
-        pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
+        rp.multi_draw_indexed_indirect(indirect, 0, draw_count);
         #[cfg(target_arch = "wasm32")]
         for i in 0..draw_count {
-            pass.draw_indexed_indirect(indirect, i as u64 * 20);
+            rp.draw_indexed_indirect(indirect, i as u64 * 20);
         }
 
         Ok(())

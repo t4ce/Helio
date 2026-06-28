@@ -407,9 +407,6 @@ impl RenderPass for ShadowPass {
     }
 
     fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {
-        // Graph pre-populated these; this is redundant but safe.
-        // We write from ctx.resources in execute, but publish doesn't have ctx.
-        // publish can be a no-op since the graph already populated frame.shadow_atlas.
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
@@ -519,7 +516,7 @@ impl RenderPass for ShadowPass {
                     }
                     let face_view = &self.static_face_views[face];
                     let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
-                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Shadow/Static"),
                         color_attachments: &[],
                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -548,7 +545,7 @@ impl RenderPass for ShadowPass {
             } else if need_static {
                 for face in 0..face_count {
                     let face_view = &self.static_face_views[face];
-                    let _pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let _pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Shadow/StaticClear"),
                         color_attachments: &[],
                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -598,7 +595,7 @@ impl RenderPass for ShadowPass {
 
                 if light_dirty {
                     // ── Light moved: full clear + all movable draws ────────────
-                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Shadow/Dynamic/LightDirty"),
                         color_attachments: &[],
                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -639,7 +636,7 @@ impl RenderPass for ShadowPass {
                     //   Fall back to a full clear + draw all movable geometry,
                     //   equivalent to the LightDirty path but without per-face culling.
                     if self.supports_multi_draw_count {
-                        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("Shadow/Dynamic/ObjectDirty"),
                             color_attachments: &[],
                             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -681,7 +678,7 @@ impl RenderPass for ShadowPass {
                         }
                     } else {
                         // Fallback: full clear + draw all movable geometry (no per-face GPU culling).
-                        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("Shadow/Dynamic/ObjectDirty/Fallback"),
                             color_attachments: &[],
                             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {

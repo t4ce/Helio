@@ -483,7 +483,7 @@ impl RenderPass for HiZBuildPass {
 
         // Phase 1: copy depth -> HiZ mip-0
         {
-            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HiZ DepthCopy"),
                 timestamp_writes: None,
             });
@@ -496,7 +496,7 @@ impl RenderPass for HiZBuildPass {
 
         // Phase 2: build the remaining mip levels via MAX-reduction
         {
-            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HiZ MipChain"),
                 timestamp_writes: None,
             });

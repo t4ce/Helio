@@ -459,7 +459,7 @@ impl RenderPass for SsaoPass {
             multiview_mask: None,
         };
 
-        let mut pass = ctx.encoder.begin_render_pass(&desc);
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group_0, &[]);
         pass.set_bind_group(1, &self.bind_group_1, &[]);

@@ -189,8 +189,7 @@ impl RenderPass for ShadowMatrixPass {
             return Ok(());
         }
         let wg = count.div_ceil(WORKGROUP_SIZE);
-        let mut pass = ctx
-            .encoder
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }
             .begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ShadowMatrix"),
                 timestamp_writes: None,

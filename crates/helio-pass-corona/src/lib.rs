@@ -658,6 +658,33 @@ impl RenderPass for CoronaPass {
         Ok(())
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let target_view = resources.pre_aa.get().unwrap_or(target);
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: target_view, resolve_target: None, depth_slice: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("Corona Render"),
+            color_attachments,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+        })
+    }
+
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if self.emitter_count == 0 { return Ok(()); }
 
@@ -685,7 +712,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 1: Simulate ─────────────────────────────────────────────────
         {
-            let mut p = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona Simulate"), timestamp_writes: None,
             });
             p.set_pipeline(&self.simulate_pipeline);
@@ -695,7 +722,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 2: Emit ─────────────────────────────────────────────────────
         {
-            let mut p = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona Emit"), timestamp_writes: None,
             });
             p.set_pipeline(&self.emit_pipeline);
@@ -705,7 +732,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 3: Scan local (prefix scan + sort-key sentinel reset) ────────
         {
-            let mut p = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona ScanLocal"), timestamp_writes: None,
             });
             p.set_pipeline(&self.scan_local_pipeline);
@@ -715,7 +742,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 4: Scan blocks (cumulative per-emitter offsets) ──────────────
         {
-            let mut p = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona ScanBlocks"), timestamp_writes: None,
             });
             p.set_pipeline(&self.scan_blocks_pipeline);
@@ -725,7 +752,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 5: Scatter (compact_buf + sort_key_buf) ─────────────────────
         {
-            let mut p = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona Scatter"), timestamp_writes: None,
             });
             p.set_pipeline(&self.scatter_pipeline);
@@ -735,7 +762,7 @@ impl RenderPass for CoronaPass {
 
         // ── Pass 6: Build draw args ───────────────────────────────────────────
         {
-            let mut p = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona BuildMulti"), timestamp_writes: None,
             });
             p.set_pipeline(&self.build_multi_pipeline);
@@ -746,7 +773,7 @@ impl RenderPass for CoronaPass {
         // Copy STORAGE staging → INDIRECT buffer (the STORAGE+INDIRECT conflict fix).
         let args_size = ec as u64
             * std::mem::size_of::<libhelio::GpuCoronaDrawIndirect>() as u64;
-        ctx.encoder.copy_buffer_to_buffer(
+        unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
             &self.draw_args_staging, 0, &self.draw_args_buf, 0, args_size,
         );
 
@@ -764,7 +791,7 @@ impl RenderPass for CoronaPass {
         for (step_idx, step) in self.sort_steps.iter().enumerate() {
             // Copy {k, j, lo, n} from sort_steps_buf into the sort_* fields of
             // uniform_buf (offset 16 = after the first 4 u32 base fields).
-            ctx.encoder.copy_buffer_to_buffer(
+            unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
                 &self.sort_steps_buf,
                 step_idx as u64 * step_size,
                 &self.uniform_buf,
@@ -777,7 +804,7 @@ impl RenderPass for CoronaPass {
 
             if step.j == 0 {
                 // cs_sort_local: initial block sort (k=2..256 in shared memory).
-                let mut p = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Corona SortLocal"), timestamp_writes: None,
                 });
                 p.set_pipeline(&self.sort_local_pipeline);
@@ -785,7 +812,7 @@ impl RenderPass for CoronaPass {
                 p.dispatch_workgroups(blocks, 1, 1);
             } else if step.j == u32::MAX {
                 // cs_sort_local_merge: tail steps (j=128..1) for a global k-stage.
-                let mut p = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Corona SortLocalMerge"), timestamp_writes: None,
                 });
                 p.set_pipeline(&self.sort_local_merge_pipeline);
@@ -793,7 +820,7 @@ impl RenderPass for CoronaPass {
                 p.dispatch_workgroups(blocks, 1, 1);
             } else {
                 // cs_sort_global: one compare-swap step for j >= 256.
-                let mut p = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut p = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Corona SortGlobal"), timestamp_writes: None,
                 });
                 p.set_pipeline(&self.sort_global_pipeline);
@@ -806,31 +833,14 @@ impl RenderPass for CoronaPass {
 
         // ── Render pass ──────────────────────────────────────────────────────
 
-        let target_view = ctx.resources.pre_aa.get().unwrap_or(ctx.target);
-
-        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Corona Render"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target_view, resolve_target: None, depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: ctx.depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
-        });
-
-        pass.set_pipeline(&self.render_pipeline);
-        pass.set_bind_group(0, bg, &[]);
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        rp.set_pipeline(&self.render_pipeline);
+        rp.set_bind_group(0, bg, &[]);
 
         // One draw_indirect per emitter — each draws only its alive, sorted particles.
         let stride = std::mem::size_of::<libhelio::GpuCoronaDrawIndirect>() as u64;
         for i in 0..ec {
-            pass.draw_indirect(&self.draw_args_buf, i as u64 * stride);
+            rp.draw_indirect(&self.draw_args_buf, i as u64 * stride);
         }
 
         Ok(())

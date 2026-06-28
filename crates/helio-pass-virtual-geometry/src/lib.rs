@@ -834,6 +834,78 @@ impl RenderPass for VirtualGeometryPass {
         Ok(())
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let gbuffer = resources.gbuffer.read("VirtualGeometry")?;
+        let lightmap_uv = resources.gbuffer_lightmap_uv.read("VirtualGeometry")?;
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: gbuffer.albedo,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: gbuffer.normal,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: gbuffer.orm,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: gbuffer.emissive,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: lightmap_uv,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("VG GBuffer"),
+            color_attachments,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if self.last_meshlet_count == 0 || ctx.resources.vg.is_none() {
             return Ok(());
@@ -851,27 +923,20 @@ impl RenderPass for VirtualGeometryPass {
         let Some(main_scene) = ctx.resources.main_scene.read("VirtualGeometry") else {
             return Ok(());
         };
-        let Some(gbuffer) = ctx.resources.gbuffer.read("VirtualGeometry") else {
-            return Ok(());
-        };
-        let Some(lightmap_uv) = ctx.resources.gbuffer_lightmap_uv.read("VirtualGeometry") else {
-            return Ok(());
-        };
 
         let meshlet_count = self.last_meshlet_count;
 
         // Reset the atomic draw count so the cull shader appends from slot 0 each frame.
-        ctx.encoder.clear_buffer(&self.draw_count_buf, 0, None);
+        unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.draw_count_buf, 0, None);
         if !self.use_count_indirect {
             // No count-indirect support: must zero the indirect buffer so stale
             // entries beyond the visible range have instance_count = 0.
-            ctx.encoder.clear_buffer(&self.indirect_buf, 0, None);
+            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.indirect_buf, 0, None);
         }
 
         // ── Cull compute pass ─────────────────────────────────────────────────
         {
-            let mut cpass = ctx
-                .encoder
+            let mut cpass = unsafe { &mut *ctx.encoder_ptr }
                 .begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("VG Cull"),
                     timestamp_writes: None,
@@ -883,67 +948,7 @@ impl RenderPass for VirtualGeometryPass {
 
         // ── VG GBuffer draw pass (LoadOp::Load — appends to existing GBuffer) ─
         {
-            let mut rpass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("VG GBuffer"),
-                color_attachments: &[
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: gbuffer.albedo,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: gbuffer.normal,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: gbuffer.orm,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: gbuffer.emissive,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: lightmap_uv,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
-                ],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: ctx.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let rpass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
 
             let active_pipeline = match self.debug_mode {
                 20 => self.debug_draw_pipeline

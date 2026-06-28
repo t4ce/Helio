@@ -569,6 +569,39 @@ impl RenderPass for DeferredLightPass {
         Ok(())
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let pre_aa_view = resources.pre_aa.read("DeferredLight")?;
+        let load_op = if resources.sky_lut.is_some() {
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+        };
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: pre_aa_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: load_op,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("DeferredLight"),
+            color_attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let gbuffer_opt = ctx.resources.gbuffer.read("DeferredLight");
         let gbuffer = gbuffer_opt.as_ref().ok_or_else(|| {
@@ -713,37 +746,13 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_3_key = Some(tile_key);
         }
 
-        let load_op = if ctx.resources.sky_lut.is_some() {
-            wgpu::LoadOp::Load
-        } else {
-            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
-        };
-
-        let pre_aa_view = ctx.resources.pre_aa.read("DeferredLight").unwrap();
-        let color_attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: pre_aa_view,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: load_op,
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        let desc = wgpu::RenderPassDescriptor {
-            label: Some("DeferredLight"),
-            color_attachments: &color_attachments,
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        };
-        let mut pass = ctx.begin_render_pass(&desc);
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group_0, &[]);
-        pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        pass.set_bind_group(2, self.bind_group_2.as_ref().unwrap(), &[]);
-        pass.set_bind_group(3, self.bind_group_3.as_ref().unwrap(), &[]);
-        pass.draw(0..3, 0..1);
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        rp.set_pipeline(&self.pipeline);
+        rp.set_bind_group(0, &self.bind_group_0, &[]);
+        rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
+        rp.set_bind_group(2, self.bind_group_2.as_ref().unwrap(), &[]);
+        rp.set_bind_group(3, self.bind_group_3.as_ref().unwrap(), &[]);
+        rp.draw(0..3, 0..1);
         Ok(())
     }
 

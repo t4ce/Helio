@@ -1206,6 +1206,33 @@ impl RenderPass for PerfOverlayPass {
         Ok(())
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("PerfOverlay Visualize"),
+            color_attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let shared = self.shared.lock().unwrap();
         let mode = *shared.mode.lock().unwrap();
@@ -1292,28 +1319,10 @@ impl RenderPass for PerfOverlayPass {
                 self.visualize_bind_group_key = Some(key);
             }
 
-            let color_attachments = [Some(wgpu::RenderPassColorAttachment {
-                view: ctx.target,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })];
-            let render_pass_desc = wgpu::RenderPassDescriptor {
-                label: Some("PerfOverlay Visualize"),
-                color_attachments: &color_attachments,
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            };
-
-            let mut pass = ctx.begin_render_pass(&render_pass_desc);
-            pass.set_pipeline(&self.visualize_pipeline);
-            pass.set_bind_group(0, self.visualize_bind_group.as_ref().unwrap(), &[]);
-            pass.draw(0..3, 0..1);
+            let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+            rp.set_pipeline(&self.visualize_pipeline);
+            rp.set_bind_group(0, self.visualize_bind_group.as_ref().unwrap(), &[]);
+            rp.draw(0..3, 0..1);
         }
 
         Ok(())
@@ -1374,7 +1383,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         };
 
         if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
-            ctx.encoder.clear_buffer(&shared.pass_overdraw_buf, 0, None);
+            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&shared.pass_overdraw_buf, 0, None);
             let mut runtime = shared.runtime.lock().unwrap();
             runtime.frame_num = ctx.frame_num;
             runtime.snapshot_valid = false;
@@ -1541,7 +1550,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
                 // Profile one sample per frame
                 profiler.profile_next(
                     ctx.device,
-                    ctx.encoder,
+                    unsafe { &mut *ctx.encoder_ptr },
                     ctx.scene.lights,
                 );
                 
@@ -1588,7 +1597,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
 
             // Clear cost buffer at start of frame
             if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
-                ctx.encoder.clear_buffer(&shared.shader_cost_buf, 0, None);
+                unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&shared.shader_cost_buf, 0, None);
                 shared.runtime.lock().unwrap().frame_num = ctx.frame_num;
             }
 

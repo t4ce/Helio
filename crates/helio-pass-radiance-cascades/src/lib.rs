@@ -215,7 +215,7 @@ impl RenderPass for RadianceCascadesPass {
             label: Some("RadianceCascades"),
             timestamp_writes: None,
         };
-        let mut pass = ctx.encoder.begin_compute_pass(&desc);
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&desc);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(wg_x, wg_y, 1);

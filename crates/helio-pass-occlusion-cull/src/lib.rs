@@ -247,7 +247,7 @@ impl RenderPass for OcclusionCullPass {
         }
 
         let wg = count.div_ceil(WORKGROUP_SIZE);
-        let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label:            Some("OcclusionCull"),
             timestamp_writes: None,
         });

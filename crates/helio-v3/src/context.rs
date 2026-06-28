@@ -163,40 +163,25 @@ use crate::{Profiler, SceneResources};
 /// }
 /// ```
 pub struct PassContext<'a> {
-    /// Command encoder for recording GPU commands.
-    ///
-    /// Use this to begin render passes, compute passes, or issue GPU commands.
-    /// Passes receive **exclusive access** (`&mut`) to ensure no data races.
-    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// Command encoder for non-render-pass GPU ops (buffer clears, copies).
+    /// Passes do NOT call begin_render_pass on this — the executor does that.
+    /// Access via `unsafe { &mut *ctx.encoder_ptr }`.
+    pub encoder_ptr: *mut wgpu::CommandEncoder,
 
     /// Color render target (main framebuffer or offscreen texture).
-    ///
-    /// This is the texture that the pass renders into. For the final pass,
-    /// this is typically the swapchain texture.
     pub target: &'a wgpu::TextureView,
 
     /// Depth/stencil buffer.
-    ///
-    /// Used for depth testing and stencil operations. Shared across all passes
-    /// in a frame.
     pub depth: &'a wgpu::TextureView,
 
     /// Zero-copy scene resources (lights, meshes, materials).
-    ///
-    /// Provides borrowed references to GPU buffers. Passes access scene data
-    /// via `scene.lights.buffer()`, `scene.meshes.buffer()`, etc.
     pub scene: SceneResources<'a>,
 
     /// Profiler (automatic - injected by RenderGraph).
-    ///
-    /// Used internally by `begin_render_pass()` and `begin_compute_pass()` to
-    /// inject GPU timestamp queries. Not directly accessible to passes.
     #[allow(dead_code)]
     pub(crate) profiler: &'a mut Profiler,
 
     /// Current frame number (starts at 0).
-    ///
-    /// Useful for time-based effects (e.g., animations, TAA jitter).
     pub frame_num: u64,
 
     /// Render target width in pixels.
@@ -208,25 +193,39 @@ pub struct PassContext<'a> {
     /// Device reference for creating bind groups in execute() if needed (rare).
     pub device: &'a wgpu::Device,
 
-    /// Per-frame transient resource views (GBuffer, HiZ, shadow atlas, sky LUT, etc.)
+    /// Per-frame transient resource views.
     pub resources: &'a libhelio::FrameResources<'a>,
 
     /// Subpass index within a fused render-pass chain.
-    /// 0 = not in a subpass chain (standalone render pass).
-    /// >0 = pass is part of a fused chain; calls to `begin_render_pass()`
-    /// should return the active subpass encoder instead of opening a new pass.
     pub subpass_index: u32,
 
-    /// When `false`, Helio does **not** own the wgpu device (e.g. it is owned
-    /// by GPUI).  Passes must not call `device.poll(wait_indefinitely)` in
-    /// this mode — the device owner drives its own polling loop and a
-    /// concurrent poll from the render thread will corrupt driver state.
+    /// When `false`, Helio does not own the wgpu device.
     pub owns_device: bool,
 
-    /// Graph-owned texture pool for accessing transient inter-pass textures.
-    /// Passes that need the raw `wgpu::Texture` handle (e.g. to create mip views)
-    /// can look it up by name: `ctx.resource_pool.get_texture("hiz")`.
+    /// Graph-owned texture pool.
     pub resource_pool: &'a crate::graph::GraphTexturePool,
+
+    /// Active render pass, or None if not in a render pass.
+    /// Set by the executor BEFORE calling execute(). The pass draws into
+    /// this instead of calling begin_render_pass().
+    pub active_render_pass: Option<*mut wgpu::RenderPass<'static>>,
+    /// Active compute pass, or None if not in a compute pass.
+    pub active_compute_pass: Option<*mut wgpu::ComputePass<'static>>,
+}
+
+impl<'a> PassContext<'a> {
+    /// Returns a raw pointer to the active render pass, if any.
+    /// Cast to a reference in the pass: `let rp = unsafe { &mut *ctx.active_render_pass()? };`
+    #[inline]
+    pub fn active_render_pass_ptr(&self) -> Option<*mut wgpu::RenderPass<'static>> {
+        self.active_render_pass
+    }
+
+    /// Returns a raw pointer to the active compute pass, if any.
+    #[inline]
+    pub fn active_compute_pass_ptr(&self) -> Option<*mut wgpu::ComputePass<'static>> {
+        self.active_compute_pass
+    }
 }
 
 impl<'a> PassContext<'a> {
@@ -278,7 +277,7 @@ impl<'a> PassContext<'a> {
         desc: &'b wgpu::RenderPassDescriptor<'b>,
     ) -> wgpu::RenderPass<'b> {
         // TODO: GPU profiling with begin/end_gpu_pass (needs lifetime fixes)
-        self.encoder.begin_render_pass(desc)
+        unsafe { (*self.encoder_ptr).begin_render_pass(desc) }
     }
 
     /// Begins a compute pass with automatic GPU profiling.
@@ -318,7 +317,7 @@ impl<'a> PassContext<'a> {
         desc: &'b wgpu::ComputePassDescriptor<'b>,
     ) -> wgpu::ComputePass<'b> {
         // TODO: GPU profiling with begin/end_gpu_pass (needs lifetime fixes)
-        self.encoder.begin_compute_pass(desc)
+        unsafe { (*self.encoder_ptr).begin_compute_pass(desc) }
     }
 }
 

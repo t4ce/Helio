@@ -479,65 +479,68 @@ impl RenderPass for BillboardPass {
         Ok(())
     }
 
-    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // O(1): single instanced draw — GPU expands billboards into screen quads.
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         if self.instance_count == 0 {
-            return Ok(());
+            return None;
         }
 
         let target_view = if self.occluded_by_geometry {
-            ctx.resources.pre_aa.get().unwrap_or(ctx.target)
+            resources.pre_aa.get().unwrap_or(target)
         } else {
-            ctx.target
+            target
         };
 
-        let color_attachment = wgpu::RenderPassColorAttachment {
-            view: target_view,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        };
-        // When render_scale < 1.0 the internal depth buffer (ctx.depth) is smaller than
-        // ctx.target (native resolution).  The renderer provides a native-sized full_res_depth
-        // texture in that case; use it for proper depth testing (geometry occlusion).
-        // At render_scale = 1.0 full_res_depth is None and we use ctx.depth directly.
-
-        let (depth_view, depth_load_op) = if self.occluded_by_geometry {
-            (ctx.depth, wgpu::LoadOp::Load)
-        } else if let Some(frd) = ctx.resources.full_res_depth.get() {
-            (frd, wgpu::LoadOp::Load)
+        let depth_view = if self.occluded_by_geometry {
+            depth
+        } else if let Some(frd) = resources.full_res_depth.get() {
+            frd
         } else {
-            (ctx.depth, wgpu::LoadOp::Load)
+            depth
         };
-        let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
-            view: depth_view,
-            // Read-only depth: test against opaque scene but do not write.
-            depth_ops: Some(wgpu::Operations {
-                load: depth_load_op,
-                store: wgpu::StoreOp::Store,
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             }),
-            stencil_ops: None,
-        };
-        let color_attachments = [Some(color_attachment)];
-        let desc = wgpu::RenderPassDescriptor {
+        ]));
+        Some(wgpu::RenderPassDescriptor {
             label: Some("Billboard"),
-            color_attachments: &color_attachments,
-            depth_stencil_attachment: Some(depth_attachment),
+            color_attachments,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
-        };
+        })
+    }
 
-        let mut pass = ctx.encoder.begin_render_pass(&desc);
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group_0, &[]);
-        pass.set_bind_group(1, &self.bind_group_1, &[]);
-        pass.set_vertex_buffer(0, self.quad_vertex_buf.slice(..));
-        pass.set_vertex_buffer(1, self.instance_buf.slice(..));
-        pass.draw(0..6, 0..self.instance_count); // O(1) — single GPU draw call
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if self.instance_count == 0 {
+            return Ok(());
+        }
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        rp.set_pipeline(&self.pipeline);
+        rp.set_bind_group(0, &self.bind_group_0, &[]);
+        rp.set_bind_group(1, &self.bind_group_1, &[]);
+        rp.set_vertex_buffer(0, self.quad_vertex_buf.slice(..));
+        rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+        rp.draw(0..6, 0..self.instance_count);
         Ok(())
     }
 }

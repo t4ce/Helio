@@ -1106,15 +1106,15 @@ impl RenderPass for SdfPass {
             // ── GPU reset (zero CPU work — pure encoder commands) ─────────────
             // Restore indirect dispatch args to [0,1,1]×level_count via GPU DMA.
             // classify will atomically increment element x (dirty count); y,z stay 1.
-            ctx.encoder.copy_buffer_to_buffer(
+            unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
                 &self.eval_indirect_template_buffer,
                 0,
                 &self.eval_indirect_buffer,
                 0,
                 self.level_count as u64 * 3 * 4,
             );
-            ctx.encoder.clear_buffer(&self.dirty_flags_buffer, 0, None);
-            ctx.encoder.clear_buffer(&self.dirty_bricks_buffer, 0, None);
+            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.dirty_flags_buffer, 0, None);
+            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.dirty_bricks_buffer, 0, None);
 
             // ── Pass 1: Scroll detection ───────────────────────────────────────
             // One workgroup of 8 threads checks each level's snap origin.
