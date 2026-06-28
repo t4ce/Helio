@@ -660,6 +660,41 @@ impl RenderGraph {
             let names: Vec<&str> = self.passes[chain.start..chain.end].iter().map(|p| p.name()).collect();
             eprintln!("    potential chain: {}", names.join(" → "));
         }
+
+        // ── Full pass pipeline report ──────────────────────────────────
+        let chain_set: std::collections::HashSet<usize> = self.subpass_chains.iter()
+            .flat_map(|r| r.clone())
+            .collect();
+        eprintln!("── Pass pipeline ({} total) ──", self.passes.len());
+        for (i, pass) in self.passes.iter().enumerate() {
+            let in_chain = chain_set.contains(&i);
+            let fusion = if in_chain {
+                // Find which chain
+                self.subpass_chains.iter()
+                    .find(|r| r.contains(&i))
+                    .map(|r| {
+                        if i == r.start { "╔══ FUSED ══>" }
+                        else if i == r.end - 1 { "╚══ FUSED ══>" }
+                        else { "║ FUSED" }
+                    })
+                    .unwrap_or("")
+            } else {
+                ""
+            };
+            let has_desc = if pass.render_pass_descriptor(
+                &wgpu::TextureView::default(),
+                &wgpu::TextureView::default(),
+                &libhelio::FrameResources::empty(),
+            ).is_some() { "D" } else { "L" };
+            eprintln!("  {:>3}. [{:>3}] {:<35} {}",
+                i,
+                has_desc,
+                pass.name(),
+                fusion,
+            );
+        }
+        eprintln!("  (D=executor-managed descriptor  L=legacy self-managed)");
+
         eprintln!("─────────────────────────────────────");
     }
 
