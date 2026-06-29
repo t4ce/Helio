@@ -37,11 +37,11 @@ struct HiZUniforms {
 
 /// Metadata for loaded static HiZ data.
 #[derive(Clone, Debug)]
-struct StaticHizMetadata {
-    grid_resolution: [u32; 3],
-    world_bounds_min: [f32; 3],
-    world_bounds_max: [f32; 3],
-    mip_count: u32,
+pub struct StaticHizMetadata {
+    pub grid_resolution: [u32; 3],
+    pub world_bounds_min: [f32; 3],
+    pub world_bounds_max: [f32; 3],
+    pub mip_count: u32,
 }
 
 pub struct HiZBuildPass {
@@ -245,6 +245,12 @@ impl HiZBuildPass {
         }
     }
 
+    /// Returns metadata about the loaded static HiZ voxel grid, or `None` if no
+    /// static HiZ data has been loaded.
+    pub fn static_hiz_metadata(&self) -> Option<&StaticHizMetadata> {
+        self.static_hiz_metadata.as_ref()
+    }
+
     /// Load pre-baked static HiZ data from Nebula baker.
     ///
     /// This creates a 3D texture containing omnidirectional voxel occlusion data
@@ -378,7 +384,7 @@ impl RenderPass for HiZBuildPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["hiz", "hiz_sampler"]
+        &["hiz", "hiz_sampler", "static_hiz", "static_hiz_sampler"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

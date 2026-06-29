@@ -43,6 +43,13 @@ struct GpuDrawCall {
     instance_count: u32,  // number of consecutive instances
 }
 
+struct GpuAabb {
+    min:   vec3<f32>,
+    _pad0: f32,
+    max:   vec3<f32>,
+    _pad1: f32,
+}
+
 struct DrawIndexedIndirect {
     index_count:    u32,
     instance_count: u32,
@@ -55,13 +62,26 @@ struct DrawIndexedIndirect {
 @group(0) @binding(1) var<uniform>            cull:       CullUniforms;
 @group(0) @binding(2) var<storage, read>      instances:  array<GpuInstance>;
 @group(0) @binding(3) var<storage, read>      draw_calls: array<GpuDrawCall>;
-@group(0) @binding(4) var<storage, read_write> indirect:  array<DrawIndexedIndirect>;
+@group(0) @binding(4) var<storage, read>      aabbs:     array<GpuAabb>;
+@group(0) @binding(5) var<storage, read_write> indirect:  array<DrawIndexedIndirect>;
 
 fn sphere_in_frustum(center: vec3<f32>, radius: f32) -> bool {
     for (var i = 0u; i < 6u; i++) {
         let plane = cull.frustum_planes[i];
         let dist = dot(plane.xyz, center) + plane.w;
         if dist + radius < 0.0 { return false; }
+    }
+    return true;
+}
+
+fn aabb_in_frustum(min: vec3<f32>, max: vec3<f32>) -> bool {
+    for (var i = 0u; i < 6u; i++) {
+        let plane = cull.frustum_planes[i];
+        let px = select(min.x, max.x, plane.x >= 0.0);
+        let py = select(min.y, max.y, plane.y >= 0.0);
+        let pz = select(min.z, max.z, plane.z >= 0.0);
+        let dist = dot(plane.xyz, vec3<f32>(px, py, pz)) + plane.w;
+        if dist < 0.0 { return false; }
     }
     return true;
 }
@@ -75,6 +95,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Test the first instance of the group for frustum culling (group-level cull).
     // If the representative passes, all instances in the batch are drawn.
     let inst = instances[dc.first_instance];
+    let aabb = aabbs[dc.first_instance];
+
+    // AABB-based frustum culling (tighter than sphere for elongated objects).
+    // Fall back to sphere if AABB is degenerate (min == max).
+    let aabb_visible = aabb_in_frustum(aabb.min, aabb.max);
+    let aabb_degenerate = all(aabb.min == aabb.max);
 
     // bounds.xyz is the world-space bounding sphere center (pre-computed by CPU).
     // bounds.w is the world-space radius.  Do NOT apply the model matrix here —
@@ -82,7 +108,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world_center = inst.bounds.xyz;
     let world_radius = inst.bounds.w;
 
-    let visible = sphere_in_frustum(world_center, world_radius);
+    let sphere_visible = sphere_in_frustum(world_center, world_radius);
+
+    let visible = select(sphere_visible, aabb_visible, !aabb_degenerate);
 
     // Sub-pixel culling: skip objects projecting to < 1 pixel.
     var should_draw = visible;

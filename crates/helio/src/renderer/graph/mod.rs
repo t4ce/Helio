@@ -19,6 +19,7 @@ use helio_pass_indirect_dispatch::IndirectDispatchPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
 use helio_pass_gbuffer::GBufferPass;
 use helio_pass_shadow::ShadowPass;
+use helio_pass_shadow_cull::ShadowCullPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_sky_lut::SkyLutPass;
@@ -105,7 +106,20 @@ fn add_common_early_passes(
     let face_geom_count_buf = Arc::clone(&shadow_dirty_pass.face_geom_count_buf);
     graph.add_pass(Box::new(shadow_dirty_pass));
 
-    graph.add_pass(Box::new(ShadowPass::new(device, face_dirty_buf, face_geom_count_buf, config.shadow_atlas_size)));
+    // ShadowCullPass: per-face frustum culling for shadow geometry
+    let shadow_cull_pass = ShadowCullPass::new(device, Arc::clone(&face_dirty_buf));
+    let face_cull_indirect = Arc::clone(&shadow_cull_pass.face_indirect_buf);
+    let face_cull_counts = Arc::clone(&shadow_cull_pass.face_counts_buf);
+    graph.add_pass(Box::new(shadow_cull_pass));
+
+    graph.add_pass(Box::new(ShadowPass::new(
+        device,
+        face_dirty_buf,
+        face_geom_count_buf,
+        face_cull_indirect,
+        face_cull_counts,
+        config.shadow_atlas_size,
+    )));
 
     if scene.sky_context().has_sky {
         graph.add_pass(Box::new(SkyLutPass::new(device, camera_buf)));
@@ -128,12 +142,23 @@ fn add_common_early_passes(
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(device)));
     graph.add_pass(Box::new(hiz_pass));
-    graph.add_pass(Box::new(OcclusionCullPass::new(
+    let mut occlusion_cull = OcclusionCullPass::new(
         device,
         hiz_sampler,
         w,
         h,
-    )));
+    );
+    // Wire static HiZ metadata from the baked voxel grid to the occlusion pass.
+    if let Some(meta) = graph.find_pass::<HiZBuildPass>()
+        .and_then(|p| p.static_hiz_metadata())
+    {
+        occlusion_cull.set_static_hiz_metadata(
+            meta.world_bounds_min,
+            meta.world_bounds_max,
+            meta.grid_resolution,
+        );
+    }
+    graph.add_pass(Box::new(occlusion_cull));
 
     let perf_overlay_shared = PerfOverlayShared::new(device, w, h);
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));

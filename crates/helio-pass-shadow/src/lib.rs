@@ -61,6 +61,10 @@ const MAX_SHADOW_FACES: usize = 256;
 /// guaranteed to be ≤ 256 on every wgpu backend (Metal, Vulkan, DX12, WebGPU).
 const FACE_BUF_STRIDE: u64 = 256;
 
+/// Number of draws per face in the culled indirect buffer (written by ShadowCullPass).
+/// Must match `MAX_DRAWS_PER_FACE` in helio-pass-shadow-cull.
+const MAX_DRAWS_PER_FACE: u32 = 4096;
+
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct ShadowPass {
@@ -100,7 +104,18 @@ pub struct ShadowPass {
     face_dirty_buf: Arc<wgpu::Buffer>,
     /// `array<u32, 256>` — 0 = clean, movable_draw_count = dirty (written by ShadowDirtyPass).
     /// Used as indirect draw count for movable geometry (`multi_draw_indexed_indirect_count`).
+    #[allow(dead_code)]
     face_geom_count_buf: Arc<wgpu::Buffer>,
+
+    /// Per-face culled indirect commands (written by ShadowCullPass).
+    /// Layout: `MAX_FACES × MAX_DRAWS_PER_FACE × 20` bytes — each face's range
+    /// contains only objects whose bounding sphere intersects that face's frustum.
+    face_cull_indirect: Arc<wgpu::Buffer>,
+
+    /// Per-face culled draw counts (written by ShadowCullPass).
+    /// `array<u32, 256>` — number of visible draws per face, written atomically
+    /// by the compute shader.  Used with `multi_draw_indexed_indirect_count`.
+    face_cull_counts: Arc<wgpu::Buffer>,
 
     /// Resolution of each atlas face (width × height).
     atlas_size: u32,
@@ -131,6 +146,8 @@ impl ShadowPass {
         device: &wgpu::Device,
         face_dirty_buf: Arc<wgpu::Buffer>,
         face_geom_count_buf: Arc<wgpu::Buffer>,
+        face_cull_indirect: Arc<wgpu::Buffer>,
+        face_cull_counts: Arc<wgpu::Buffer>,
         atlas_size: u32,
     ) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
@@ -357,6 +374,8 @@ impl ShadowPass {
             compare_sampler,
             face_dirty_buf,
             face_geom_count_buf,
+            face_cull_indirect,
+            face_cull_counts,
             per_caster_last_gen: [0u64; 42],
             last_rendered_shadow_count: 0,
             last_movable_objects_gen: u64::MAX,
@@ -585,7 +604,7 @@ impl RenderPass for ShadowPass {
         //     clean faces.  The loop runs for all active faces but clean faces produce
         //     a near-zero-cost render pass (LoadOp::Load with 0 GPU draws).
         if any_dirty_caster || objects_moved {
-            let movable_indirect = ctx.scene.shadow_movable_indirect;
+            let _movable_indirect = ctx.scene.shadow_movable_indirect;
 
             for face in 0..face_count {
                 let caster_slot  = face / 6;
@@ -594,7 +613,7 @@ impl RenderPass for ShadowPass {
                 let dyn_offset   = (face as u64 * FACE_BUF_STRIDE) as u32;
 
                 if light_dirty {
-                    // ── Light moved: full clear + all movable draws ────────────
+                    // ── Light moved: full clear + culled draws ─────────────────
                     let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Shadow/Dynamic/LightDirty"),
                         color_attachments: &[],
@@ -615,16 +634,29 @@ impl RenderPass for ShadowPass {
                         pass.set_bind_group(0, bg, &[dyn_offset]);
                         pass.set_vertex_buffer(0, vertices.slice(..));
                         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                         #[cfg(not(target_arch = "wasm32"))]
-                        pass.multi_draw_indexed_indirect(
-                            movable_indirect,
-                            0,
-                            movable_draw_count,
-                        );
-                        #[cfg(target_arch = "wasm32")]
-                        for i in 0..movable_draw_count {
-                            pass.draw_indexed_indirect(movable_indirect, i as u64 * 20);
+                        if self.supports_multi_draw_count {
+                            pass.multi_draw_indexed_indirect_count(
+                                &self.face_cull_indirect,
+                                face_offset,
+                                &self.face_cull_counts,
+                                face as u64 * 4,
+                                MAX_DRAWS_PER_FACE,
+                            );
+                        } else {
+                            pass.multi_draw_indexed_indirect(
+                                &self.face_cull_indirect,
+                                face_offset,
+                                MAX_DRAWS_PER_FACE,
+                            );
                         }
+                        #[cfg(target_arch = "wasm32")]
+                        pass.multi_draw_indexed_indirect(
+                            &self.face_cull_indirect,
+                            face_offset,
+                            MAX_DRAWS_PER_FACE,
+                        );
                     }
                 } else if objects_moved {
                     // ── Objects moved: GPU-driven clear + geometry ─────────────
@@ -668,12 +700,13 @@ impl RenderPass for ShadowPass {
                             pass.set_bind_group(0, bg, &[dyn_offset]);
                             pass.set_vertex_buffer(0, vertices.slice(..));
                             pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                             pass.multi_draw_indexed_indirect_count(
-                                movable_indirect,
-                                0,
-                                &self.face_geom_count_buf,
+                                &self.face_cull_indirect,
+                                face_offset,
+                                &self.face_cull_counts,
                                 face as u64 * 4,
-                                movable_draw_count,
+                                MAX_DRAWS_PER_FACE,
                             );
                         }
                     } else {
@@ -698,10 +731,11 @@ impl RenderPass for ShadowPass {
                             pass.set_bind_group(0, bg, &[dyn_offset]);
                             pass.set_vertex_buffer(0, vertices.slice(..));
                             pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                             pass.multi_draw_indexed_indirect(
-                                movable_indirect,
-                                0,
-                                movable_draw_count,
+                                &self.face_cull_indirect,
+                                face_offset,
+                                MAX_DRAWS_PER_FACE,
                             );
                         }
                     }

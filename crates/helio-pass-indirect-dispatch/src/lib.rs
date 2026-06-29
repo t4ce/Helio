@@ -29,7 +29,7 @@ pub struct IndirectDispatchPass {
     /// (GrowableBuffers reallocate on resize, invalidating old bind groups).
     bind_group: Option<wgpu::BindGroup>,
     /// Tuple of raw buffer pointers used as a staleness key.
-    bind_group_key: Option<(usize, usize, usize, usize)>,
+    bind_group_key: Option<(usize, usize, usize, usize, usize)>,
     /// Draw count uploaded in `prepare()`, used in `execute()`.
     draw_count: u32,
 }
@@ -97,9 +97,20 @@ impl IndirectDispatchPass {
                     },
                     count: None,
                 },
-                // binding 4: indirect output (read_write)
+                // binding 4: AABBs (read)
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 5: indirect output (read_write)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -168,6 +179,7 @@ impl RenderPass for IndirectDispatchPass {
             ctx.scene.camera as *const wgpu::Buffer as usize,
             ctx.scene.instances as *const wgpu::Buffer as usize,
             ctx.scene.draw_calls as *const wgpu::Buffer as usize,
+            ctx.scene.aabbs as *const wgpu::Buffer as usize,
             ctx.scene.indirect as *const wgpu::Buffer as usize,
         );
         if self.bind_group_key != Some(key) {
@@ -193,6 +205,10 @@ impl RenderPass for IndirectDispatchPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
+                        resource: ctx.scene.aabbs.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
                         resource: ctx.scene.indirect.as_entire_binding(),
                     },
                 ],

@@ -18,10 +18,20 @@ const WORKGROUP_SIZE: u32 = 64;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullParams {
-    screen_width:  u32,
-    screen_height: u32,
-    draw_count:    u32,
-    hiz_mip_count: u32,
+    screen_width:         u32,
+    screen_height:        u32,
+    draw_count:           u32,
+    hiz_mip_count:        u32,
+    static_hiz_available: u32,
+    grid_resolution_x:    u32,
+    grid_resolution_y:    u32,
+    grid_resolution_z:    u32,
+    world_bounds_min_x:   f32,
+    world_bounds_min_y:   f32,
+    world_bounds_min_z:   f32,
+    world_bounds_max_x:   f32,
+    world_bounds_max_y:   f32,
+    world_bounds_max_z:   f32,
 }
 
 pub struct OcclusionCullPass {
@@ -30,10 +40,19 @@ pub struct OcclusionCullPass {
     cull_params_buf: wgpu::Buffer,
     hiz_sampler:     Arc<wgpu::Sampler>,
 
+    /// Placeholder 3D texture used when no static HiZ is loaded.
+    placeholder_static_hiz_view:   wgpu::TextureView,
+    placeholder_static_hiz_sampler: wgpu::Sampler,
+
+    /// Metadata for the static HiZ voxel grid (set from HiZBuildPass).
+    static_hiz_bounds_min:    [f32; 3],
+    static_hiz_bounds_max:    [f32; 3],
+    static_hiz_grid_resolution: [u32; 3],
+
     /// Cached bind group, invalidated when buffer pointers change.
     bind_group:     Option<wgpu::BindGroup>,
-    /// (camera_ptr, instances_ptr, draw_calls_ptr, indirect_ptr, hiz_view_ptr)
-    bind_group_key: Option<(usize, usize, usize, usize, usize)>,
+    /// (camera, instances, draw_calls, indirect, hiz_view, static_hiz_view, static_hiz_sampler)
+    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
     screen_width:   u32,
     screen_height:  u32,
 }
@@ -61,6 +80,37 @@ impl OcclusionCullPass {
             size:               std::mem::size_of::<CullParams>() as u64,
             usage:              wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+
+        // Placeholder 3D texture for static HiZ when none is loaded.
+        let placeholder_static_hiz = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("OcclusionCull Placeholder Static HiZ"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let placeholder_static_hiz_view = placeholder_static_hiz.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("OcclusionCull Placeholder Static HiZ View"),
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
+        let placeholder_static_hiz_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("OcclusionCull Placeholder Static HiZ Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
         });
 
         // Bind group layout must match occlusion_cull.wgsl binding declarations.
@@ -140,6 +190,24 @@ impl OcclusionCullPass {
                     },
                     count: None,
                 },
+                // 7: Static HiZ 3D voxel texture (pre-baked PVS, R32Float, non-filterable)
+                wgpu::BindGroupLayoutEntry {
+                    binding:    7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type:    wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled:   false,
+                    },
+                    count: None,
+                },
+                // 8: Static HiZ sampler (nearest, non-filtering — R32Float is non-filterable)
+                wgpu::BindGroupLayoutEntry {
+                    binding:    8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
             ],
         });
 
@@ -163,6 +231,11 @@ impl OcclusionCullPass {
             bgl,
             cull_params_buf,
             hiz_sampler,
+            placeholder_static_hiz_view,
+            placeholder_static_hiz_sampler,
+            static_hiz_bounds_min: [0.0; 3],
+            static_hiz_bounds_max: [0.0; 3],
+            static_hiz_grid_resolution: [0; 3],
             bind_group:     None,
             bind_group_key: None,
             screen_width,
@@ -175,6 +248,18 @@ impl OcclusionCullPass {
         self.screen_width = width;
         self.screen_height = height;
     }
+
+    /// Set the static HiZ voxel grid metadata (called when pre-baked data is loaded).
+    pub fn set_static_hiz_metadata(
+        &mut self,
+        bounds_min: [f32; 3],
+        bounds_max: [f32; 3],
+        resolution: [u32; 3],
+    ) {
+        self.static_hiz_bounds_min = bounds_min;
+        self.static_hiz_bounds_max = bounds_max;
+        self.static_hiz_grid_resolution = resolution;
+    }
 }
 
 impl RenderPass for OcclusionCullPass {
@@ -183,15 +268,26 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["hiz"]
+        &["hiz", "static_hiz", "static_hiz_sampler"]
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let static_hiz_available = ctx.frame_resources.static_hiz.is_some();
         let p = CullParams {
-            screen_width:  self.screen_width,
-            screen_height: self.screen_height,
-            draw_count:    ctx.scene.draw_calls.len() as u32,
-            hiz_mip_count: mip_levels(self.screen_width, self.screen_height),
+            screen_width:         self.screen_width,
+            screen_height:        self.screen_height,
+            draw_count:           ctx.scene.draw_calls.len() as u32,
+            hiz_mip_count:        mip_levels(self.screen_width, self.screen_height),
+            static_hiz_available: if static_hiz_available { 1 } else { 0 },
+            grid_resolution_x:    self.static_hiz_grid_resolution[0],
+            grid_resolution_y:    self.static_hiz_grid_resolution[1],
+            grid_resolution_z:    self.static_hiz_grid_resolution[2],
+            world_bounds_min_x:   self.static_hiz_bounds_min[0],
+            world_bounds_min_y:   self.static_hiz_bounds_min[1],
+            world_bounds_min_z:   self.static_hiz_bounds_min[2],
+            world_bounds_max_x:   self.static_hiz_bounds_max[0],
+            world_bounds_max_y:   self.static_hiz_bounds_max[1],
+            world_bounds_max_z:   self.static_hiz_bounds_max[2],
         };
         ctx.write_buffer(&self.cull_params_buf, 0, bytemuck::bytes_of(&p));
         Ok(())
@@ -212,12 +308,21 @@ impl RenderPass for OcclusionCullPass {
         // HiZ texture view changes (e.g. scene grows, graph reallocates on resize).
         let hiz_view = ctx.resources.hiz.as_ref()
             .expect("OcclusionCull: 'hiz' view not routed by graph — is HiZBuildPass declared?");
+
+        // Resolve static HiZ resources (use placeholder when no pre-baked data is loaded).
+        let static_hiz_view = ctx.resources.static_hiz.get()
+            .unwrap_or(&self.placeholder_static_hiz_view);
+        let static_hiz_sampler = ctx.resources.static_hiz_sampler.get()
+            .unwrap_or(&self.placeholder_static_hiz_sampler);
+
         let key = (
-            ctx.scene.camera     as *const _ as usize,
-            ctx.scene.instances   as *const _ as usize,
-            ctx.scene.draw_calls  as *const _ as usize,
-            ctx.scene.indirect    as *const _ as usize,
-            hiz_view as *const _ as usize,
+            ctx.scene.camera       as *const _ as usize,
+            ctx.scene.instances     as *const _ as usize,
+            ctx.scene.draw_calls    as *const _ as usize,
+            ctx.scene.indirect      as *const _ as usize,
+            hiz_view               as *const _ as usize,
+            static_hiz_view        as *const _ as usize,
+            static_hiz_sampler     as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -251,6 +356,14 @@ impl RenderPass for OcclusionCullPass {
                     wgpu::BindGroupEntry {
                         binding:  6,
                         resource: ctx.scene.indirect.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  7,
+                        resource: wgpu::BindingResource::TextureView(static_hiz_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  8,
+                        resource: wgpu::BindingResource::Sampler(static_hiz_sampler),
                     },
                 ],
             }));
