@@ -85,6 +85,11 @@ struct GpuDrawCall {
 //   [i*5 + 3] base_vertex     (i32 reinterpreted as u32 for array access)
 //   [i*5 + 4] first_instance
 @group(0) @binding(6) var<storage, read_write> indirect: array<u32>;
+@group(0) @binding(9) var<storage, read_write> stats:   array<atomic<u32>>;
+
+// Stats layout (shared with IndirectDispatchPass):
+// 4: occlusion_culled  (we only write to slot 4)
+// 7: shadow_occlusion_culled
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -202,6 +207,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let depth_bias = 1.0 / 65536.0;
     if near_z > hiz_depth + depth_bias {
         indirect[idx * 5u + 1u] = 0u;
+        atomicAdd(&stats[4u], 1u);
+        if (inst.flags & 1u) != 0u {
+            atomicAdd(&stats[7u], 1u);
+        }
         return;
     }
 
@@ -233,6 +242,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let occlusion_dist = textureSampleLevel(static_hiz_tex, static_hiz_samp, vec3<f32>(clamped_uvw.x, clamped_uvw.y, w), 0.0).r;
             if cam_dist > occlusion_dist + 0.1 {
                 indirect[idx * 5u + 1u] = 0u;
+                atomicAdd(&stats[4u], 1u);
+                if (inst.flags & 1u) != 0u {
+                    atomicAdd(&stats[7u], 1u);
+                }
             }
         }
     }

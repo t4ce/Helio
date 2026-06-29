@@ -25,17 +25,18 @@ pub struct IndirectDispatchPass {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
+    cull_stats_buf: wgpu::Buffer,
     /// Lazy bind group — rebuilt whenever the underlying buffer pointers change
     /// (GrowableBuffers reallocate on resize, invalidating old bind groups).
     bind_group: Option<wgpu::BindGroup>,
     /// Tuple of raw buffer pointers used as a staleness key.
-    bind_group_key: Option<(usize, usize, usize, usize, usize)>,
+    bind_group_key: Option<(usize, usize, usize, usize, usize, usize)>,
     /// Draw count uploaded in `prepare()`, used in `execute()`.
     draw_count: u32,
 }
 
 impl IndirectDispatchPass {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, cull_stats_buf: wgpu::Buffer) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("IndirectDispatch Shader"),
             source: wgpu::ShaderSource::Wgsl(
@@ -119,6 +120,17 @@ impl IndirectDispatchPass {
                     },
                     count: None,
                 },
+                // binding 6: culling stats (read_write, atomic counters)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -141,6 +153,7 @@ impl IndirectDispatchPass {
             pipeline,
             bind_group_layout,
             uniform_buf,
+            cull_stats_buf: cull_stats_buf.clone(),
             bind_group: None,
             bind_group_key: None,
             draw_count: 0,
@@ -181,6 +194,7 @@ impl RenderPass for IndirectDispatchPass {
             ctx.scene.draw_calls as *const wgpu::Buffer as usize,
             ctx.scene.aabbs as *const wgpu::Buffer as usize,
             ctx.scene.indirect as *const wgpu::Buffer as usize,
+            &self.cull_stats_buf as *const wgpu::Buffer as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -210,6 +224,10 @@ impl RenderPass for IndirectDispatchPass {
                     wgpu::BindGroupEntry {
                         binding: 5,
                         resource: ctx.scene.indirect.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.cull_stats_buf.as_entire_binding(),
                     },
                 ],
             }));

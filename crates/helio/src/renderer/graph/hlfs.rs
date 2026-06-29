@@ -25,7 +25,7 @@ pub fn build_hlfs_graph(
 
     let mut graph = RenderGraph::new(device, queue);
 
-    let perf = add_common_early_passes(
+    let (perf, _cull_stats) = add_common_early_passes(
         &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, iw, ih,
     );
 

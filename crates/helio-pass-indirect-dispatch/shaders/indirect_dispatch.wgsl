@@ -64,6 +64,15 @@ struct DrawIndexedIndirect {
 @group(0) @binding(3) var<storage, read>      draw_calls: array<GpuDrawCall>;
 @group(0) @binding(4) var<storage, read>      aabbs:     array<GpuAabb>;
 @group(0) @binding(5) var<storage, read_write> indirect:  array<DrawIndexedIndirect>;
+@group(0) @binding(6) var<storage, read_write> stats:   array<atomic<u32>>;
+
+// Stats layout:
+// 0: total_draws
+// 1: frustum_culled
+// 2: subpixel_culled
+// 3: frustum_visible
+// 4: shadow_total
+// 5: shadow_frustum_visible
 
 fn sphere_in_frustum(center: vec3<f32>, radius: f32) -> bool {
     for (var i = 0u; i < 6u; i++) {
@@ -125,11 +134,41 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    indirect[idx] = DrawIndexedIndirect(
-        dc.index_count,
-        select(0u, dc.instance_count, should_draw),
-        dc.first_index,
-        dc.vertex_offset,
-        dc.first_instance,
-    );
+    let is_shadow_caster = (inst.flags & 1u) != 0u;
+    if is_shadow_caster {
+        atomicAdd(&stats[4u], 1u);
+    }
+
+    if should_draw {
+        indirect[idx] = DrawIndexedIndirect(
+            dc.index_count,
+            dc.instance_count,
+            dc.first_index,
+            dc.vertex_offset,
+            dc.first_instance,
+        );
+        atomicAdd(&stats[3u], 1u);
+        if is_shadow_caster {
+            atomicAdd(&stats[5u], 1u);
+        }
+    } else if !visible {
+        indirect[idx] = DrawIndexedIndirect(
+            dc.index_count,
+            0u,
+            dc.first_index,
+            dc.vertex_offset,
+            dc.first_instance,
+        );
+        atomicAdd(&stats[1u], 1u);
+    } else {
+        indirect[idx] = DrawIndexedIndirect(
+            dc.index_count,
+            0u,
+            dc.first_index,
+            dc.vertex_offset,
+            dc.first_instance,
+        );
+        atomicAdd(&stats[2u], 1u);
+    }
+    atomicAdd(&stats[0u], 1u);
 }

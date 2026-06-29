@@ -63,7 +63,9 @@ pub fn create_depth_resources(
 /// Shared early-pipeline setup: shadow passes, sky, debug draw (pre-geometry),
 /// indirect dispatch, occlusion cull, HiZ, and perf overlay analyzer.
 ///
-/// Returns `(perf_overlay_shared,)` for use by later pipeline stages.
+/// Returns `(perf_overlay_shared, cull_stats_buf)` for use by later pipeline stages.
+/// `cull_stats_buf` is a storage buffer with 8 atomic u32 counters for culling statistics,
+/// updated by IndirectDispatchPass and OcclusionCullPass, cleared at the start of each frame.
 fn add_common_early_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
@@ -73,7 +75,7 @@ fn add_common_early_passes(
     debug_camera_buf: &wgpu::Buffer,
     w: u32,
     h: u32,
-) -> Arc<std::sync::Mutex<PerfOverlayShared>> {
+) -> (Arc<std::sync::Mutex<PerfOverlayShared>>, wgpu::Buffer) {
     let gpu_scene = scene.gpu_scene();
     let camera_buf = gpu_scene.camera.buffer();
 
@@ -90,6 +92,15 @@ fn add_common_early_passes(
         label: Some("Shadow Hashes"),
         size: 64,
         usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    // Shared culling stats buffer (8 atomic u32 counters, cleared before culling each frame).
+    // Updated by IndirectDispatchPass and OcclusionCullPass, read back via staging buffer.
+    let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("CullStats"),
+        size: 32,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     graph.add_pass(Box::new(ShadowMatrixPass::new(
@@ -140,13 +151,17 @@ fn add_common_early_passes(
         true,
     )));
 
-    graph.add_pass(Box::new(IndirectDispatchPass::new(device)));
+    graph.add_pass(Box::new(IndirectDispatchPass::new(
+        device,
+        cull_stats_buf.clone(),
+    )));
     graph.add_pass(Box::new(hiz_pass));
     let mut occlusion_cull = OcclusionCullPass::new(
         device,
         hiz_sampler,
         w,
         h,
+        cull_stats_buf.clone(),
     );
     // Wire static HiZ metadata from the baked voxel grid to the occlusion pass.
     if let Some(meta) = graph.find_pass::<HiZBuildPass>()
@@ -163,7 +178,7 @@ fn add_common_early_passes(
     let perf_overlay_shared = PerfOverlayShared::new(device, w, h);
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
-    perf_overlay_shared
+    (perf_overlay_shared, cull_stats_buf)
 }
 
 /// Shared geometry passes: GBuffer + VirtualGeometry.

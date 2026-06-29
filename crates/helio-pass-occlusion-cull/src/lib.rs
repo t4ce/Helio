@@ -39,6 +39,7 @@ pub struct OcclusionCullPass {
     bgl:             wgpu::BindGroupLayout,
     cull_params_buf: wgpu::Buffer,
     hiz_sampler:     Arc<wgpu::Sampler>,
+    cull_stats_buf:  wgpu::Buffer,
 
     /// Placeholder 3D texture used when no static HiZ is loaded.
     placeholder_static_hiz_view:   wgpu::TextureView,
@@ -52,7 +53,7 @@ pub struct OcclusionCullPass {
     /// Cached bind group, invalidated when buffer pointers change.
     bind_group:     Option<wgpu::BindGroup>,
     /// (camera, instances, draw_calls, indirect, hiz_view, static_hiz_view, static_hiz_sampler)
-    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     screen_width:   u32,
     screen_height:  u32,
 }
@@ -67,6 +68,7 @@ impl OcclusionCullPass {
         hiz_sampler: Arc<wgpu::Sampler>,
         screen_width: u32,
         screen_height: u32,
+        cull_stats_buf: wgpu::Buffer,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("OcclusionCull Shader"),
@@ -208,6 +210,17 @@ impl OcclusionCullPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
+                // 9: Culling stats (read_write, atomic counters)
+                wgpu::BindGroupLayoutEntry {
+                    binding:    9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty:                 wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size:   None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -231,6 +244,7 @@ impl OcclusionCullPass {
             bgl,
             cull_params_buf,
             hiz_sampler,
+            cull_stats_buf,
             placeholder_static_hiz_view,
             placeholder_static_hiz_sampler,
             static_hiz_bounds_min: [0.0; 3],
@@ -323,6 +337,7 @@ impl RenderPass for OcclusionCullPass {
             hiz_view               as *const _ as usize,
             static_hiz_view        as *const _ as usize,
             static_hiz_sampler     as *const _ as usize,
+            &self.cull_stats_buf   as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -364,6 +379,10 @@ impl RenderPass for OcclusionCullPass {
                     wgpu::BindGroupEntry {
                         binding:  8,
                         resource: wgpu::BindingResource::Sampler(static_hiz_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  9,
+                        resource: self.cull_stats_buf.as_entire_binding(),
                     },
                 ],
             }));
