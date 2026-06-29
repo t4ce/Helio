@@ -1,8 +1,12 @@
 //! Hi-Z occlusion culling — fully GPU-driven, O(1) CPU.
 //!
-//! Each thread evaluates one draw slot: project the bounding sphere into
-//! screen-space, sample the Hi-Z pyramid at the appropriate mip level, and
-//! zero-out instance_count in the indirect buffer for occluded draws.
+//! Each thread evaluates one DRAW CALL slot by testing the bounding sphere
+//! of that draw call's first (representative) instance against the Hi-Z pyramid.
+//! Occluded draws get instance_count=0 in the indirect buffer.
+//!
+//! IMPORTANT: this pass runs AFTER IndirectDispatchPass (frustum cull). It does
+//! NOT re-do frustum culling — only tests occlusion. The indirect buffer is
+//! shared: frustum cull writes initial instance_count, then we may zero it.
 //!
 //! Uses TEMPORAL Hi-Z: the pyramid was built from the PREVIOUS frame's depth,
 //! so the OcclusionCullPass runs BEFORE DepthPrepass each frame.
@@ -25,7 +29,7 @@ struct Camera {
 struct CullParams {
     screen_width:  u32,
     screen_height: u32,
-    total_slots:   u32,   // == draw_count / instance_count
+    draw_count:    u32,   // number of draw calls (== indirect buffer entries)
     hiz_mip_count: u32,
 }
 @group(0) @binding(1) var<uniform> params: CullParams;
@@ -47,17 +51,27 @@ struct GpuInstanceData {
 }
 @group(0) @binding(2) var<storage, read> instances: array<GpuInstanceData>;
 
-@group(0) @binding(3) var hiz_tex:  texture_2d<f32>;
-@group(0) @binding(4) var hiz_samp: sampler;
+/// GpuDrawCall: 20 bytes, matches DrawCall in indirect_dispatch.wgsl.
+struct GpuDrawCall {
+    index_count:    u32,
+    first_index:    u32,
+    vertex_offset:  i32,
+    first_instance: u32,  // base index into instances[] for this batch
+    instance_count: u32,  // number of consecutive instances in this draw
+}
+@group(0) @binding(3) var<storage, read> draw_calls: array<GpuDrawCall>;
+
+@group(0) @binding(4) var hiz_tex:  texture_2d<f32>;
+@group(0) @binding(5) var hiz_samp: sampler;
 
 // Indirect draw buffer as raw u32 array.
 // DrawIndexedIndirect stride = 20 bytes = 5 × u32:
 //   [i*5 + 0] index_count
-//   [i*5 + 1] instance_count  ← we write 0 (occluded) or 1 (visible)
+//   [i*5 + 1] instance_count  ← we write 0 (occluded) or keep original value
 //   [i*5 + 2] first_index
 //   [i*5 + 3] base_vertex     (i32 reinterpreted as u32 for array access)
 //   [i*5 + 4] first_instance
-@group(0) @binding(5) var<storage, read_write> indirect: array<u32>;
+@group(0) @binding(6) var<storage, read_write> indirect: array<u32>;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -87,6 +101,26 @@ fn pick_mip(r_px: f32) -> u32 {
     return clamp(mip, 0u, params.hiz_mip_count - 1u);
 }
 
+/// Conservative sphere near depth in NDC [0,1].
+/// Projects the point on the sphere nearest to the camera into NDC depth.
+fn sphere_near_depth(center: vec3<f32>, radius: f32) -> f32 {
+    let cam_pos = camera.position_near.xyz;
+    let to_center = center - cam_pos;
+    let dist_sq = dot(to_center, to_center);
+    if dist_sq <= radius * radius {
+        // Camera inside sphere — near depth is 0 (on the near plane)
+        return 0.0;
+    }
+    let dir = to_center * (1.0 / sqrt(dist_sq));
+    let near_ws = center - dir * radius;
+    let near_clip = camera.view_proj * vec4<f32>(near_ws, 1.0);
+    // Protect against near_clip.w <= 0 (shouldn't happen since camera is outside)
+    if near_clip.w <= 0.0 {
+        return 0.0;
+    }
+    return clamp(near_clip.z / near_clip.w, 0.0, 1.0);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Main kernel  (64 threads × 1 × 1 workgroup)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -94,76 +128,64 @@ fn pick_mip(r_px: f32) -> u32 {
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
-    if idx >= params.total_slots {
+    if idx >= params.draw_count {
         return;
     }
 
-    let inst   = instances[idx];
+    // Get representative instance for this draw call (same as frustum cull pass).
+    let dc = draw_calls[idx];
+    let inst = instances[dc.first_instance];
     let center = inst.bounds.xyz;
     let radius = inst.bounds.w;
+    if radius <= 0.0 {
+        // No bounds — likely a placeholder; skip (keep whatever frustum cull wrote).
+        return;
+    }
 
-    // Transform sphere center to clip space.
+    // ── Compute screen-space bounds ──────────────────────────────────────────
     let clip = camera.view_proj * vec4<f32>(center, 1.0);
-
-    // Objects behind or at the near plane cannot be occluded — keep visible.
-    // (clip.w ≤ 0 means the center is behind the viewer.)
     if clip.w <= 0.0 {
-        indirect[idx * 5u + 1u] = 1u;
+        // Center behind camera — cannot occlude (leave existing instance_count alone).
+        // The frustum cull pass already set this correctly.
         return;
     }
 
     let ndc = clip.xyz / clip.w;
-
-    // UV in [0,1]² for texture sampling.
     let uv = ndc_to_uv(ndc.xy);
 
-    // Frustum culling by projecting the sphere center into clip space and
-    // conservatively considering a radius margin.
-    let clip_center = camera.view_proj * vec4<f32>(center, 1.0);
-
-    if clip_center.w <= 0.0 {
-        indirect[idx * 5u + 1u] = 1u;
-        return;
-    }
-
-    let ndc_center = clip_center.xyz / clip_center.w;
-    // Rough sphere radius in NDC units. Keep conservative by taking max of x/y.
-    let ndc_radius = max(
-        abs(radius * camera.proj[0][0] / clip_center.w),
-        abs(radius * camera.proj[1][1] / clip_center.w),
+    // Check that the sphere's screen-space footprint is within the viewport.
+    // If the entire screen-space footprint is outside the viewport, the object
+    // was frustum-culled and we shouldn't touch it.
+    let ndc_r = max(
+        abs(radius * camera.proj[0][0] / clip.w),
+        abs(radius * camera.proj[1][1] / clip.w),
     );
-
-    if ndc_center.x < -1.0 - ndc_radius || ndc_center.x > 1.0 + ndc_radius ||
-       ndc_center.y < -1.0 - ndc_radius || ndc_center.y > 1.0 + ndc_radius ||
-       ndc_center.z < 0.0 - ndc_radius || ndc_center.z > 1.0 + ndc_radius {
-        indirect[idx * 5u + 1u] = 0u; // outside frustum → cull
+    if ndc.x + ndc_r < -1.0 || ndc.x - ndc_r > 1.0 ||
+       ndc.y + ndc_r < -1.0 || ndc.y - ndc_r > 1.0 {
+        // Entirely outside viewport (should have been frustum-culled). Skip.
         return;
     }
 
     let sample_uv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
 
-    // Conservative sphere near depth in NDC:
-    // Bring the closest face of the sphere toward the camera.
-    // clip.w ≈ -view_z (positive for objects in front of camera).
-    // Subtracting radius from clip.w gives the near face's clip.w.
-    // Then re-derive NDC.z ≈ ndc.z scaled by (clip.w / near_w).
-    let near_w  = max(clip.w - radius, 0.001);
-    let near_z  = clip.z / clip.w * (near_w / clip.w); // approximate
-    let min_depth = clamp(near_z, 0.0, 1.0);
+    // ── Conservative near depth ──────────────────────────────────────────────
+    let near_z = sphere_near_depth(center, radius);
 
-    // Choose mip based on screen footprint.
+    // ── Choose Hi-Z mip level ────────────────────────────────────────────────
     let r_px = screen_radius_px(radius, clip.w);
     let mip  = pick_mip(r_px);
 
+    // ── Occlusion test ───────────────────────────────────────────────────────
     // Sample Hi-Z (MAX pyramid): the stored value is the MAXIMUM (farthest) depth
     // in the footprint at this mip level.
     let hiz_depth = textureSampleLevel(hiz_tex, hiz_samp, sample_uv, f32(mip)).r;
 
     // Occluded: every point of the sphere is farther than the closest known occluder.
-    // In [0,1] depth where 0=near, 1=far: occluded iff min_depth > hiz_depth.
-    if min_depth > hiz_depth {
+    // In [0,1] depth where 0=near, 1=far: occluded iff near_z > hiz_depth + bias.
+    let depth_bias = 1.0 / 65536.0; // ~1.5e-5 — prevent near-plane fighting
+    if near_z > hiz_depth + depth_bias {
+        // Set instance_count to 0 for the entire draw call
         indirect[idx * 5u + 1u] = 0u;
-    } else {
-        indirect[idx * 5u + 1u] = 1u;
     }
+    // Otherwise keep the existing instance_count (set by frustum cull pass).
 }

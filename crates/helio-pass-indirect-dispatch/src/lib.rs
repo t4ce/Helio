@@ -217,8 +217,12 @@ impl RenderPass for IndirectDispatchPass {
 /// Extract 6 frustum planes from a view-projection matrix (Gribb/Hartmann method).
 ///
 /// `vp` is a flat column-major `[f32; 16]` (from `glam::Mat4::to_cols_array()`).
-/// Planes are in the form `(a, b, c, d)` where a point P is *inside* the frustum
-/// when `dot(plane.xyz, P) + plane.w >= 0`.
+/// Returns **normalized** planes `(nx, ny, nz, d)` where a point P is *inside* the
+/// frustum when `dot(n.xyz, P) + d >= 0`.
+///
+/// Normalization is essential because the GPU shader tests `dot(n.xyz, P) + d >= -r`
+/// and if the normal is NOT unit-length, the sphere radius r is not comparable to
+/// the raw signed distance — leading to both false-positive and false-negative culling.
 ///
 /// Uses wgpu/DirectX depth conventions where NDC z ∈ [0, 1].
 fn extract_frustum_planes(vp: [f32; 16]) -> [[f32; 4]; 6] {
@@ -234,13 +238,21 @@ fn extract_frustum_planes(vp: [f32; 16]) -> [[f32; 4]; 6] {
     let sub = |a: [f32; 4], b: [f32; 4]| -> [f32; 4] {
         [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]]
     };
+    let normalize = |p: [f32; 4]| -> [f32; 4] {
+        let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        if len > 1e-10 {
+            [p[0] / len, p[1] / len, p[2] / len, p[3] / len]
+        } else {
+            p
+        }
+    };
     [
-        add(r3, r0), // left:   -w ≤  x  →  x + w ≥ 0
-        sub(r3, r0), // right:   x ≤  w  → -x + w ≥ 0
-        add(r3, r1), // bottom: -w ≤  y  →  y + w ≥ 0
-        sub(r3, r1), // top:     y ≤  w  → -y + w ≥ 0
-        r2,          // near:    z ≥  0  (wgpu NDC z ∈ [0,1], not OpenGL's -w ≤ z)
-        sub(r3, r2), // far:     z ≤  w  → -z + w ≥ 0
+        normalize(add(r3, r0)), // left:   -w ≤  x  →  x + w ≥ 0
+        normalize(sub(r3, r0)), // right:   x ≤  w  → -x + w ≥ 0
+        normalize(add(r3, r1)), // bottom: -w ≤  y  →  y + w ≥ 0
+        normalize(sub(r3, r1)), // top:     y ≤  w  → -y + w ≥ 0
+        normalize(r2),          // near:    z ≥  0  (wgpu NDC z ∈ [0,1], not OpenGL's -w ≤ z)
+        normalize(sub(r3, r2)), // far:     z ≤  w  → -z + w ≥ 0
     ]
 }
 

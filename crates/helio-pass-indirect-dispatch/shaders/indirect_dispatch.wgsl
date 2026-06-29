@@ -61,7 +61,7 @@ fn sphere_in_frustum(center: vec3<f32>, radius: f32) -> bool {
     for (var i = 0u; i < 6u; i++) {
         let plane = cull.frustum_planes[i];
         let dist = dot(plane.xyz, center) + plane.w;
-        if dist < -radius { return false; }
+        if dist + radius < 0.0 { return false; }
     }
     return true;
 }

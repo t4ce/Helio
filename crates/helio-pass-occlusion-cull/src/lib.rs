@@ -1,11 +1,9 @@
 //! Hi-Z occlusion-culling pass.
 //!
-//! Runs BEFORE DepthPrepassPass each frame, using the PREVIOUS frame's Hi-Z
-//! pyramid (temporal approach).  For each draw slot the shader:
-//!  1. Projects the bounding sphere centre into NDC.
-//!  2. Samples the Hi-Z pyramid at the mip level matching the sphere's
-//!     screen-space footprint.
-//!  3. Writes `indirect[slot * 5 + 1]` = 1 (visible) or 0 (occluded).
+//! Runs AFTER IndirectDispatchPass (frustum cull) each frame, using the PREVIOUS
+//! frame's Hi-Z pyramid (temporal approach).  For each DRAW CALL the shader:
+//!  1. Tests the representative instance's bounding sphere against the Hi-Z buffer
+//!  2. Writes `indirect[slot * 5 + 1]` = 0 (occluded) or leaves the frustum-cull value
 //!
 //! Frame 0 is skipped since no Hi-Z pyramid exists yet.
 //! Bind-group is rebuilt lazily when buffer pointers change (e.g. scene grows).
@@ -22,7 +20,7 @@ const WORKGROUP_SIZE: u32 = 64;
 struct CullParams {
     screen_width:  u32,
     screen_height: u32,
-    total_slots:   u32,
+    draw_count:    u32,
     hiz_mip_count: u32,
 }
 
@@ -34,8 +32,8 @@ pub struct OcclusionCullPass {
 
     /// Cached bind group, invalidated when buffer pointers change.
     bind_group:     Option<wgpu::BindGroup>,
-    /// (camera_ptr, instances_ptr, indirect_ptr, hiz_view_ptr)
-    bind_group_key: Option<(usize, usize, usize, usize)>,
+    /// (camera_ptr, instances_ptr, draw_calls_ptr, indirect_ptr, hiz_view_ptr)
+    bind_group_key: Option<(usize, usize, usize, usize, usize)>,
     screen_width:   u32,
     screen_height:  u32,
 }
@@ -102,9 +100,20 @@ impl OcclusionCullPass {
                     },
                     count: None,
                 },
-                // 3: Hi-Z texture
+                // 3: GpuDrawCall[] (read-only) — for mapping draw index → first instance
                 wgpu::BindGroupLayoutEntry {
                     binding:    3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size:   None,
+                    },
+                    count: None,
+                },
+                // 4: Hi-Z texture
+                wgpu::BindGroupLayoutEntry {
+                    binding:    4,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
                         sample_type:    wgpu::TextureSampleType::Float { filterable: false },
@@ -113,16 +122,16 @@ impl OcclusionCullPass {
                     },
                     count: None,
                 },
-                // 4: Hi-Z sampler (non-filtering, nearest)
+                // 5: Hi-Z sampler (non-filtering, nearest)
                 wgpu::BindGroupLayoutEntry {
-                    binding:    4,
+                    binding:    5,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
-                // 5: indirect draw buffer (read + write, u32 raw view)
+                // 6: indirect draw buffer (read + write, u32 raw view)
                 wgpu::BindGroupLayoutEntry {
-                    binding:    5,
+                    binding:    6,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty:                 wgpu::BufferBindingType::Storage { read_only: false },
@@ -181,7 +190,7 @@ impl RenderPass for OcclusionCullPass {
         let p = CullParams {
             screen_width:  self.screen_width,
             screen_height: self.screen_height,
-            total_slots:   ctx.scene.instances.len() as u32,
+            draw_count:    ctx.scene.draw_calls.len() as u32,
             hiz_mip_count: mip_levels(self.screen_width, self.screen_height),
         };
         ctx.write_buffer(&self.cull_params_buf, 0, bytemuck::bytes_of(&p));
@@ -191,18 +200,11 @@ impl RenderPass for OcclusionCullPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // Temporal Hi-Z: frame 0 has no valid pyramid yet — skip culling.
         if ctx.frame_num == 0 {
-            // Ensure all draws are visible on frame 0 (instance_count already 1
-            // from CPU-side scene setup, so this is a no-op in most cases).
             return Ok(());
         }
 
-        if ctx.scene.draw_count == 0 {
-            // No draw commands this frame; skip expensive occlusion compute.
-            return Ok(());
-        }
-
-        let count = ctx.scene.instance_count;
-        if count == 0 {
+        let draw_count = ctx.scene.draw_count;
+        if draw_count == 0 {
             return Ok(());
         }
 
@@ -211,9 +213,10 @@ impl RenderPass for OcclusionCullPass {
         let hiz_view = ctx.resources.hiz.as_ref()
             .expect("OcclusionCull: 'hiz' view not routed by graph — is HiZBuildPass declared?");
         let key = (
-            ctx.scene.camera   as *const _ as usize,
-            ctx.scene.instances as *const _ as usize,
-            ctx.scene.indirect  as *const _ as usize,
+            ctx.scene.camera     as *const _ as usize,
+            ctx.scene.instances   as *const _ as usize,
+            ctx.scene.draw_calls  as *const _ as usize,
+            ctx.scene.indirect    as *const _ as usize,
             hiz_view as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
@@ -235,14 +238,18 @@ impl RenderPass for OcclusionCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding:  3,
-                        resource: wgpu::BindingResource::TextureView(hiz_view),
+                        resource: ctx.scene.draw_calls.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding:  4,
-                        resource: wgpu::BindingResource::Sampler(&self.hiz_sampler),
+                        resource: wgpu::BindingResource::TextureView(hiz_view),
                     },
                     wgpu::BindGroupEntry {
                         binding:  5,
+                        resource: wgpu::BindingResource::Sampler(&self.hiz_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  6,
                         resource: ctx.scene.indirect.as_entire_binding(),
                     },
                 ],
@@ -250,7 +257,7 @@ impl RenderPass for OcclusionCullPass {
             self.bind_group_key = Some(key);
         }
 
-        let wg = count.div_ceil(WORKGROUP_SIZE);
+        let wg = draw_count.div_ceil(WORKGROUP_SIZE);
         let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label:            Some("OcclusionCull"),
             timestamp_writes: None,
