@@ -1757,22 +1757,29 @@ impl Renderer {
                     // ── RIGHT SECTION: column-aligned texture table (anchored to right edge) ──
                     let mut table_rows: Vec<Vec<String>> = Vec::new();
                     for res in &debug_data.resources {
+                        let chain_tag = if res.chain_local {
+                            format!("tile[{}→{}]", res.first_write_pass, res.last_read_pass)
+                        } else {
+                            String::new()
+                        };
+                        let wr = format!("W{}→R{}", res.first_write_pass, res.last_read_pass);
                         table_rows.push(vec![
                             res.name.clone(),
                             format!("{}x{}", res.width, res.height),
-                            res.layers.to_string(),
                             res.format_name.clone(),
                             format!("{}KB", res.size_kb),
+                            wr,
+                            chain_tag,
                             res.alias.clone(),
                         ]);
                     }
-                    let mut col_widths = vec![4u32; 6];
+                    let mut col_widths = vec![4u32; 7];
                     for row in &table_rows {
                         for (i, val) in row.iter().enumerate() {
                             col_widths[i] = col_widths[i].max(val.chars().count() as u32);
                         }
                     }
-                    let header = ["name", "size", "layers", "format", "KB", "alias"];
+                    let header = ["name", "size", "format", "KB", "W→R", "chain", "alias"];
                     for (i, h) in header.iter().enumerate() {
                         col_widths[i] = col_widths[i].max(h.chars().count() as u32);
                     }

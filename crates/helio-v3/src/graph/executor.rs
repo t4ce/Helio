@@ -15,6 +15,13 @@ pub struct DebugResourceInfo {
     pub format_name: String,
     pub size_kb: u64,
     pub alias: String,
+    /// True → texture is only accessed within a subpass chain; content stays
+    /// in tile memory and `StoreOp::Discard` prevents a VRAM write-back.
+    pub chain_local: bool,
+    /// Index of the pass that first writes this resource.
+    pub first_write_pass: usize,
+    /// Index of the last pass that reads it.
+    pub last_read_pass: usize,
 }
 
 /// Per-pass debug info for the debug overlay.
@@ -524,6 +531,9 @@ impl RenderGraph {
                 format_name: format_name(rl.format).to_string(),
                 size_kb: bytes / 1024,
                 alias,
+                chain_local: rl.chain_local,
+                first_write_pass: rl.first_write_pass,
+                last_read_pass: rl.last_read_pass,
             });
         }
         data.total_vram_kb = total_bytes / 1024;
@@ -602,9 +612,7 @@ impl RenderGraph {
         depth: &wgpu::TextureView,
         frame_resources: &libhelio::FrameResources<'_>,
     ) -> Result<()> {
-        if !self.resources_allocated {
-            self.init_transients(scene.width.max(1), scene.height.max(1));
-        }
+        assert!(self.locked, "RenderGraph::execute() requires lock() to be called first");
 
         self.profiler.clear_cpu_timings();
 
@@ -708,8 +716,7 @@ impl RenderGraph {
             // Migrated path: executor manages render pass (pass implements render_pass_descriptor).
             if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources) {
                 let cache = self.pass_cache.get(pass_index).and_then(|c| c.as_ref());
-                let chains_enabled = std::env::var("HELIO_DISABLE_CHAINS").is_err();
-                let is_chained = chains_enabled && cache.map_or(false, |c| !c.chain_range.is_empty());
+                let is_chained = cache.map_or(false, |c| !c.chain_range.is_empty());
 
                 if is_chained {
                     let c = cache.unwrap();
@@ -890,8 +897,8 @@ impl RenderGraph {
         self.collect_declarations();
         self.detect_subpass_chains();
         // Mark resources whose entire lifetime falls within a single subpass
-        // chain — they get 1×1 dummies and live entirely in tile memory.
-        for (_, rl) in &mut self.resources {
+        // chain — they get StoreOp::Discard and live in tile memory.
+        for rl in self.resources.values_mut() {
             rl.chain_local = self.subpass_chains.iter().any(|c| {
                 c.start <= rl.first_write_pass && rl.last_read_pass < c.end
             });
