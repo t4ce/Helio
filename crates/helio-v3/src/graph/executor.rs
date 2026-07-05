@@ -135,9 +135,6 @@ pub struct RenderGraph {
     locked: bool,
     /// Pre-computed per-pass data (store ops, chain info) populated by `lock()`.
     pass_cache: Vec<Option<CachedPass>>,
-    /// 1×1 dummy views for chain-local resources whose backing textures were
-    /// skipped — they stay entirely in tile memory during the fused render pass.
-    dummy_views: std::collections::HashMap<String, wgpu::TextureView>,
     /// Frame counter for periodic stats reporting.
     frame_count: u64,
 }
@@ -163,7 +160,6 @@ impl RenderGraph {
             subpass_chains: Vec::new(),
             locked: false,
             pass_cache: Vec::new(),
-            dummy_views: std::collections::HashMap::new(),
             frame_count: 0,
         }
     }
@@ -274,11 +270,10 @@ impl RenderGraph {
             return;
         }
 
-        // Allocate textures into the pool.  Chain-local resources get a 1×1
-        // dummy (they live in tile memory during the fused render pass and
-        // never touch VRAM at full resolution).
+        // Allocate textures into the pool.  Chain-local resources keep full
+        // resolution (depth attachments require matching sizes) but the
+        // executor applies StoreOp::Discard at runtime to avoid the VRAM write.
         for (name, rl) in &self.resources {
-            let (w, h) = if rl.chain_local { (1u32, 1u32) } else { (rl.width, rl.height) };
             let usage = if rl.format == wgpu::TextureFormat::R32Float {
                 wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING
             } else {
@@ -287,10 +282,10 @@ impl RenderGraph {
             let tex_desc = TextureDescriptor {
                 name: name.clone(),
                 format: rl.format,
-                width: w,
-                height: h,
-                depth_or_array_layers: if rl.chain_local { 1 } else { rl.depth_or_array_layers },
-                mip_level_count: if rl.chain_local { 1 } else { rl.mip_level_count },
+                width: rl.width,
+                height: rl.height,
+                depth_or_array_layers: rl.depth_or_array_layers,
+                mip_level_count: rl.mip_level_count,
                 sample_count: 1,
                 usage,
                 alias_group: rl.alias_group.clone(),
@@ -629,6 +624,11 @@ impl RenderGraph {
         // Subpass chain tracking: keep a render pass open across consecutive
         // migrated passes that form a write→read chain (tile-memory optimization).
         let mut chain_rp: Option<std::mem::ManuallyDrop<wgpu::RenderPass<'_>>> = None;
+        // Transient: holds the patched color attachments for the current chain
+        // start.  The texture views inside come from visible_frame_resources
+        // which lives for the entire execute() call, so extending the lifetime
+        // to the function scope is safe.
+        let mut chain_patch: Vec<Option<wgpu::RenderPassColorAttachment<'static>>> = Vec::new();
 
         for (pass_index, pass) in self.passes.iter_mut().enumerate() {
             // GPU-only prebuilt path.
@@ -714,12 +714,36 @@ impl RenderGraph {
                 if is_chained {
                     let c = cache.unwrap();
                     if pass_index == c.chain_range.start {
-                        // First pass in chain: use the raw descriptor.
-                        // Store-op patching (Discard for chain-local resources)
-                        // is deferred — the 1×1 allocation already saves VRAM.
+                        // First pass in chain: patch store ops for chain-local
+                        // resources (Discard).  Views live in FR for the whole
+                        // execute() call, so extending to 'static is safe.
+                        chain_patch.clear();
+                        chain_patch.extend(desc.color_attachments.iter().enumerate().map(|(i, opt)| {
+                            let mut a = opt.clone();
+                            if let Some(store) = c.store_ops.get(i).copied().flatten() {
+                                if let Some(ref mut att) = a {
+                                    att.ops.store = store;
+                                }
+                            }
+                            // SAFETY: the TextureView references inside `a`
+                            // point into visible_frame_resources / pool, both
+                            // alive until execute() returns.
+                            unsafe { std::mem::transmute::<
+                                Option<wgpu::RenderPassColorAttachment<'_>>,
+                                Option<wgpu::RenderPassColorAttachment<'static>>,
+                            >(a) }
+                        }));
+                        let chain_desc = wgpu::RenderPassDescriptor {
+                            label: desc.label,
+                            color_attachments: &chain_patch,
+                            depth_stencil_attachment: desc.depth_stencil_attachment,
+                            timestamp_writes: desc.timestamp_writes,
+                            occlusion_query_set: desc.occlusion_query_set,
+                            multiview_mask: desc.multiview_mask,
+                        };
                         let rp = unsafe {
                             let enc = &mut *std::ptr::addr_of_mut!(encoder);
-                            enc.begin_render_pass(&desc)
+                            enc.begin_render_pass(&chain_desc)
                         };
                         chain_rp = Some(std::mem::ManuallyDrop::new(rp));
                     }
