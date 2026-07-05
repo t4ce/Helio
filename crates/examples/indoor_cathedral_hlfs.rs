@@ -484,13 +484,14 @@ impl ApplicationHandler for App {
             config,
             renderer.debug_state(),
             renderer.debug_camera_buf(),
+            renderer.cull_stats_buf(),
             None,
         );
         renderer.set_graph_custom(
             hlfs_graph,
             config,
-            Arc::new(|device, queue, scene, cfg, debug_state, debug_camera_buf| {
-                build_hlfs_graph(device, queue, scene, cfg, debug_state, debug_camera_buf, None)
+            Arc::new(|device, queue, scene, cfg, debug_state, debug_camera_buf, cull_stats_buf| {
+                build_hlfs_graph(device, queue, scene, cfg, debug_state, debug_camera_buf, cull_stats_buf, None)
             }),
         );
 

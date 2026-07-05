@@ -733,13 +733,14 @@ impl ApplicationHandler for App {
             fxaa_config,
             renderer.debug_state(),
             renderer.debug_camera_buf(),
+            renderer.cull_stats_buf(),
             None,
         );
         renderer.set_graph_custom(
             fxaa_graph,
             fxaa_config,
-            Arc::new(|device, queue, scene, cfg, debug_state, debug_camera_buf| {
-                build_fxaa_graph(device, queue, scene, cfg, debug_state, debug_camera_buf, None)
+            Arc::new(|device, queue, scene, cfg, debug_state, debug_camera_buf, cull_stats_buf| {
+                build_fxaa_graph(device, queue, scene, cfg, debug_state, debug_camera_buf, cull_stats_buf, None)
             }),
         );
 

@@ -23,7 +23,7 @@ use super::config::{GiConfig, RendererConfig};
 use super::debug::{DebugDrawPass, DebugDrawState};
 use super::graph::{build_default_graph, build_simple_graph, create_depth_resources};
 
-type CustomGraphBuilder = Arc<dyn Fn(&Arc<wgpu::Device>, &Arc<wgpu::Queue>, &Scene, RendererConfig, Arc<Mutex<DebugDrawState>>, &wgpu::Buffer) -> RenderGraph + Send + Sync>;
+type CustomGraphBuilder = Arc<dyn Fn(&Arc<wgpu::Device>, &Arc<wgpu::Queue>, &Scene, RendererConfig, Arc<Mutex<DebugDrawState>>, &wgpu::Buffer, &wgpu::Buffer) -> RenderGraph + Send + Sync>;
 
 const HALTON_JITTER: [[f32; 2]; 16] = [
     [0.5,     0.333333],
@@ -965,6 +965,10 @@ impl Renderer {
         &self.debug_camera_buffer
     }
 
+    pub fn cull_stats_buf(&self) -> &wgpu::Buffer {
+        &self.cull_stats_buffer
+    }
+
     pub fn camera_buffer(&self) -> &wgpu::Buffer {
         self.scene.gpu_scene().camera.buffer()
     }
@@ -1115,6 +1119,7 @@ impl Renderer {
                             new_cfg,
                             self.debug_state.clone(),
                             &self.debug_camera_buffer,
+                            &self.cull_stats_buffer,
                         );
                         self.custom_graph_config = Some(new_cfg);
                         log::trace!("apply_resize_now: custom graph rebuild {}ms", graph_start.elapsed().as_secs_f64() * 1000.0);
