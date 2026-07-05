@@ -701,29 +701,11 @@ impl RenderGraph {
                 if is_chained {
                     let c = cache.unwrap();
                     if pass_index == c.chain_range.start {
-                        // First pass in chain: apply cached store ops by attachment index.
-                        let chain_atts: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> =
-                            desc.color_attachments.iter().enumerate().map(|(i, opt)| {
-                                let mut a = opt.clone();
-                                if let Some(store) = c.store_ops.get(i).copied().flatten() {
-                                    if let Some(ref mut att) = a {
-                                        att.ops.store = store;
-                                    }
-                                }
-                                a
-                            }).collect();
-                        let chain_desc = wgpu::RenderPassDescriptor {
-                            label: desc.label,
-                            color_attachments: &chain_atts,
-                            depth_stencil_attachment: desc.depth_stencil_attachment,
-                            timestamp_writes: desc.timestamp_writes,
-                            occlusion_query_set: desc.occlusion_query_set,
-                            multiview_mask: desc.multiview_mask,
-                        };
-
+                        // First pass in chain: use the raw descriptor (same as standalone)
+                        // but keep the render pass open for subsequent passes.
                         let rp = unsafe {
                             let enc = &mut *std::ptr::addr_of_mut!(encoder);
-                            enc.begin_render_pass(&chain_desc)
+                            enc.begin_render_pass(&desc)
                         };
                         chain_rp = Some(std::mem::ManuallyDrop::new(rp));
                     }
@@ -924,12 +906,21 @@ impl RenderGraph {
                 tex.create_view(&wgpu::TextureViewDescriptor::default())
             });
 
-        // Pre-compute cache: call render_pass_descriptor but ignore results.
+        // Pre-compute cache: chain info + store ops from descriptor.
         self.pass_cache = self.passes.iter().enumerate().map(|(pi, pass)| {
-            let _desc = pass.render_pass_descriptor(&dummy_target, &dummy_depth, &canon);
-            #[allow(unused_variables)]
-            let chain_range = self.subpass_chains.iter().find(|c| c.contains(&pi)).cloned().unwrap_or(0..0);
-            Some(CachedPass { store_ops: vec![], subpass_index: 0, chain_range: 0..0 })
+            let desc = pass.render_pass_descriptor(&dummy_target, &dummy_depth, &canon)?;
+            // TEMP: force all standalone (no chaining) until we fix the fusion path
+            let chain_range = 0..0;
+            let subpass_index = 0;
+            let store_ops: Vec<Option<wgpu::StoreOp>> = desc.color_attachments.iter().map(|opt| {
+                opt.as_ref().and_then(|att| {
+                    let key = att.view as *const _ as usize;
+                    let name = v2n.get(&key)?;
+                    let rl = self.resources.get(*name)?;
+                    (rl.last_read_pass < chain_range.end).then_some(wgpu::StoreOp::Discard)
+                })
+            }).collect();
+            Some(CachedPass { store_ops, subpass_index, chain_range })
         }).collect();
 
         if !self.subpass_chains.is_empty() {
