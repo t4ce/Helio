@@ -940,11 +940,11 @@ impl RenderPass for VirtualGeometryPass {
         let meshlet_count = self.last_meshlet_count;
 
         // Reset the atomic draw count so the cull shader appends from slot 0 each frame.
-        unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.draw_count_buf, 0, None);
+        unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&self.draw_count_buf, 0, None);
         if !self.use_count_indirect {
             // No count-indirect support: must zero the indirect buffer so stale
             // entries beyond the visible range have instance_count = 0.
-            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.indirect_buf, 0, None);
+            unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&self.indirect_buf, 0, None);
         }
 
         // ── Cull compute pass ─────────────────────────────────────────────────

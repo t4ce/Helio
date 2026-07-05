@@ -773,7 +773,7 @@ impl RenderPass for CoronaPass {
         // Copy STORAGE staging → INDIRECT buffer (the STORAGE+INDIRECT conflict fix).
         let args_size = ec as u64
             * std::mem::size_of::<libhelio::GpuCoronaDrawIndirect>() as u64;
-        unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+        unsafe { &mut *ctx.compute_encoder_ptr }.copy_buffer_to_buffer(
             &self.draw_args_staging, 0, &self.draw_args_buf, 0, args_size,
         );
 
@@ -791,7 +791,7 @@ impl RenderPass for CoronaPass {
         for (step_idx, step) in self.sort_steps.iter().enumerate() {
             // Copy {k, j, lo, n} from sort_steps_buf into the sort_* fields of
             // uniform_buf (offset 16 = after the first 4 u32 base fields).
-            unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+            unsafe { &mut *ctx.compute_encoder_ptr }.copy_buffer_to_buffer(
                 &self.sort_steps_buf,
                 step_idx as u64 * step_size,
                 &self.uniform_buf,

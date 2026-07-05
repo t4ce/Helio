@@ -112,10 +112,9 @@ pub struct RenderGraph {
     gpu_render_bundles: Vec<Option<wgpu::RenderBundle>>,
     resources_allocated: bool,
     /// Detected subpass-fusible chains. Each entry is a contiguous range of
-    /// pass indices whose resources could theoretically share a single render
-    /// pass. Currently unused — actual fusion requires a new `RenderPass` method
-    /// so the executor can open one render pass and call `next_subpass()` between
-    /// passes instead of each pass calling `ctx.begin_render_pass()`.
+    /// pass indices whose resources could share a single render pass with
+    /// `next_subpass()`. Currently used only for debug overlay visualization;
+    /// the executor still opens one render pass per migrated pass.
     subpass_chains: Vec<std::ops::Range<usize>>,
     /// Frame counter for periodic stats reporting.
     frame_count: u64,
@@ -366,7 +365,8 @@ impl RenderGraph {
     }
 
     /// Detect chains of adjacent passes where each writes a resource the next
-    /// reads. These CAN be fused into a single render pass with `next_subpass()`.
+    /// reads. These could be fused into a single render pass with `next_subpass()`
+    /// to keep inter-pass data in tile memory.
     /// Uses a greedy forward scan to build maximal chains.
     fn detect_subpass_chains(&mut self) {
         self.subpass_chains.clear();

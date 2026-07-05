@@ -320,8 +320,9 @@ impl<'a> PassContext<'a> {
         &'b mut self,
         desc: &'b wgpu::ComputePassDescriptor<'b>,
     ) -> wgpu::ComputePass<'b> {
-        // TODO: GPU profiling with begin/end_gpu_pass (needs lifetime fixes)
-        unsafe { (*self.encoder_ptr).begin_compute_pass(desc) }
+        // Uses the separate compute encoder so compute work never conflicts with
+        // an active render pass on the render encoder (migrated path).
+        unsafe { (*self.compute_encoder_ptr).begin_compute_pass(desc) }
     }
 }
 
