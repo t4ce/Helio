@@ -14,7 +14,12 @@ struct DeferredGlobals {
     rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
     debug_mode: u32,
-    _pad0: u32,
+    /// 1 if a real HLFS-produced radiance-cascade texture is bound this frame,
+    /// 0 if it fell back to the dummy placeholder (e.g. FXAA/simple/default
+    /// pipelines, which never run the HLFS inject/propagate passes). Lets the
+    /// shader skip `sample_rc_irradiance()` entirely instead of paying for its
+    /// ~128 texture loads per pixel against data that was never written.
+    has_rc_gi: u32,
     /// Number of tiles in the X dimension for tiled light culling.
     num_tiles_x: u32,
     _pad2: u32,
@@ -551,6 +556,11 @@ impl RenderPass for DeferredLightPass {
         } else {
             ([0.0; 3], [0.0; 3]) // Fallback: RC disabled
         };
+        // rc_world_min/max are always a non-degenerate camera-centred volume
+        // (set unconditionally by the renderer's GiConfig default), regardless
+        // of whether this pipeline actually runs HLFS. Only the presence of a
+        // real rc_view texture tells us whether there's anything to sample.
+        let has_rc_gi = ctx.frame_resources.rc_view.get().is_some();
 
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
@@ -565,7 +575,7 @@ impl RenderPass for DeferredLightPass {
             // must use the same values or shadow maps will be sampled outside their valid range.
             csm_splits: libhelio::CSM_SPLITS,
             debug_mode: self.debug_mode,
-            _pad0: 0,
+            has_rc_gi: has_rc_gi as u32,
             num_tiles_x: ctx.width.div_ceil(16),
             _pad2: 0,
         };

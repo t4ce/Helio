@@ -44,7 +44,14 @@ struct Globals {
     rc_world_max:      vec4<f32>,
     csm_splits:        vec4<f32>,
     debug_mode:        u32,
-    _pad0:             u32,
+    // 1 if a real HLFS-produced radiance-cascade texture is bound this frame,
+    // 0 if it fell back to a 1x1 black dummy (FXAA/simple/default pipelines,
+    // which never run the HLFS inject/propagate passes that write rc_cascade0).
+    // rc_world_min/max are always a non-degenerate camera-centred volume
+    // regardless of pipeline, so they can't be used to detect this — has_rc_gi
+    // is the real signal, checked in sample_rc_irradiance() before doing any
+    // of its ~128 texture loads.
+    has_rc_gi:         u32,
     num_tiles_x:       u32,
     _pad2:             u32,
 }
@@ -633,6 +640,13 @@ fn rc_corner_irradiance_precomp(
 }
 
 fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    // No real HLFS cascade bound this frame (e.g. FXAA/simple/default
+    // pipelines) — rc_cascade0 is a 1x1 black dummy, so every one of the ~128
+    // texture loads below would just read zero. Skip the whole thing.
+    if globals.has_rc_gi == 0u {
+        return vec3<f32>(0.0);
+    }
+
     let world_min  = globals.rc_world_min.xyz;
     let world_max  = globals.rc_world_max.xyz;
     let world_size = world_max - world_min;
@@ -761,7 +775,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     if globals.debug_mode == 10u {
         var shadow_sum = 0.0;
         for (var i = 0u; i < globals.light_count; i++) {
-            let sf = select(shadow_factor(i, world_pos, N, in.clip_pos.xy, globals.frame), 1.0, is_vg);
+            var sf = 1.0;
+            if !is_vg {
+                sf = shadow_factor(i, world_pos, N, in.clip_pos.xy, globals.frame);
+            }
             shadow_sum += sf;
         }
         let sf = shadow_sum / max(f32(globals.light_count), 1.0);
@@ -809,8 +826,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             }
             // VG geometry does not render into shadow maps, so shadow_factor
             // would incorrectly occlude VG pixels with unrelated regular geometry.
-            // Skip shadow evaluation for VG surfaces.
-            let sf = select(shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame), 1.0, is_vg);
+            // Skip shadow evaluation for VG surfaces. Must be a real `if`, not
+            // select() — select() evaluates both arguments unconditionally, so
+            // routing through select() paid for a full PCF/PCSS shadow sample
+            // (dozens of shadow-atlas taps, per light) on every VG-covered pixel
+            // only to throw the result away every time.
+            var sf = 1.0;
+            if !is_vg {
+                sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
+            }
             Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf);
         }
     }
