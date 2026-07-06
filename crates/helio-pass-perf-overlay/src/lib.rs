@@ -1352,6 +1352,10 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         "PerfOverlay Color Analyzer"
     }
 
+    fn chain_transparent(&self) -> bool {
+        true
+    }
+
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
@@ -1392,7 +1396,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         };
 
         if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
-            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&shared.pass_overdraw_buf, 0, None);
+            unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&shared.pass_overdraw_buf, 0, None);
             let mut runtime = shared.runtime.lock().unwrap();
             runtime.frame_num = ctx.frame_num;
             runtime.snapshot_valid = false;

@@ -350,6 +350,18 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>>;
 
+    /// Returns true if this pass's `execute()` never touches the main render
+    /// encoder (`ctx.encoder_ptr` / `ctx.active_render_pass`) — only
+    /// `ctx.compute_encoder_ptr` / `ctx.begin_compute_pass()`. Such passes may be
+    /// placed inside an active subpass chain without closing the chain's open
+    /// render pass, since their GPU work is recorded on a separate encoder that
+    /// cannot conflict with it.
+    ///
+    /// Default `false`. Only opt in after auditing every encoder touch in
+    /// `execute()` — a single stray `ctx.encoder_ptr` use while the chain's
+    /// render pass is open is a real hazard, not just a missed optimization.
+    fn chain_transparent(&self) -> bool { false }
+
     /// Optionally prepares per-frame data before GPU execution.
     ///
     /// Called once per frame **before** `execute()`. Use this to upload per-frame uniforms

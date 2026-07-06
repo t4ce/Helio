@@ -86,6 +86,11 @@ struct CullUniforms {
 
 @group(0) @binding(6) var hiz_tex:  texture_2d<f32>;
 @group(0) @binding(7) var hiz_samp: sampler;
+/// One entry per instance: max(|col0|, |col1|, |col2|) of its transform.
+/// Precomputed CPU-side once per instance (see instance_scale_buf in lib.rs) —
+/// identical for every meshlet of a given instance, so there's no reason for
+/// every meshlet thread to redo the 3 sqrt()s that produced it.
+@group(0) @binding(8) var<storage, read> instance_scale: array<f32>;
 
 // ─── LOD selection ───────────────────────────────────────────────────────────
 
@@ -115,10 +120,24 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     let model     = inst.transform;
     let center_ws = (model * vec4<f32>(m.center, 1.0)).xyz;
 
-    let scale_x = length(model[0].xyz);
-    let scale_y = length(model[1].xyz);
-    let scale_z = length(model[2].xyz);
-    let world_radius = m.radius * max(scale_x, max(scale_y, scale_z));
+    let world_radius = m.radius * instance_scale[m.instance_index];
+
+    // ── LOD selection — Nanite-style projected screen coverage ──────────────
+    // Done first and cheaply (distance + radius only) so the ~7/8 of meshlets
+    // whose baked LOD isn't the one currently wanted bail out here, instead of
+    // paying for frustum planes, cone culling, and a Hi-Z texture sample only
+    // to be discarded at the end.
+    let cam_to_center = center_ws - camera.position_near.xyz;
+    let cluster_dist  = max(length(cam_to_center), 0.001);
+    let obj_radius    = max(world_radius, 0.001);
+    let focal_len     = camera.proj[1][1];
+    let screen_size   = (obj_radius * focal_len) / cluster_dist;
+    let lod_level     = u32(m.lod_error + 0.5);
+    let desired_lod   = select_lod_level(screen_size);
+
+    if lod_level != desired_lod {
+        return;
+    }
 
     // ── Frustum cull ──────────────────────────────────────────────────────────
     // Planes extracted from VP using Gribb/Hartmann (column-major, depth ∈ [0,1]).
@@ -145,7 +164,6 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     // ── Backface cone cull (guarded) ─────────────────────────────────────────
     // Skip when the camera is inside or close to the meshlet's bounding sphere
     // to avoid false culls on nearby geometry.
-    let cam_to_center = center_ws - camera.position_near.xyz;
     let cam_dist_sq = dot(cam_to_center, cam_to_center);
     let guard_radius = world_radius * 1.5;
     if cam_dist_sq > guard_radius * guard_radius && m.cone_cutoff <= 1.0 {
@@ -196,18 +214,6 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
                 return;
             }
         }
-    }
-
-    // ── LOD selection — Nanite-style projected screen coverage ─────────────
-    let cluster_dist = max(length(cam_to_center), 0.001);
-    let obj_radius   = max(world_radius, 0.001);
-    let focal_len    = camera.proj[1][1];
-    let screen_size  = (obj_radius * focal_len) / cluster_dist;
-    let lod_level    = u32(m.lod_error + 0.5);
-    let desired_lod  = select_lod_level(screen_size);
-
-    if lod_level != desired_lod {
-        return;
     }
 
     var cmd: DrawIndexedIndirect;

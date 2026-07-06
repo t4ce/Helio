@@ -17,7 +17,10 @@ use std::num::NonZeroU32;
 
 use bytemuck::{Pod, Zeroable};
 use helio_v3::graph::ResourceBuilder;
-use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{
+    DebugViewDescriptor, GpuInstanceData, PassContext, PrepareContext, RenderPass,
+    Result as HelioResult,
+};
 
 /// Bindless texture array size per shader stage.
 /// Capped at 16 on wasm32 (WebGPU baseline); 256 on native.
@@ -134,6 +137,13 @@ pub struct VirtualGeometryPass {
     // ── VG data buffers (owned; rebuilt when buffer_version changes) ──────────
     meshlet_buf: wgpu::Buffer,
     instance_buf: wgpu::Buffer,
+    /// One `f32` per instance: max axis scale extracted from its transform
+    /// (`max(|col0|, |col1|, |col2|)`). Precomputed once per instance here
+    /// (only when `buffer_version` changes) instead of being recomputed by
+    /// every meshlet thread in the cull shader — the value is identical for
+    /// every meshlet belonging to the same instance, so redoing the 3 sqrt()
+    /// calls per meshlet bought nothing.
+    instance_scale_buf: wgpu::Buffer,
     /// Compacted visible-only draw commands (approach: written by atomic appending).
     indirect_buf: wgpu::Buffer,
     /// Single u32 written by the cull shader via atomicAdd — the visible meshlet count.
@@ -210,6 +220,7 @@ impl VirtualGeometryPass {
         // ── Initial GPU buffers (grown in prepare() when data arrives) ─────────
         let meshlet_buf = Self::make_meshlet_buf(device, INITIAL_MESHLETS);
         let instance_buf = Self::make_instance_buf(device, INITIAL_INSTANCES);
+        let instance_scale_buf = Self::make_instance_scale_buf(device, INITIAL_INSTANCES);
         let indirect_buf = Self::make_indirect_buf(device, INITIAL_MESHLETS);
         let draw_count_buf = Self::make_draw_count_buf(device);
         let use_count_indirect = device
@@ -313,6 +324,17 @@ impl VirtualGeometryPass {
                     binding:    7,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                // 8: per-instance precomputed max-axis-scale (see instance_scale_buf doc)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -569,6 +591,7 @@ impl VirtualGeometryPass {
             globals_buf,
             meshlet_buf,
             instance_buf,
+            instance_scale_buf,
             indirect_buf,
             draw_count_buf,
             use_count_indirect,
@@ -594,6 +617,15 @@ impl VirtualGeometryPass {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Instance Buffer"),
             size: capacity * 144, // GpuInstanceData = 144 bytes
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn make_instance_scale_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Instance Scale Buffer"),
+            size: capacity * 4, // one f32 per instance
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -672,6 +704,8 @@ impl RenderPass for VirtualGeometryPass {
             if (vg.instance_count as u64) > instance_capacity {
                 self.instance_buf =
                     Self::make_instance_buf(ctx.device, vg.instance_count as u64 * 2);
+                self.instance_scale_buf =
+                    Self::make_instance_scale_buf(ctx.device, vg.instance_count as u64 * 2);
                 grew = true;
             }
 
@@ -681,6 +715,19 @@ impl RenderPass for VirtualGeometryPass {
 
             ctx.write_buffer(&self.meshlet_buf, 0, vg.meshlets);
             ctx.write_buffer(&self.instance_buf, 0, vg.instances);
+
+            // Precompute each instance's max axis scale once here (only runs when
+            // instances actually change) instead of every meshlet thread redoing
+            // the same 3 sqrt()s every frame for an instance-invariant value.
+            let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
+            let scales: Vec<f32> = instances.iter().map(|inst| {
+                let scale_x = (inst.model[0] * inst.model[0] + inst.model[1] * inst.model[1] + inst.model[2] * inst.model[2]).sqrt();
+                let scale_y = (inst.model[4] * inst.model[4] + inst.model[5] * inst.model[5] + inst.model[6] * inst.model[6]).sqrt();
+                let scale_z = (inst.model[8] * inst.model[8] + inst.model[9] * inst.model[9] + inst.model[10] * inst.model[10]).sqrt();
+                scale_x.max(scale_y).max(scale_z)
+            }).collect();
+            ctx.write_buffer(&self.instance_scale_buf, 0, bytemuck::cast_slice(&scales));
+
             self.last_version = vg.buffer_version;
             self.last_meshlet_count = vg.meshlet_count;
         }
@@ -919,6 +966,10 @@ impl RenderPass for VirtualGeometryPass {
                         binding: 7,
                         resource: wgpu::BindingResource::Sampler(hiz_sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: self.instance_scale_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.cull_bind_group_hiz_key = Some(hiz_key);
@@ -1006,7 +1057,13 @@ impl RenderPass for VirtualGeometryPass {
     fn reads(&self) -> &'static [&'static str] {
         &["gbuffer", "main_scene", "vg", "hiz"]
     }
-    fn writes(&self) -> &'static [&'static str] { &[] }
+    fn writes(&self) -> &'static [&'static str] {
+        // Draws (LoadOp::Load) directly into the gbuffer attachments GBufferPass
+        // created, plus the lightmap-UV target — see render_pass_descriptor()
+        // below. Declaring these lets the render graph see the real GBuffer →
+        // VirtualGeometry → DeferredLight dependency chain for subpass fusion.
+        &["gbuffer", "gbuffer_lightmap_uv"]
+    }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("gbuffer");

@@ -115,6 +115,224 @@ enum PrePassAction {
     },
 }
 
+/// Pure chain-detection algorithm, factored out of `RenderGraph::detect_subpass_chains`
+/// so it can be unit-tested without a GPU device.
+///
+/// Greedily scans forward: pass `i` fuses into the next pass `j` if `writes[i]`
+/// intersects `reads[j]`. Any run of `transparent[k] == true` passes between `i`
+/// and `j` is skipped over when looking for `j` (they don't need to declare a
+/// dependency to be bridged) but is still folded into the resulting chain
+/// range, since ranges are contiguous — the executor keeps the render pass
+/// open across them without closing/reopening it (see `chain_transparent` on
+/// `RenderPass`).
+///
+/// `attachments[k]` must be `Some(signature)` only for passes whose
+/// `render_pass_descriptor()` actually returns `Some` (a lock-time probe), with
+/// `signature` identifying the exact set of texture views used as color/depth
+/// attachments. This is load-bearing for two separate reasons:
+///
+/// 1. The executor only ever opens a chain's render pass from inside the
+///    `Some(desc)` branch, at the pass whose index equals `chain_range.start`.
+///    A pass that always returns `None` (pure compute, even one with declared
+///    writes/reads that happen to satisfy the adjacency check) can therefore
+///    never open — or safely be assumed to have already opened — a chain's
+///    render pass, so it must never become a chain's start or bridge target.
+/// 2. Declared write/read overlap only means two passes have a *data*
+///    dependency (e.g. DeferredLight reads the gbuffer as a texture *input*
+///    while rendering to a completely different target) — it does NOT mean
+///    they render into the same physical attachments. Reusing one pass's open
+///    render pass for another whose pipeline expects different attachment
+///    formats/counts is a real `wgpu` validation failure (mismatched
+///    `RenderPipeline` targets), not just a missed optimization. So fusion
+///    additionally requires `attachments[i] == attachments[j]` — the two
+///    passes must target the literal same views, e.g. GBuffer and
+///    VirtualGeometry both drawing (with `LoadOp::Load`) into the same 5
+///    gbuffer textures.
+///
+/// Only skipped-over `transparent` passes are exempt from both requirements,
+/// since they never try to hold, open, or draw into the chain's render pass.
+fn compute_chains(
+    writes: &[Vec<&str>],
+    reads: &[Vec<&str>],
+    transparent: &[bool],
+    attachments: &[Option<Vec<usize>>],
+) -> Vec<std::ops::Range<usize>> {
+    let len = writes.len();
+    let mut chains = Vec::new();
+    let mut i = 0;
+    while i < len {
+        if attachments[i].is_none() {
+            i += 1;
+            continue;
+        }
+        let chain_start = i;
+        loop {
+            let mut j = i + 1;
+            while j < len && transparent[j] {
+                j += 1;
+            }
+            if j >= len { break; }
+            let same_attachments = match (&attachments[i], &attachments[j]) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
+            if !same_attachments { break; }
+            let can_fuse = writes[i].iter().any(|w| reads[j].contains(w));
+            if !can_fuse { break; }
+            i = j;
+        }
+        let chain_len = i + 1 - chain_start;
+        if chain_len >= 2 {
+            chains.push(chain_start..i + 1);
+        }
+        i += 1;
+    }
+    chains
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::compute_chains;
+
+    // Test helper: `Some(&[..ids])` = a real render pass targeting attachments
+    // identified by those arbitrary ids (equal ids = literal same views); `None`
+    // = a compute-only pass (render_pass_descriptor() returns None).
+    fn sig(ids: &[usize]) -> Option<Vec<usize>> {
+        Some(ids.to_vec())
+    }
+    fn none() -> Option<Vec<usize>> {
+        None
+    }
+
+    #[test]
+    fn adjacent_pair_fuses() {
+        let writes = vec![vec!["a"], vec!["b"]];
+        let reads = vec![vec![], vec!["a"]];
+        let transparent = vec![false, false];
+        let attachments = vec![sig(&[1]), sig(&[1])];
+        assert_eq!(compute_chains(&writes, &reads, &transparent, &attachments), vec![0..2]);
+    }
+
+    #[test]
+    fn no_dependency_means_no_chain() {
+        let writes = vec![vec!["a"], vec!["b"]];
+        let reads = vec![vec![], vec!["c"]];
+        let transparent = vec![false, false];
+        let attachments = vec![sig(&[1]), sig(&[1])];
+        assert!(compute_chains(&writes, &reads, &transparent, &attachments).is_empty());
+    }
+
+    #[test]
+    fn single_transparent_gap_is_bridged() {
+        // pass 0 writes "a", pass 1 is a transparent no-op, pass 2 reads "a".
+        let writes = vec![vec!["a"], vec![], vec![]];
+        let reads = vec![vec![], vec![], vec!["a"]];
+        let transparent = vec![false, true, false];
+        let attachments = vec![sig(&[1]), none(), sig(&[1])];
+        assert_eq!(compute_chains(&writes, &reads, &transparent, &attachments), vec![0..3]);
+    }
+
+    #[test]
+    fn consecutive_transparent_gaps_are_bridged() {
+        let writes = vec![vec!["a"], vec![], vec![], vec![]];
+        let reads = vec![vec![], vec![], vec![], vec!["a"]];
+        let transparent = vec![false, true, true, false];
+        let attachments = vec![sig(&[1]), none(), none(), sig(&[1])];
+        assert_eq!(compute_chains(&writes, &reads, &transparent, &attachments), vec![0..4]);
+    }
+
+    #[test]
+    fn transparent_gap_without_real_dependency_forms_no_chain() {
+        // pass 1 is transparent but pass 2 doesn't actually read pass 0's output.
+        let writes = vec![vec!["a"], vec![], vec![]];
+        let reads = vec![vec![], vec![], vec!["b"]];
+        let transparent = vec![false, true, false];
+        let attachments = vec![sig(&[1]), none(), sig(&[1])];
+        assert!(compute_chains(&writes, &reads, &transparent, &attachments).is_empty());
+    }
+
+    #[test]
+    fn transparent_pass_never_starts_a_chain() {
+        // pass 0 is transparent (no writes) so it can never fuse forward on its own.
+        let writes = vec![vec![], vec!["a"]];
+        let reads = vec![vec![], vec![]];
+        let transparent = vec![true, false];
+        let attachments = vec![none(), sig(&[1])];
+        assert!(compute_chains(&writes, &reads, &transparent, &attachments).is_empty());
+    }
+
+    #[test]
+    fn trailing_transparent_pass_with_nothing_after_breaks_chain_cleanly() {
+        // pass 0 writes "a", pass 1 is transparent and is the last pass — no j to fuse into.
+        let writes = vec![vec!["a"], vec![]];
+        let reads = vec![vec![], vec![]];
+        let transparent = vec![false, true];
+        let attachments = vec![sig(&[1]), none()];
+        assert!(compute_chains(&writes, &reads, &transparent, &attachments).is_empty());
+    }
+
+    #[test]
+    fn non_real_pass_never_starts_or_ends_a_bridge_even_if_it_declares_matching_io() {
+        // Regression test: pass 0 is a compute-only pass (attachments[0] = None,
+        // e.g. a pass whose render_pass_descriptor() unconditionally returns
+        // None) that happens to declare writes matching pass 2's reads across a
+        // transparent gap at pass 1. Before this was excluded, this produced a
+        // chain whose "start" (pass 0) could never actually open the render
+        // pass, leaving pass 2 to wrongly assume one was already open — a
+        // runtime crash (found via WaterSimPass, which is exactly this shape:
+        // always compute-only but declares reads/writes that satisfy the
+        // adjacency check).
+        let writes = vec![vec!["a"], vec![], vec![]];
+        let reads = vec![vec![], vec![], vec!["a"]];
+        let transparent = vec![false, true, false];
+        let attachments = vec![none(), none(), sig(&[1])];
+        assert!(compute_chains(&writes, &reads, &transparent, &attachments).is_empty());
+    }
+
+    #[test]
+    fn non_real_pass_in_the_middle_of_a_would_be_bridge_blocks_it() {
+        // pass 1 sits between two real passes but is neither transparent nor real
+        // itself (an ordinary compute pass, not instrumentation) — must not be
+        // silently skipped the way a `chain_transparent` pass would be.
+        let writes = vec![vec!["a"], vec![], vec![]];
+        let reads = vec![vec![], vec![], vec!["a"]];
+        let transparent = vec![false, false, false];
+        let attachments = vec![sig(&[1]), none(), sig(&[1])];
+        assert!(compute_chains(&writes, &reads, &transparent, &attachments).is_empty());
+    }
+
+    #[test]
+    fn differing_attachments_block_fusion_even_with_matching_reads_and_writes() {
+        // Regression test: found via GBuffer -> VirtualGeometry -> DeferredLight.
+        // VirtualGeometry declares writes matching DeferredLight's reads
+        // ("gbuffer"), and both are always-Some real render passes — but
+        // DeferredLight reads gbuffer as a texture *input* while rendering into
+        // a totally different target (pre_aa), not as its own render target.
+        // Sharing pass 0's open render pass for pass 1 would try to draw with a
+        // pipeline built for different attachment formats/count — a real wgpu
+        // validation panic (IncompatiblePipelineTargets), not just wasted
+        // optimization. Different attachment signatures must block fusion
+        // regardless of read/write overlap.
+        let writes = vec![vec!["gbuffer"], vec![]];
+        let reads = vec![vec![], vec!["gbuffer"]];
+        let transparent = vec![false, false];
+        // pass 0 targets 5 gbuffer attachments; pass 1 targets one unrelated target.
+        let attachments = vec![sig(&[1, 2, 3, 4, 5]), sig(&[99])];
+        assert!(compute_chains(&writes, &reads, &transparent, &attachments).is_empty());
+    }
+
+    #[test]
+    fn matching_attachments_and_dependency_still_fuse() {
+        // Sanity check: the real GBuffer -> VirtualGeometry case (same 5
+        // attachments, both drawing with LoadOp::Load) must still fuse.
+        let writes = vec![vec!["gbuffer"], vec![]];
+        let reads = vec![vec![], vec!["gbuffer"]];
+        let transparent = vec![false, false];
+        let attachments = vec![sig(&[1, 2, 3, 4, 5]), sig(&[1, 2, 3, 4, 5])];
+        assert_eq!(compute_chains(&writes, &reads, &transparent, &attachments), vec![0..2]);
+    }
+}
+
 pub struct RenderGraph {
     passes: Vec<Box<dyn RenderPass>>,
     pass_index_map: HashMap<TypeId, usize>,
@@ -138,6 +356,12 @@ pub struct RenderGraph {
     /// one per migrated pass. Consecutive chained passes draw into the same
     /// active render pass without closing/reopening it.
     subpass_chains: Vec<std::ops::Range<usize>>,
+    /// Per-pass index: true if the pass falls inside any `subpass_chains` range.
+    /// Populated alongside `subpass_chains`; unlike `pass_cache` (keyed off
+    /// `render_pass_descriptor()` returning `Some`) this also covers compute-only
+    /// `chain_transparent` passes bridged into a chain, so the executor can tell
+    /// them apart from genuinely standalone compute passes.
+    chain_membership: Vec<bool>,
     /// When true, `add_pass()` panics and `lock()` has been called.
     locked: bool,
     /// Pre-computed per-pass data (store ops, chain info) populated by `lock()`.
@@ -165,6 +389,7 @@ impl RenderGraph {
             gpu_render_bundles: Vec::new(),
             resources_allocated: false,
             subpass_chains: Vec::new(),
+            chain_membership: Vec::new(),
             locked: false,
             pass_cache: Vec::new(),
             frame_count: 0,
@@ -408,12 +633,41 @@ impl RenderGraph {
     /// to keep inter-pass data in tile memory.
     /// Uses a greedy forward scan across BOTH legacy reads()/writes() and
     /// declare_resources() data to find every opportunity.
+    /// Detects chains without a `render_pass_descriptor` probe available (called
+    /// before any device-backed textures exist). Since we can't tell which passes
+    /// are genuinely migrated (`Some`-returning) render passes here, transparent
+    /// bridging is disabled entirely — this reproduces the exact pre-existing
+    /// strict-adjacent-only behavior, which is always safe. `lock()` uses
+    /// `detect_subpass_chains_probed` instead, which can verify that.
     fn detect_subpass_chains(&mut self) {
-        self.subpass_chains.clear();
+        let (writes_set, reads_set, _transparent) = self.chain_read_write_sets();
+        let len = self.passes.len();
+        let no_transparent = vec![false; len];
+        // No render_pass_descriptor probe available here (no device-backed
+        // textures yet), so this can't verify attachment compatibility. Use a
+        // single constant signature for every pass so the equality check in
+        // compute_chains never blocks anything — this exactly reproduces the
+        // original (pre-attachment-check) adjacent-writes-only behavior, which
+        // is always safe since transparent bridging is also disabled above.
+        let dummy_signature: Vec<Option<Vec<usize>>> = vec![Some(vec![0]); len];
+        self.subpass_chains = compute_chains(&writes_set, &reads_set, &no_transparent, &dummy_signature);
+    }
+
+    /// Same as `detect_subpass_chains`, but `attachments[i]` gives the exact set
+    /// of texture views (as a lock-time `render_pass_descriptor` probe) each
+    /// pass renders into — `None` if it's compute-only. See `compute_chains`
+    /// for why both this and `chain_transparent` are required for correctness.
+    fn detect_subpass_chains_probed(&mut self, attachments: &[Option<Vec<usize>>]) {
+        let (writes_set, reads_set, transparent) = self.chain_read_write_sets();
+        self.subpass_chains = compute_chains(&writes_set, &reads_set, &transparent, attachments);
+    }
+
+    fn chain_read_write_sets(&self) -> (Vec<Vec<&str>>, Vec<Vec<&str>>, Vec<bool>) {
         // Build per-pass read/write sets from both legacy and declaration APIs.
         let mut writes_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
         let mut reads_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
-        for (i, pass) in self.passes.iter().enumerate() {
+        let mut transparent: Vec<bool> = Vec::with_capacity(self.passes.len());
+        for pass in self.passes.iter() {
             let mut w: Vec<&str> = pass.writes().to_vec();
             let mut r: Vec<&str> = pass.reads().to_vec();
             // Also scan declare_resources for reads/writes not captured above.
@@ -427,22 +681,9 @@ impl RenderGraph {
             }
             writes_set.push(w);
             reads_set.push(r);
+            transparent.push(pass.chain_transparent());
         }
-
-        let mut i = 0;
-        while i < self.passes.len() {
-            let chain_start = i;
-            while i + 1 < self.passes.len() {
-                let can_fuse = writes_set[i].iter().any(|w| reads_set[i + 1].contains(w));
-                if !can_fuse { break; }
-                i += 1;
-            }
-            let chain_len = i + 1 - chain_start;
-            if chain_len >= 2 {
-                self.subpass_chains.push(chain_start..i + 1);
-            }
-            i += 1;
-        }
+        (writes_set, reads_set, transparent)
     }
 
     pub fn add_pass(&mut self, pass: Box<dyn RenderPass>) {
@@ -852,9 +1093,16 @@ impl RenderGraph {
                     }
                 }
             } else {
-                // Legacy path: close any active chain render pass first.
-                if let Some(mut rp) = chain_rp.take() {
-                    unsafe { std::mem::ManuallyDrop::drop(&mut rp); }
+                // Legacy path: a `chain_transparent` pass bridged into an active chain
+                // (see `compute_chains`) never touches the main encoder, so the chain's
+                // open render pass can stay open across it — only close for passes that
+                // are either standalone or not chain_transparent.
+                let bridged = self.chain_membership.get(pass_index).copied().unwrap_or(false)
+                    && pass.chain_transparent();
+                if !bridged {
+                    if let Some(mut rp) = chain_rp.take() {
+                        unsafe { std::mem::ManuallyDrop::drop(&mut rp); }
+                    }
                 }
 
                 // Legacy path: pass opens its own render/compute pass via begin_render_pass.
@@ -912,14 +1160,10 @@ impl RenderGraph {
         self.output_h = height;
         self.pool.clear();
         self.collect_declarations();
-        self.detect_subpass_chains();
-        // Mark resources whose entire lifetime falls within a single subpass
-        // chain — they get StoreOp::Discard and live in tile memory.
-        for rl in self.resources.values_mut() {
-            rl.chain_local = self.subpass_chains.iter().any(|c| {
-                c.start <= rl.first_write_pass && rl.last_read_pass < c.end
-            });
-        }
+        // Chain detection needs to know which passes actually return `Some` from
+        // `render_pass_descriptor()` (see `compute_chains`), which requires real
+        // textures to probe with — so textures are allocated and the canonical
+        // FrameResources built *before* chain detection, unlike the old ordering.
         self.allocate_textures();
         self.resources_allocated = true;
         self.rebuild_gpu_render_bundles();
@@ -975,15 +1219,58 @@ impl RenderGraph {
                 tex.create_view(&wgpu::TextureViewDescriptor::default())
             });
 
-        // Pre-compute cache: chain info + store ops from descriptor.
-        self.pass_cache = self.passes.iter().enumerate().map(|(pi, pass)| {
+        // Probe every pass once: does render_pass_descriptor() return Some (a
+        // genuine migrated render pass), and if so, exactly which texture views
+        // does it use as color/depth attachments? Reused below for both chain
+        // detection and pass_cache, so each pass is only probed once.
+        //
+        // The attachment signature (view identity per slot, color then depth) is
+        // what lets compute_chains tell "these two passes render into the
+        // literal same attachments" (safe to fuse) apart from "these two passes
+        // merely have an overlapping declared read/write name" (not sufficient —
+        // e.g. DeferredLight reads the gbuffer as a texture input while
+        // rendering into an unrelated target).
+        let probes: Vec<Option<(usize, Vec<usize>)>> = self.passes.iter().map(|pass| {
             let desc = pass.render_pass_descriptor(&dummy_target, &dummy_depth, &canon)?;
+            let color_len = desc.color_attachments.len();
+            let mut signature: Vec<usize> = desc.color_attachments.iter().map(|opt| {
+                opt.as_ref().map(|a| a.view as *const wgpu::TextureView as usize).unwrap_or(0)
+            }).collect();
+            signature.push(
+                desc.depth_stencil_attachment.as_ref()
+                    .map(|d| d.view as *const wgpu::TextureView as usize)
+                    .unwrap_or(0)
+            );
+            Some((color_len, signature))
+        }).collect();
+        let attachments: Vec<Option<Vec<usize>>> = probes.iter()
+            .map(|p| p.as_ref().map(|(_, sig)| sig.clone()))
+            .collect();
+
+        self.detect_subpass_chains_probed(&attachments);
+        self.chain_membership = vec![false; self.passes.len()];
+        for chain in &self.subpass_chains {
+            for pi in chain.clone() {
+                self.chain_membership[pi] = true;
+            }
+        }
+        // Mark resources whose entire lifetime falls within a single subpass
+        // chain — they get StoreOp::Discard and live in tile memory.
+        for rl in self.resources.values_mut() {
+            rl.chain_local = self.subpass_chains.iter().any(|c| {
+                c.start <= rl.first_write_pass && rl.last_read_pass < c.end
+            });
+        }
+
+        // Pre-compute cache: chain info + store ops, reusing the probe above.
+        self.pass_cache = probes.into_iter().enumerate().map(|(pi, probe)| {
+            let (color_len, _) = probe?;
             let chain = self.subpass_chains.iter().find(|c| c.contains(&pi));
             let chain_range = chain.cloned().unwrap_or(0..0);
             let subpass_index = chain.map_or(0, |c| (pi - c.start) as u32);
             // TODO: restore store-op override once composite-vs-individual tracking is
             // resolved.  For now always None to avoid discarding gbuffer sub-attachments.
-            let store_ops: Vec<Option<wgpu::StoreOp>> = desc.color_attachments.iter().map(|_| None).collect();
+            let store_ops: Vec<Option<wgpu::StoreOp>> = vec![None; color_len];
             Some(CachedPass { store_ops, subpass_index, chain_range })
         }).collect();
 
@@ -1017,28 +1304,32 @@ impl RenderGraph {
                 eprintln!("  {:>2}. {:<28} W: {}  R: {}", i, name, w_str, r_str);
                 if i + 1 < self.passes.len() {
                     let can_fuse = w_set[i].iter().any(|w| r_set[i + 1].contains(w));
-                    let why = if can_fuse {
-                        let common: Vec<&str> = w_set[i].iter().filter(|w| r_set[i + 1].contains(w)).copied().collect();
-                        format!("fusable via {}", common.join(","))
-                    } else {
-                        let mut reasons = Vec::new();
-                        for w in &w_set[i] {
-                            if !r_set[i + 1].contains(w) {
-                                reasons.push(format!("{} not read by next", w));
-                            }
-                        }
-                        if reasons.is_empty() {
-                            reasons.push("no writes from this pass".to_string());
-                        }
-                        reasons.join("; ")
-                    };
                     let is_fused = self.subpass_chains.iter().any(|c| c.contains(&i) && c.contains(&(i + 1)));
-                    if is_fused {
-                        eprintln!("  {:>2}.{:>2} CHAINED  ({})", "", "", why);
-                    } else if can_fuse {
-                        eprintln!("  {:>2}.{:>2} NOT CHAINED — both must implement render_pass_descriptor. ({})", "", "", why);
+                    if is_fused && !can_fuse && self.passes[i + 1].chain_transparent() {
+                        eprintln!("  {:>2}.{:>2} CHAINED  (bridged over transparent pass '{}')", "", "", self.passes[i + 1].name());
+                    } else {
+                        let why = if can_fuse {
+                            let common: Vec<&str> = w_set[i].iter().filter(|w| r_set[i + 1].contains(w)).copied().collect();
+                            format!("fusable via {}", common.join(","))
+                        } else {
+                            let mut reasons = Vec::new();
+                            for w in &w_set[i] {
+                                if !r_set[i + 1].contains(w) {
+                                    reasons.push(format!("{} not read by next", w));
+                                }
+                            }
+                            if reasons.is_empty() {
+                                reasons.push("no writes from this pass".to_string());
+                            }
+                            reasons.join("; ")
+                        };
+                        if is_fused {
+                            eprintln!("  {:>2}.{:>2} CHAINED  ({})", "", "", why);
+                        } else if can_fuse {
+                            eprintln!("  {:>2}.{:>2} NOT CHAINED — both must implement render_pass_descriptor. ({})", "", "", why);
+                        }
+                        // else: no write→read dependency, no chain possible — don't print.
                     }
-                    // else: no write→read dependency, no chain possible — don't print.
                 }
                 eprintln!("  {}", marker);
             }

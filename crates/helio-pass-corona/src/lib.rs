@@ -585,6 +585,13 @@ impl RenderPass for CoronaPass {
         &["pre_aa", "full_res_depth", "corona_emitters", "depth", "main_scene"]
     }
 
+    fn writes(&self) -> &'static [&'static str] {
+        // Draws (LoadOp::Load) directly onto pre_aa — see render_pass_descriptor()
+        // below. Declaring this lets the render graph see the real dependency
+        // for subpass fusion.
+        &["pre_aa"]
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_aa");
         builder.read("full_res_depth");

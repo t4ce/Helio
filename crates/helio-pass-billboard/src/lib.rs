@@ -448,6 +448,13 @@ impl RenderPass for BillboardPass {
         &["pre_aa", "full_res_depth", "billboards", "depth", "main_scene"]
     }
 
+    fn writes(&self) -> &'static [&'static str] {
+        // Draws (LoadOp::Load) directly onto pre_aa when occluded_by_geometry —
+        // see render_pass_descriptor() below. Declaring this lets the render
+        // graph see the real dependency for subpass fusion.
+        &["pre_aa"]
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_aa");
         builder.read("full_res_depth");
@@ -485,10 +492,10 @@ impl RenderPass for BillboardPass {
         depth: &'a wgpu::TextureView,
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        if self.instance_count == 0 {
-            return None;
-        }
-
+        // Always returns Some, even with zero instances (execute() then draws
+        // nothing) — a pass that conditionally returns None based on per-frame
+        // state can never safely participate in subpass-chain fusion, since the
+        // executor decides chain membership once via a lock-time probe.
         let target_view = if self.occluded_by_geometry {
             resources.pre_aa.get().unwrap_or(target)
         } else {
