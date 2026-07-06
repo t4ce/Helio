@@ -7,13 +7,10 @@ use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{RenderGraph, RenderPass};
-use helio_pass_debug_overlay::DebugOverlayState;
 
 use super::config::RendererConfig;
 
-/// Closure that rebuilds the render graph on resize, matching the old
-/// `set_graph_with_builder` API.  All parameters except the new `config`
-/// are passed by the renderer so the closure does not need to capture them.
+/// Closure that rebuilds the render graph on resize.
 pub type GraphRebuilder = Arc<dyn Fn(
     &Arc<wgpu::Device>,
     &Arc<wgpu::Queue>,
@@ -22,7 +19,6 @@ pub type GraphRebuilder = Arc<dyn Fn(
     Arc<Mutex<DebugDrawState>>,
     &wgpu::Buffer,
     &wgpu::Buffer,
-    Option<&Arc<Mutex<DebugOverlayState>>>,
 ) -> RenderGraph + Send + Sync>;
 
 use crate::groups::GroupId;
@@ -129,7 +125,6 @@ pub struct Renderer {
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
-    pub(crate) debug_overlay_shared: Arc<Mutex<DebugOverlayState>>,
 }
 
 pub struct DebugBatch<'a> {
@@ -351,16 +346,6 @@ impl Renderer {
 
     pub fn set_rebuilder(&mut self, rebuilder: GraphRebuilder) {
         self.graph_rebuilder = Some(rebuilder);
-    }
-
-    pub fn set_debug_overlay_enabled(&self, enabled: bool) {
-        if let Ok(mut state) = self.debug_overlay_shared.lock() {
-            state.enabled = enabled;
-        }
-    }
-
-    pub fn debug_overlay_shared(&self) -> &Arc<Mutex<DebugOverlayState>> {
-        &self.debug_overlay_shared
     }
 
     pub fn optimize_scene_layout(&mut self) {

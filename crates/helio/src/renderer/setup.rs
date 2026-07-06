@@ -170,7 +170,6 @@ impl Renderer {
             gizmo_viewport_height: 0.0,
             cull_stats_buffer,
             graph_rebuilder,
-            debug_overlay_shared: helio_pass_debug_overlay::DebugOverlayState::new(),
         }
     }
 

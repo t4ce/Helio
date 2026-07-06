@@ -2,7 +2,7 @@
 
 <img src="./branding/Helio.svg" alt="Helio Renderer" width="400"/>
 
-**GPU-driven deferred rendering in pure Rust**
+**GPU-driven deferred rendering in pure Rust — modular, pass-based, zero-overhead**
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![wgpu](https://img.shields.io/badge/wgpu-28-blue)](https://wgpu.rs/)
@@ -10,51 +10,33 @@
 
 </div>
 
-Helio is a GPU-driven deferred renderer written entirely in Rust on top of `wgpu`. Every CPU-side call is bounded (typically O(1)) while culling, LOD selection, indirect-draw dispatch, and light evaluation happen entirely on the GPU. The scene API is handle-based — every resource (`MeshId`, `MaterialId`, `ObjectId`, `LightId`, …) is a lightweight stable handle backed by a generational arena.
+Helio is a GPU-driven deferred renderer built entirely in Rust on `wgpu`. Every CPU-side call is bounded (typically O(1)) while culling, LOD selection, indirect-draw dispatch, and light evaluation happen entirely on the GPU.
 
-<img width="2476" height="941" alt="image" src="https://github.com/user-attachments/assets/7034e23e-1c0a-4344-b8a3-e3bf36666047" />
-<img width="2555" height="1340" alt="image" src="https://github.com/user-attachments/assets/f3f9f878-9a64-4f7b-b4fa-29f14d78250c" />
-<img width="1868" height="1017" alt="image" src="https://github.com/user-attachments/assets/46c36b06-1e49-40f4-9bbc-edf4a6d003a7" />
+## What makes Helio special
+
+**Truly modular pass architecture.** Every render pass is its own crate — `helio-pass-gbuffer`, `helio-pass-fxaa`, `helio-pass-taa`, and so on. The central `helio` crate has zero knowledge of any pass type. Adding a new pass means writing a crate and plugging it into a graph builder; central crates never change. This keeps the core small and makes experimentation trivial.
+
+**GPU-driven by default.** The CPU never iterates draw calls. Culling, LOD selection, and indirect-dispatch buffer generation all run on the GPU. Scene data lives in GPU buffers with dirty-tracked CPU mirrors — `flush()` uploads only what changed.
+
+**Handle-based scene API.** Every resource (`MeshId`, `MaterialId`, `LightId`, `ObjectId`, …) is a lightweight `Copy` stable handle backed by generational arenas. Insert, update, or remove objects with O(1) operations and no aliasing.
+
+**Render graph with automatic rebuild.** Graphs carry their own rebuilder closure, so resizing the window transparently rebuilds the entire pipeline. No manual `set_rebuild` boilerplate needed — it just works.
 
 ---
 
-## Features
+## Architecture
 
-### GPU-driven pipeline
-- **GPU-driven GBuffer** — culling, LOD, and indirect-draw dispatch all on the GPU. CPU cost is O(1) regardless of draw-call count.
-- **Virtual geometry** — per-meshlet frustum culling, backface-cone culling, and coverage-based LOD selection, entirely on the GPU.
-- **Occlusion culling** — Hi-Z min-reduction pyramid + GPU occlusion tests for shadow casters and scene geometry.
-- **Indirect multi-draw** — `multi_draw_indexed_indirect` for depth prepass, GBuffer, and shadow maps.
+```
+crates/helio               Public API: Renderer, Scene, Camera, debug helpers
+crates/helio-core          Render graph runtime, GpuScene, RenderPass trait
+crates/libhelio            GPU-shared types (GpuLight, GpuMaterial, uniforms)
+crates/helio-pass-*        One crate per render pass (30+ passes available)
+crates/helio-default-graphs Pre-built graph configurations
+crates/helio-asset-compat  FBX / glTF / OBJ / USD loading
+crates/examples            Runnable demos and editor
+```
 
-### Lighting & shading
-- **Physically-based shading** — Cook-Torrance BRDF with metallic-roughness workflow, IOR, specular tint.
-- **Radiance Cascades GI** — multi-bounce probe-based global illumination with dual-tier (near RC, far ambient).
-- **Cascaded shadow maps** — 4-split CSM with PCF/PCSS filtering, configurable quality presets.
-- **Tile/cluster light culling** — light indices binned per tile for O(tiles) evaluation.
-- **Screen-space ambient occlusion** — with baked-AO override support.
-- **Volumetric sky** — Hillaire 2020 atmospheric model with cloud layer support.
-
-### Post-processing
-- **Anti-aliasing** — TAA (with jitter + reprojection), FXAA, or SMAA 1x.
-- **Tone mapping** — integrated into deferred light pass.
-- **Debug visualisations** — UV, normals, albedo, shadow heatmap, LOD heatmap, and more.
-
-### Scene management
-- **Handle-based API** — every resource is a `Copy` stable handle (`MeshId`, `MaterialId`, `LightId`, `ObjectId`, …).
-- **Group system** — 64-bit bitmask per object; per-group hide/show, transform, and culling.
-- **Sectioned meshes** — single vertex buffer with N index ranges (Unreal-style multi-material), O(N sections) transform updates.
-- **GPU-native scene** — all scene state lives on the GPU with dirty-tracked CPU mirrors. `flush()` uploads only changed data.
-
-### Modular architecture
-- **Pluggable render passes** — each pass is a separate crate implementing `RenderPass`. Swap, add, or remove passes at will.
-- **Render graph safety** — debug-build tracking catches unwritten resources; static dependency validation prevents ordering bugs.
-- **Zero-copy contexts** — passes receive borrowed references to GPU resources, never owned copies.
-- **Automatic profiling** — CPU scopes and GPU timestamps injected per pass, zero manual instrumentation.
-
-### Asset pipeline
-- **Multi-format import** — FBX, glTF, OBJ, USD via SolidRS.
-- **Pre-baked lighting** — baked AO, lightmaps, reflection probes, and irradiance SH for static geometry.
-- **PVS** — pre-computed potentially-visible sets for CPU-side culling.
+The separation between `helio` (the central crate) and `helio-pass-*` (pass crates) is strict: **central crates never import pass types**. The `RenderPass` trait lives in `helio-core`. Pass crates implement it. Graph builder functions compose passes and store a `GraphRebuilder` inside the graph. The `Renderer` extracts it at construction time, giving automatic rebuild on resize without any dependency on specific pass types.
 
 ---
 
@@ -69,7 +51,8 @@ cargo run -p examples --bin load_fbx --release -- path/to/model.fbx
 ### Minimal setup
 
 ```rust
-use helio::{Camera, DebugDrawState, Renderer, RendererConfig, Scene, required_wgpu_features, required_wgpu_limits};
+use helio::{Camera, DebugDrawState, Renderer, RendererConfig, Scene,
+            required_wgpu_features, required_wgpu_limits};
 use helio_default_graphs::build_default_graph;
 
 let features = required_wgpu_features(adapter.features());
@@ -77,33 +60,15 @@ let limits   = required_wgpu_limits(adapter.limits());
 
 let config = RendererConfig::new(width, height, surface_format);
 let scene = Scene::new(device.clone(), queue.clone());
-let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
-    label: Some("Debug Camera Buffer"),
-    size: std::mem::size_of::<[f32; 4]>() as u64,
-    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    mapped_at_creation: false,
-});
-let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
-    label: Some("Cull Stats Buffer"),
-    size: 32,
-    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-    mapped_at_creation: false,
-});
+let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor { … });
+let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor { … });
 let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+let graph = build_default_graph(&device, &queue, &scene, config,
+    debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
 let mut renderer = Renderer::new(
-    device.clone(),
-    queue.clone(),
-    config.surface_format,
-    config.width,
-    config.height,
-    config.render_scale,
-    config,
-    scene,
-    graph,
-    debug_state,
-    debug_camera_buf,
-    cull_stats_buf,
+    device.clone(), queue.clone(),
+    config.surface_format, config.width, config.height, config.render_scale,
+    config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
 );
 
 let camera = Camera::perspective_look_at(
@@ -114,192 +79,41 @@ let camera = Camera::perspective_look_at(
 renderer.render(&camera, &surface_view)?;
 ```
 
-### Populating a scene
-
-```rust
-use helio::{GpuLight, GpuMaterial, MeshUpload, ObjectDescriptor, PackedVertex, SceneActor};
-use helio::{GroupMask, LightType, Movability};
-use glam::Mat4;
-
-// Upload a mesh
-let mesh_id = renderer
-    .scene_mut()
-    .insert_actor(SceneActor::mesh(MeshUpload { vertices, indices }))
-    .as_mesh()?;
-
-// Create a material
-let mat_id = renderer.scene_mut().insert_material(GpuMaterial {
-    base_color:         [0.9, 0.15, 0.15, 1.0],
-    roughness_metallic: [0.5, 0.0, 1.5, 0.5],
-    ..Default::default()
-});
-
-// Place an object
-let _obj_id = renderer
-    .scene_mut()
-    .insert_actor(SceneActor::object(ObjectDescriptor {
-        mesh: mesh_id,
-        material: mat_id,
-        transform: Mat4::from_translation(glam::Vec3::new(0.0, 1.0, -3.0)),
-        bounds: [0.0, 1.0, -3.0, 1.5],
-        movability: Some(Movability::Movable),
-        ..Default::default()
-    }));
-
-// Add a point light
-let _light_id = renderer
-    .scene_mut()
-    .insert_actor(SceneActor::light(GpuLight {
-        position_range:  [0.0, 4.0, 0.0, 20.0],
-        color_intensity: [1.0, 0.9, 0.8, 12.0],
-        light_type:      LightType::Point as u32,
-        ..Default::default()
-    }));
-```
+**The graph carries its own rebuilder.** You don't need to create a closure or call `set_rebuilder`. Resize handling, depth recreation, and graph reconstruction happen transparently.
 
 ---
 
-## Architecture
+## Features
 
-```
-crates/helio               ── Public API: Renderer, Scene, Camera, editor tools
-crates/helio-core            ── Render graph runtime, GpuScene, RenderPass trait
-crates/libhelio            ── GPU-shared types (GpuLight, GpuMaterial, uniforms, Tracked<T>)
-crates/helio-pass-*        ── One crate per render pass
-crates/helio-asset-compat  ── FBX / glTF / OBJ / USD loading
-crates/examples            ── Runnables demos
-```
+### Rendering pipeline
+- GPU-driven GBuffer — culling, LOD, indirect-draw dispatch all on GPU
+- Virtual geometry — per-meshlet frustum/backface culling, coverage LOD
+- Hi-Z occlusion culling — min-reduction pyramid + GPU occlusion tests
+- Deferred lighting — Cook-Torrance BRDF, metallic-roughness, IOR, specular tint
+- Cascaded shadow maps — 4-split CSM with PCF/PCSS, quality presets
+- Tile/cluster light culling — O(tiles) evaluation
+- Screen-space ambient occlusion
+- Radiance Cascades GI — multi-bounce probe-based global illumination
+- Volumetric sky — Hillaire 2020 model with clouds
 
-The render graph executes passes in order. Each pass receives a zero-copy context with borrowed GPU resources and publishes its outputs into a shared `FrameResources` struct for downstream passes:
+### Post-processing
+- TAA (temporal AA with jitter + reprojection)
+- FXAA / FXAA+HLFS hybrid
+- Tone mapping (integrated into deferred light pass)
+- Debug visualisations — UV, normals, albedo, shadow heatmap, LOD heatmap
 
-```
-Renderer::render()
+### Scene management
+- Handle-based API — `MeshId`, `MaterialId`, `LightId`, `ObjectId`, etc.
+- Group system — 64-bit bitmask per object; per-group hide/show/transform
+- Sectioned meshes — single VB + N index ranges (Unreal-style multi-material)
+- GPU-native scene with dirty-tracked uploads
 
-  ├─ Scene::flush()          ── dirty-tracked GPU upload (no-op at steady state)
-  ├─ ShadowMatrixPass        ── per-light face VP matrices (compute)
-  ├─ ShadowPass              ── depth-only → shadow atlas (render)
-  ├─ SkyLutPass              ── atmospheric LUT (render)
-  ├─ DepthPrepass            ── early-Z (indirect multi-draw)
-  ├─ GBufferPass             ── albedo/normal/ORM/emissive (GPU-driven)
-  ├─ VirtualGeometryPass     ── meshlet cull + LOD + indirect draw
-  ├─ DeferredLightPass       ── BRDF + CSM + RC GI + tone map (fullscreen)
-  ├─ SSAO / HiZ / LightCull  ── auxiliary passes
-  ├─ BillboardPass           ── editor icons + user billboards
-  ├─ Transparency            ── alpha-blended forward pass
-  ├─ Post-process (TAA/FXAA/SMAA)
-  └─ Queue submit
-```
-
-### Render graph safety
-
-Helio's `Tracked<T>` wrapper (Phase 1) catches unwritten-resource bugs at runtime in debug builds — if a pass skips writing `gbuffer` when `draw_count == 0`, downstream passes immediately panic with the reader's name. Phase 2 adds static dependency declarations: each pass declares `reads()` / `writes()`, and the graph validates the DAG at construction time. Future phases will add automatic GPU barriers and parallel pass execution.
-
----
-
-## Scene API
-
-### Groups
-
-Every object carries a `GroupMask` (64-bit bitmask). Objects are culled when any group overlaps the hidden set. `GroupMask::NONE` is always visible.
-
-```rust
-renderer.hide_group(GroupId::EDITOR);
-renderer.show_group(GroupId::STATIC);
-renderer.scene_mut().move_group(GroupId::DYNAMIC, Mat4::from_translation(delta));
-renderer.scene_mut().set_object_groups(obj_id, GroupMask::NONE.with(GroupId::STATIC));
-```
-
-| Constant | Purpose |
-|---|---|
-| `GroupId::EDITOR` | Editor helpers — light icons, gizmos |
-| `GroupId::STATIC` | Non-moving world geometry |
-| `GroupId::DYNAMIC` | Animated / physics objects |
-| `GroupId::SHADOW_CASTERS` | Mass shadow toggle |
-| `GroupId::DEBUG` | Debug visualisers |
-
-### Lights
-
-```rust
-// Point light
-GpuLight {
-    position_range:  [x, y, z, range],
-    color_intensity: [r, g, b, intensity],
-    light_type:      LightType::Point as u32,
-    ..Default::default()
-}
-
-// Spot light
-GpuLight {
-    position_range:  [x, y, z, range],
-    direction_outer: [dx, dy, dz, outer_angle.cos()],
-    color_intensity: [r, g, b, intensity],
-    light_type:      LightType::Spot as u32,
-    inner_angle:     inner_angle.cos(),
-    ..Default::default()
-}
-
-// Directional light
-GpuLight {
-    position_range:  [0.0, 0.0, 0.0, f32::MAX],
-    direction_outer: [dx, dy, dz, 0.0],
-    color_intensity: [r, g, b, intensity],
-    light_type:      LightType::Directional as u32,
-    ..Default::default()
-}
-```
-
-### Materials
-
-```rust
-GpuMaterial {
-    base_color:         [0.55, 0.55, 0.55, 1.0],  // linear RGBA
-    emissive:           [0.0, 0.0, 0.0, 0.0],     // rgb + strength
-    roughness_metallic: [0.8, 0.0, 1.5, 0.5],     // roughness, metallic, ior, specular_tint
-    tex_base_color:     GpuMaterial::NO_TEXTURE,
-    workflow: 0,  // 0 = Metallic-Roughness
-    flags:    0,  // bit0=double-sided  bit1=alpha-blend  bit2=alpha-test
-}
-```
-
-### Textures
-
-```rust
-let tex_id = renderer.scene_mut().insert_texture(TextureUpload {
-    data:   rgba_bytes,
-    width:  1024,
-    height: 1024,
-    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-})?;
-```
-
-### Sectioned meshes
-
-Single vertex buffer, N index ranges, N draw calls per instance. All sections share one transform, one pickable identity.
-
-```rust
-use helio_asset_compat::{load_scene_bytes_with_config, upload_sectioned_scene, LoadConfig};
-
-let scene = load_scene_bytes_with_config(
-    include_bytes!("model.fbx"), "fbx", None,
-    LoadConfig::default().with_merge_meshes(true).with_import_scale(glam::Vec3::splat(0.01)),
-)?;
-let (mesh_id, mat_ids) = upload_sectioned_scene(&mut renderer, &scene)?;
-let inst_id = renderer.scene_mut().insert_sectioned_object(
-    mesh_id, &mat_ids, Mat4::IDENTITY, [0.0; 4], Some(Movability::Movable),
-)?;
-renderer.scene_mut().update_sectioned_object_transform(inst_id, new_transform)?;
-```
-
----
-
-## Shadow quality presets
-
-| Preset | PCF samples | PCSS | Blocker | Filter |
-|---|---|---|---|---|
-| `Low` | 8 | off | 8 | 8 |
-| `Medium` | 16 | off | 8 | 8 |
-| `High` | 16 | on | 8 | 16 |
-| `Ultra` | 32 | on | 16 | 32 |
+### Pass system
+- 30+ pass crates, each independently versioned
+- Render graph automatically rebuilds on resize (no explicit rebuilder needed)
+- Debug-build tracking catches unwritten resources
+- Automatic CPU/GPU profiling per pass
+- Central crates have zero knowledge of pass types
 
 ---
 
@@ -309,70 +123,26 @@ renderer.scene_mut().update_sectioned_object_transform(inst_id, new_transform)?;
 |---|---|---|
 | `helio-pass-depth-prepass` | `DepthPrepassPass` | Early-Z, O(1) CPU |
 | `helio-pass-gbuffer` | `GBufferPass` | GPU-driven G-buffer fill |
-| `helio-pass-deferred-light` | `DeferredLightPass` | BRDF + shadows + RC GI + tone map |
-| `helio-pass-shadow` | `ShadowPass` | 512×512×256 shadow atlas |
-| `helio-pass-shadow-matrix` | `ShadowMatrixPass` | Per-light face VP matrices |
-| `helio-pass-sky-lut` | `SkyLutPass` | Atmospheric LUT bake |
+| `helio-pass-deferred-light` | `DeferredLightPass` | BRDF + shadows + GI + tone map |
+| `helio-pass-shadow` | `ShadowPass` | Shadow atlas |
 | `helio-pass-sky` | `SkyPass` | Fullscreen atmospheric background |
-| `helio-pass-virtual-geometry` | `VirtualGeometryPass` | Meshlet cull + LOD + indirect draw |
-| `helio-pass-radiance-cascades` | `RadianceCascadesPass` | Probe-based GI |
-| `helio-pass-sdf` | `SdfClipmapPass` | 8-level toroidal SDF clipmap |
-| `helio-pass-billboard` | `BillboardPass` | Up to 65K instanced quads |
-| `helio-pass-transparent` | `TransparentPass` | Alpha-blended forward |
+| `helio-pass-virtual-geometry` | `VirtualGeometryPass` | Meshlet cull + LOD |
 | `helio-pass-fxaa` | `FxaaPass` | Fullscreen FXAA |
-| `helio-pass-smaa` | `SmaaPass` | SMAA 1× |
 | `helio-pass-taa` | `TaaPass` | Temporal AA |
+| `helio-pass-hlfs` | `HlfsPass` | Hybrid lighting |
 | `helio-pass-ssao` | `SsaoPass` | Screen-space ambient occlusion |
-| `helio-pass-hiz` | `HiZBuildPass` | Min-reduction Hi-Z mip chain |
+| `helio-pass-hiz` | `HiZBuildPass` | Hi-Z mip chain |
 | `helio-pass-occlusion-cull` | `OcclusionCullPass` | GPU occlusion culling |
-| `helio-pass-debug` | `DebugShapesPass` | Lines, boxes, spheres, capsules |
-| `helio-pass-indirect-dispatch` | `IndirectDispatchPass` | Build indirect draw buffers |
-| `helio-pass-light-cull` | `LightCullPass` | Tile/cluster light culling |
+| `helio-pass-debug-overlay` | `DebugOverlayPass` | Text/graph overlay (F2) |
+| `helio-pass-perf-overlay` | `PerfOverlayPass` | GPU performance heatmaps |
+
+Full pass reference, debug view tables, GPU layout docs, and asset pipeline details are available in the crate documentation.
 
 ---
 
-## Debug views
+## Debug overlay
 
-| Mode | Pass | Name | Shows |
-|---|---|---|---|
-| 1 | GBuffer | UV Visualisation | R=U, G=V |
-| 2 | GBuffer | Raw Texture | Raw texels, no material multiply |
-| 3 | GBuffer | Geometry Normals | No normal mapping |
-| 4 | DeferredLight | Albedo Only | G-buffer albedo without lighting |
-| 5 | DeferredLight | World Normals | World-space normals remapped |
-| 10 | DeferredLight | Shadow Heatmap | White=lit, black=shadowed |
-| 11 | DeferredLight | Light Depth | Light-space depth projection |
-| 20 | VirtualGeometry | VG Mesh Triangles | Per-meshlet solid colour |
-| 21 | VirtualGeometry | VG LOD Heatmap | Green=LOD0 → red=LOD7 |
-
-Press **F3** / **F4** in `editor_demo_mini` to cycle debug views. Custom passes register views via `debug_views()` on `RenderPass`.
-
----
-
-## Custom render passes
-
-```rust
-renderer.add_pass(Box::new(MyPass::new(&device)));
-renderer.use_default_graph();   // reset to built-in pipeline
-```
-
----
-
-## Asset loading
-
-```rust
-use helio_asset_compat::{load_scene_file, upload_scene, LoadConfig};
-
-let scene = load_scene_file("assets/prop.fbx")?;
-let uploaded = upload_scene(&mut renderer, &scene)?;
-
-// Or one-shot:
-let uploaded = helio_asset_compat::load_and_upload_scene(
-    "assets/prop.fbx", LoadConfig::default(), &mut renderer,
-)?;
-```
-
-`ConvertedScene` holds: `meshes`, `sectioned_mesh` (when `merge_meshes = true`), `textures`, `materials`, `lights`, `cameras`.
+Press **F2** to toggle the debug overlay — shows FPS, frame timing, and optional user data. The overlay pass includes a `populate` callback hook for custom per-frame data. Press **F3** / **F4** to cycle through debug rendering views (UV, normals, shadow heatmap, LOD heatmap, etc.).
 
 ---
 
@@ -381,50 +151,51 @@ let uploaded = helio_asset_compat::load_and_upload_scene(
 | Binary | Description |
 |---|---|
 | `indoor_cathedral` | Gothic nave with RC GI, stained-glass light shafts |
-| `indoor_corridor` | Hallway with fluorescents, exit signs, wall sconces |
+| `indoor_cathedral_fxaa` | FXAA anti-aliasing variant |
+| `indoor_cathedral_hlfs` | Hybrid lighting variant |
 | `outdoor_city` | Dense city block at dusk |
 | `outdoor_canyon` | Desert canyon, `Q/E` rotates sun |
-| `space_station` | Massive orbital station, 40 m/s fly speed |
-| `load_fbx` | Drop-in viewer for FBX/glTF/OBJ/USDC |
-| `editor_demo` | Interactive scene editor — pick, translate, rotate, scale, duplicate |
+| `space_station` | Massive orbital station |
+| `load_fbx` | Drop-in FBX/glTF/OBJ/USD viewer |
+| `editor_demo` | Interactive scene editor — pick, translate, scale |
+| `editor_demo_mini` | Compact editor with FXAA |
 | `light_benchmark` | 150 simultaneous point lights |
-| `rc_benchmark` | Multi-bounce RC GI Cornell box |
 | `sdf_demo` | Live-editable SDF clipmap ray march |
-| `debug_shapes` | All debug primitives |
+| `simple_graph` | Minimal single-pass example |
 
 ```sh
 cargo run -p examples --bin indoor_cathedral --release
 cargo run -p examples --bin load_fbx --release -- path/to/model.fbx
-cargo check -p helio -p examples --quiet
 ```
 
 ---
 
-## GPU layout reference
+## Asset pipeline
 
-### `GpuCameraUniforms` byte offsets
+FBX, glTF, OBJ, and USD support via `helio_asset_compat`. Baked AO, lightmaps, reflection probes, and irradiance SH for static geometry. Pre-computed potentially-visible sets for CPU-side culling.
 
-| Offset | Field | Description |
-|---|---|---|
-| 0 | `view` | World → view (mat4x4) |
-| 64 | `proj` | View → clip (mat4x4) |
-| 128 | `view_proj` | Combined VP (mat4x4) |
-| 192 | `inv_view_proj` | Clip → world (mat4x4) |
-| 256 | `position_near` | xyz=camera position, w=near |
-| 272 | `forward_far` | xyz=forward, w=far |
-| 288 | `jitter_frame` | xy=TAA jitter, z=frame index |
-| 304 | `prev_view_proj` | Previous frame VP (mat4x4) |
+---
 
-### `BillboardInstance` (48 bytes)
+## Custom passes
 
-| Field | Type | Description |
-|---|---|---|
-| `world_pos` | `[f32; 4]` | xyz = world position |
-| `scale_flags` | `[f32; 4]` | xy = width/height (metres), z > 0.5 = screen-space |
-| `color` | `[f32; 4]` | Linear RGBA tint |
+Each pass is a struct implementing the `RenderPass` trait from `helio-core`. Passes register the resources they read and write; the graph validates the DAG at construction time and automatically manages texture pools and barriers.
+
+```rust
+use helio_core::{PrepareContext, PassContext, RenderPass, Result};
+
+struct MyPass { … }
+
+impl RenderPass for MyPass {
+    fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> { … }
+    fn execute(&mut self, ctx: &mut PassContext) -> Result<()> { … }
+}
+
+// Add to a graph builder:
+graph.add_pass(Box::new(MyPass::new(&device)));
+```
 
 ---
 
 ## License
 
-[MIT](LICENSE)
+MIT

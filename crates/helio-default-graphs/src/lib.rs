@@ -333,8 +333,9 @@ fn build_default_graph_internal(
 
     graph.lock(iw, ih);
 
-    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
-        build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, debug_overlay)
+    let overlay_owned = debug_overlay.map(Arc::clone);
+    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+        build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref())
     });
     graph.set_graph_data(rebuilder);
 
@@ -447,8 +448,9 @@ fn build_fxaa_graph_internal(
 
     graph.lock(w, h);
 
-    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
-        build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, debug_overlay)
+    let overlay_owned = debug_overlay.map(Arc::clone);
+    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+        build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref())
     });
     graph.set_graph_data(rebuilder);
 
@@ -491,8 +493,9 @@ fn build_hlfs_graph_internal(
 
     graph.lock(iw, ih);
 
-    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
-        build_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, debug_overlay)
+    let overlay_owned = debug_overlay.map(Arc::clone);
+    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+        build_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref())
     });
     graph.set_graph_data(rebuilder);
 
@@ -572,8 +575,9 @@ fn build_fxaa_hlfs_graph_internal(
 
     graph.lock(w, h);
 
-    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
-        build_fxaa_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, debug_overlay)
+    let overlay_owned = debug_overlay.map(Arc::clone);
+    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+        build_fxaa_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref())
     });
     graph.set_graph_data(rebuilder);
 
@@ -588,7 +592,7 @@ pub fn build_simple_graph(
     let mut graph = RenderGraph::new(device, queue);
     graph.add_pass(Box::new(SimpleCubePass::new(device, surface_format)));
 
-    let rebuilder: GraphRebuilder = Arc::new(move |device, _queue, _scene, _config, _debug_state, _debug_camera_buf, _cull_stats_buf, _debug_overlay| {
+    let rebuilder: GraphRebuilder = Arc::new(move |device, _queue, _scene, _config, _debug_state, _debug_camera_buf, _cull_stats_buf| {
         let mut g = RenderGraph::new(device, _queue);
         g.add_pass(Box::new(SimpleCubePass::new(device, surface_format)));
         g

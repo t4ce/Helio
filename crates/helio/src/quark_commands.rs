@@ -7,7 +7,6 @@ use quark::{Command, CommandError, Quark, Result as QuarkResult};
 pub enum HelioAction {
     SetDebugMode(u32),
     SetEditorMode(bool),
-    SetDebugDepthTest(bool),
     DebugClear,
 }
 
@@ -56,9 +55,6 @@ pub fn register_helio_commands(registry: &mut Quark, sender: Sender<HelioAction>
         sender: sender.clone(),
     });
     registry.register_command(SetEditorModeCommand {
-        sender: sender.clone(),
-    });
-    registry.register_command(SetDebugDepthTestCommand {
         sender: sender.clone(),
     });
     registry.register_command(DebugClearCommand { sender });
@@ -149,48 +145,6 @@ impl Command for SetEditorModeCommand {
     }
 }
 
-struct SetDebugDepthTestCommand {
-    sender: Sender<HelioAction>,
-}
-
-impl Command for SetDebugDepthTestCommand {
-    fn name(&self) -> &str {
-        "set_debug_depth_test"
-    }
-
-    fn syntax(&self) -> &str {
-        "set_debug_depth_test <true|false>"
-    }
-
-    fn short(&self) -> &str {
-        "Enable/disable debug depth testing"
-    }
-
-    fn docs(&self) -> &str {
-        "Usage: set_debug_depth_test true | false"
-    }
-
-    fn execute(&self, args: Vec<String>) -> QuarkResult<()> {
-        if args.len() != 1 {
-            return Err(CommandError::ArgumentCountMismatch {
-                expected: 1,
-                got: args.len(),
-            });
-        }
-
-        let enabled = args[0].parse::<bool>().map_err(|_| CommandError::TypeConversionError {
-            arg: args[0].clone(),
-            target_type: "bool",
-        })?;
-
-        self.sender
-            .send(HelioAction::SetDebugDepthTest(enabled))
-            .map_err(|e| CommandError::ExecutionError(format!("Channel send failed: {}", e)))?;
-
-        Ok(())
-    }
-}
-
 struct DebugClearCommand {
     sender: Sender<HelioAction>,
 }
@@ -258,7 +212,6 @@ impl Command for HelpCommand {
         println!("Available commands:");
         println!("  set_debug_mode <0|10|11> - Set renderer debug mode");
         println!("  set_editor_mode <true|false> - Enable/disable editor helpers");
-        println!("  set_debug_depth_test <true|false> - Toggle debug depth test");
         println!("  debug_clear - Clear debug lines");
         println!("  help - Show this list");
 

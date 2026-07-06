@@ -816,7 +816,6 @@ impl AppState {
             match action {
                 HelioAction::SetDebugMode(mode) => renderer.set_debug_mode(mode),
                 HelioAction::SetEditorMode(enabled) => renderer.set_editor_mode(enabled),
-                HelioAction::SetDebugDepthTest(enabled) => renderer.set_debug_depth_test(enabled),
                 HelioAction::DebugClear => renderer.debug_clear(),
             }
         }

@@ -799,13 +799,6 @@ impl RenderPass for DebugDrawPass {
 }
 
 impl Renderer {
-    pub fn set_debug_depth_test(&mut self, enabled: bool) {
-        self.debug_depth_test = enabled;
-        for pass in self.graph.iter_passes_mut::<DebugDrawPass>() {
-            pass.set_depth_test(enabled);
-        }
-    }
-
     pub fn debug_clear(&mut self) {
         if let Ok(mut s) = self.debug_state.lock() {
             if !s.user_lines.is_empty() {

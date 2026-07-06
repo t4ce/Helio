@@ -134,6 +134,9 @@ pub struct DebugOverlayState {
     pie_colors: Vec<f32>,
     lines: Vec<f32>,
     line_colors: Vec<f32>,
+    /// Optional callback invoked each frame before data upload.
+    /// Receives &mut Self so the caller can write text, bars, etc.
+    pub populate: Option<Box<dyn Fn(&mut Self) + Send + Sync>>,
 }
 
 impl DebugOverlayState {
@@ -154,6 +157,7 @@ impl DebugOverlayState {
             pie_colors: Vec::with_capacity(MAX_PIES as usize * 4),
             lines: Vec::with_capacity(MAX_LINES as usize * 4),
             line_colors: Vec::with_capacity(MAX_LINES as usize * 4),
+            populate: None,
         }))
     }
 
@@ -513,6 +517,10 @@ impl DebugOverlayPass {
         self.shared.lock().unwrap().enabled = enabled;
     }
 
+    pub fn shared(&self) -> &Arc<Mutex<DebugOverlayState>> {
+        &self.shared
+    }
+
     pub fn resize(&mut self, _device: &wgpu::Device, width: u32, height: u32) {
         self.screen_w = width;
         self.screen_h = height;
@@ -536,11 +544,29 @@ impl RenderPass for DebugOverlayPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let mut shared = self.shared.lock().unwrap();
+
         if !shared.enabled {
             return Ok(());
         }
 
-        // Update grid size from shared state
+        // Write basic timing stats
+        shared.clear();
+        let cols = (self.screen_w / 14).min(MAX_COLS);
+        let rows = (self.screen_h / 24).min(MAX_ROWS);
+        shared.set_grid_size(cols, rows);
+        let fps = if ctx.delta_time > 0.0 { (1.0 / ctx.delta_time) as u32 } else { 0 };
+        let frame_ms = ctx.delta_time * 1000.0;
+        shared.write_text(0, 0, &format!("Helio  FPS: {}  Frame: {:.1} ms", fps, frame_ms));
+
+        // Call user-defined populate hook (if any) to write additional per-frame data.
+        // Take the callback out to avoid borrow conflicts with mutation below.
+        let mut populate = None;
+        std::mem::swap(&mut populate, &mut shared.populate);
+        if let Some(ref populate_fn) = populate {
+            populate_fn(&mut shared);
+        }
+        std::mem::swap(&mut populate, &mut shared.populate);
+
         let grid_cols = shared.grid_cols();
         let grid_rows = shared.grid_rows();
         let buf_size = (grid_cols * grid_rows * 4) as u64;
