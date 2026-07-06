@@ -5,7 +5,7 @@
 //! O(1) CPU execution — single `draw(0..vertex_count, 0..1)`.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const MAX_DEBUG_VERTS: u32 = 65536;
 const MAX_DEBUG_TRIS: u32 = 65536;
@@ -191,8 +191,16 @@ impl DebugPass {
 
         // ── Filled-triangle pipelines (TriangleList + alpha blend, no depth write) ──
         let tri_attribs = [
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0,  shader_location: 0 },
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 1 },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 1,
+            },
         ];
         let tri_vbl = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<DebugVertex>() as u64,
@@ -238,27 +246,28 @@ impl DebugPass {
             cache: None,
         });
 
-        let pipeline_tri_no_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Debug Tri Pipeline NoDepth"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[tri_vbl],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(tri_target)],
-            }),
-            primitive: tri_prim,
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline_tri_no_depth =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Debug Tri Pipeline NoDepth"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[tri_vbl],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(tri_target)],
+                }),
+                primitive: tri_prim,
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
 
         let tri_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Tri Buffer"),
@@ -290,7 +299,7 @@ impl DebugPass {
     pub fn update_lines(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
         let count = verts.len().min(MAX_DEBUG_VERTS as usize);
         if count > 0 {
-            helio_v3::upload::write_buffer(
+            helio_core::upload::write_buffer(
                 queue,
                 &self.vertex_buf,
                 0,
@@ -304,7 +313,12 @@ impl DebugPass {
     ///
     /// Useful for tiny dynamic regions (e.g. a camera marker) when most of the
     /// debug line buffer is static.
-    pub fn update_lines_at(&mut self, queue: &wgpu::Queue, first_vertex: usize, verts: &[DebugVertex]) {
+    pub fn update_lines_at(
+        &mut self,
+        queue: &wgpu::Queue,
+        first_vertex: usize,
+        verts: &[DebugVertex],
+    ) {
         if verts.is_empty() || first_vertex >= MAX_DEBUG_VERTS as usize {
             return;
         }
@@ -314,7 +328,7 @@ impl DebugPass {
             return;
         }
         let offset_bytes = (first_vertex * std::mem::size_of::<DebugVertex>()) as u64;
-        helio_v3::upload::write_buffer(
+        helio_core::upload::write_buffer(
             queue,
             &self.vertex_buf,
             offset_bytes,
@@ -333,7 +347,7 @@ impl DebugPass {
     pub fn update_tris(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
         let count = verts.len().min(MAX_DEBUG_TRIS as usize);
         if count > 0 {
-            helio_v3::upload::write_buffer(
+            helio_core::upload::write_buffer(
                 queue,
                 &self.tri_buf,
                 0,
@@ -481,8 +495,8 @@ impl RenderPass for DebugPass {
         } else {
             None
         };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
-            Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -490,8 +504,7 @@ impl RenderPass for DebugPass {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            }),
-        ]));
+            })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("DebugDraw"),
             color_attachments,
@@ -516,4 +529,3 @@ impl RenderPass for DebugPass {
         Ok(())
     }
 }
-

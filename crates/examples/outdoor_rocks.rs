@@ -24,9 +24,10 @@ use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_wgpu_features, required_wgpu_limits, BillboardInstance, Camera, LightId, Renderer,
-    RendererConfig, VirtualMeshUpload, VirtualObjectDescriptor,
+    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, LightId, Renderer,
+    RendererConfig, Scene, VirtualMeshUpload, VirtualObjectDescriptor,
 };
+use helio_default_graphs::build_default_graph;
 use helio_asset_compat::{
     load_scene_bytes_with_config, load_scene_file_with_config, upload_scene_materials, LoadConfig,
 };
@@ -88,9 +89,6 @@ struct AppState {
     renderer: Renderer,
     last_frame: Instant,
     start_time: Instant,
-
-    // Billboards — positions stay fixed; alpha/scale pulse in update()
-    billboard_positions: Vec<(Vec3, usize)>, // (world_pos, color_index)
 
     cam_pos: Vec3,
     cam_yaw: f32,
@@ -222,10 +220,26 @@ impl ApplicationHandler for App {
             },
         );
 
+        let config = RendererConfig::new(size.width, size.height, surface_format);
+        let scene = Scene::new(device.clone(), queue.clone());
+        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Camera Buffer"),
+            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Stats Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
+        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
         let mut renderer = Renderer::new(
-            device.clone(),
-            queue,
-            RendererConfig::new(size.width, size.height, surface_format),
+            device.clone(), queue.clone(),
+            config.surface_format, config.width, config.height, config.render_scale,
+            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
         renderer.set_clear_color([0.34, 0.48, 0.72, 1.0]); // overcast sky blue
         renderer.set_ambient([0.38, 0.44, 0.50], 1.3);
@@ -322,8 +336,7 @@ impl ApplicationHandler for App {
 
         // ── Scatter rocks ─────────────────────────────────────────────────
         let mut seed: u64 = 0xDEAD_BEEF_CAFE_1234;
-        let mut billboard_positions: Vec<(Vec3, usize)> = Vec::new();
-        let mut global_rock_idx: usize = 0;
+        let mut _global_rock_idx: usize = 0;
 
         for rock_type in 0..3usize {
             let vg_entries = rock_vg[rock_type].as_deref();
@@ -378,13 +391,7 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                // Every Nth rock gets a billboard marker
-                if global_rock_idx % BILLBOARD_EVERY_N == 0 {
-                    let color_idx = (global_rock_idx / BILLBOARD_EVERY_N) % MARKER_COLORS.len();
-                    let billboard_pos = pos + Vec3::Y * (scale.y + 1.5);
-                    billboard_positions.push((billboard_pos, color_idx));
-                }
-                global_rock_idx += 1;
+                _global_rock_idx += 1;
             }
         }
 
@@ -451,17 +458,6 @@ impl ApplicationHandler for App {
             }
         }
 
-        // ── Initial billboard upload ──────────────────────────────────────
-        let bill_instances: Vec<BillboardInstance> = billboard_positions
-            .iter()
-            .map(|&(pos, color_idx)| BillboardInstance {
-                world_pos: [pos.x, pos.y, pos.z, 0.0],
-                scale_flags: [1.2, 1.2, 0.0, 0.0],
-                color: MARKER_COLORS[color_idx],
-            })
-            .collect();
-        renderer.set_billboard_instances(&bill_instances);
-
         self.state = Some(AppState {
             window,
             surface,
@@ -470,7 +466,6 @@ impl ApplicationHandler for App {
             renderer,
             last_frame: Instant::now(),
             start_time: Instant::now(),
-            billboard_positions,
             cam_pos: Vec3::new(0.0, 12.0, 50.0),
             cam_yaw: 0.0,
             cam_pitch: -0.18,
@@ -562,7 +557,9 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 state.debug_overlay_enabled = !state.debug_overlay_enabled;
-                state.renderer.set_debug_overlay_enabled(state.debug_overlay_enabled);
+                if let Some(pass) = state.renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>() {
+                    pass.set_enabled(state.debug_overlay_enabled);
+                }
                 println!("[debug] debug overlay = {:?}", state.debug_overlay_enabled);
             }
 
@@ -628,31 +625,6 @@ impl ApplicationHandler for App {
                     state.sun_light_id,
                     directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2),
                 );
-
-                // ── Animate billboards (pulse alpha + gentle bob) ─────────
-                let bill_instances: Vec<BillboardInstance> = state
-                    .billboard_positions
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(base_pos, color_idx))| {
-                        let phase = t * 1.4 + i as f32 * 0.43;
-                        let bob = (phase * 0.9).sin() * 0.35;
-                        let alpha = 0.55 + 0.35 * (phase * 1.1).sin().abs();
-                        let mut color = MARKER_COLORS[color_idx];
-                        color[3] = alpha;
-                        BillboardInstance {
-                            world_pos: [base_pos.x, base_pos.y + bob, base_pos.z, 0.0],
-                            scale_flags: [
-                                1.1 + 0.15 * (phase * 0.7).cos(),
-                                1.1 + 0.15 * (phase * 0.7).cos(),
-                                0.0,
-                                0.0,
-                            ],
-                            color,
-                        }
-                    })
-                    .collect();
-                state.renderer.set_billboard_instances(&bill_instances);
 
                 // ── Camera ────────────────────────────────────────────────
                 let forward = state.update_camera(dt);

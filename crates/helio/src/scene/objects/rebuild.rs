@@ -3,7 +3,7 @@
 //! This module contains the core logic for reconstructing GPU instance, AABB, draw call,
 //! indirect, and visibility buffers from the CPU-side object arena.
 
-use helio_v3::{DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
+use helio_core::{DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
 
 use super::super::helpers::object_is_visible;
 
@@ -299,7 +299,7 @@ impl super::super::Scene {
     /// Builds the shadow-specific partitioned instance + indirect buffers.
     ///
     /// Separates objects by movability into two groups:
-    /// - Static/Stationary → `shadow_static_instances` + `shadow_static_indirect`  
+    /// - Static/Stationary → `shadow_static_instances` + `shadow_static_indirect`
     /// - Movable           → `shadow_movable_instances` + `shadow_movable_indirect`
     ///
     /// Each group has its own 0-based instance indices so the shadow passes can
@@ -346,8 +346,12 @@ impl super::super::Scene {
         self.gpu_scene.shadow_static_draw_count = static_draw_count;
         self.gpu_scene.shadow_movable_draw_count = movable_draw_count;
 
-        self.gpu_scene.shadow_static_indirect.set_data(static_indirect);
-        self.gpu_scene.shadow_movable_indirect.set_data(movable_indirect);
+        self.gpu_scene
+            .shadow_static_indirect
+            .set_data(static_indirect);
+        self.gpu_scene
+            .shadow_movable_indirect
+            .set_data(movable_indirect);
 
         log::debug!(
             "rebuild_shadow_partition_buffers: {} static + {} movable shadow draws",
@@ -356,4 +360,3 @@ impl super::super::Scene {
         );
     }
 }
-

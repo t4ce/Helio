@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub const CHAR_W: u32 = 14;
 pub const ROW_H: u32 = 24;

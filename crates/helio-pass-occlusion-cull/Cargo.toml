@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-helio-v3 = { workspace = true }
+helio-core = { workspace = true }
 libhelio = { workspace = true }
 wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }
 bytemuck = { workspace = true, features = ["derive"] }

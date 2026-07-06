@@ -25,8 +25,8 @@
 //! pointer changes (i.e. on resize). No views are required at construction time.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// R1/R2 low-discrepancy jitter offset for a given frame index.
 ///
@@ -474,7 +474,7 @@ impl RenderPass for TaaPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ────────────────────────────────────────────────
         let pre_aa_view = ctx.resources.pre_aa.read("TAA").ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "TaaPass requires frame.pre_aa (published by DeferredLightPass)".to_string(),
             )
         })?;

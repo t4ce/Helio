@@ -11,7 +11,7 @@ nebula = { git = "https://github.com/Far-Beyond-Pulsar/Nebula", rev = "b9b7cfc9d
 
 # Helio internal crates
 libhelio = { workspace = true }
-helio-v3 = { workspace = true }
+helio-core = { workspace = true }
 
 # GPU
 wgpu.workspace = true

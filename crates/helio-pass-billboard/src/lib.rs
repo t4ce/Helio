@@ -5,8 +5,8 @@
 //! a single instanced draw call. O(1) CPU.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const MAX_BILLBOARDS: u32 = 65536;
 
@@ -142,7 +142,7 @@ impl BillboardPass {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        helio_v3::upload::write_texture(
+        helio_core::upload::write_texture(
             queue,
             wgpu::TexelCopyTextureInfo {
                 texture: &white_texture,
@@ -227,7 +227,7 @@ impl BillboardPass {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        helio_v3::upload::write_buffer(
+        helio_core::upload::write_buffer(
             queue,
             &quad_vertex_buf,
             0,
@@ -353,7 +353,7 @@ impl BillboardPass {
     pub fn update_instances(&mut self, queue: &wgpu::Queue, instances: &[BillboardInstance]) {
         let count = instances.len().min(MAX_BILLBOARDS as usize);
         if count > 0 {
-            helio_v3::upload::write_buffer(
+            helio_core::upload::write_buffer(
                 queue,
                 &self.instance_buf,
                 0,
@@ -395,7 +395,7 @@ impl BillboardPass {
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
-            helio_v3::upload::write_texture(
+            helio_core::upload::write_texture(
                 queue,
                 wgpu::TexelCopyTextureInfo {
                     texture: &sprite_texture,

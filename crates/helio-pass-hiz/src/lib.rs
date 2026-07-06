@@ -21,8 +21,8 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{FrameResources, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::{FrameResources, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use wgpu::util::DeviceExt;
 
 const WORKGROUP_SIZE: u32 = 8;

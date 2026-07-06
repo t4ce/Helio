@@ -15,8 +15,8 @@
 //! A future OIT (Order-Independent Transparency) implementation would eliminate this sort.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -252,10 +252,10 @@ impl RenderPass for TransparentPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
-            Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -263,13 +263,13 @@ impl RenderPass for TransparentPass {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            }),
-        ]));
+            })]));
+        let depth_view = resources.full_res_depth.get().unwrap_or(depth);
         Some(wgpu::RenderPassDescriptor {
             label: Some("Transparent"),
             color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth,
+                view: depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -289,7 +289,7 @@ impl RenderPass for TransparentPass {
         }
         let main_scene = ctx.resources.main_scene.read("Transparent");
         let main_scene = main_scene.as_ref().ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "TransparentPass requires main_scene mesh buffers".to_string(),
             )
         })?;
@@ -313,4 +313,3 @@ impl RenderPass for TransparentPass {
         Ok(())
     }
 }
-

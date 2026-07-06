@@ -1,7 +1,7 @@
 //! Public types and internal record structures for scene management.
 
 use glam::Mat4;
-use helio_v3::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial};
+use helio_core::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial};
 use libhelio::{GpuMeshletEntry, GpuWaterHitbox, GpuWaterVolume};
 use bytemuck::{Pod, Zeroable};
 

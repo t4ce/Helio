@@ -26,8 +26,8 @@
 //! buffer (slot 0) and index buffer before this pass executes.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::num::NonZeroU32;
 
 /// Bindless texture array size per shader stage.

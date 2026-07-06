@@ -4,7 +4,7 @@
 //! O(1) CPU — single compute dispatch regardless of light count.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const WORKGROUP_SIZE: u32 = 64;
 

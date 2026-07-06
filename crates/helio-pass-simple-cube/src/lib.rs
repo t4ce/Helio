@@ -1,4 +1,4 @@
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use wgpu::util::DeviceExt;
 
 // ── Vertex layout ─────────────────────────────────────────────────────────────
@@ -213,10 +213,10 @@ impl RenderPass for SimpleCubePass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
-            Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -229,13 +229,13 @@ impl RenderPass for SimpleCubePass {
                     }),
                     store: wgpu::StoreOp::Store,
                 },
-            }),
-        ]));
+            })]));
+        let depth_view = resources.full_res_depth.get().unwrap_or(depth);
         Some(wgpu::RenderPassDescriptor {
             label: Some("SimpleCube"),
             color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth,
+                view: depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
@@ -276,4 +276,3 @@ impl RenderPass for SimpleCubePass {
         Ok(())
     }
 }
-

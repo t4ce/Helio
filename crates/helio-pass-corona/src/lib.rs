@@ -12,8 +12,8 @@
 //!   8.  Render      — one draw_indirect per emitter; atlas sprite from emitter.texture_index
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

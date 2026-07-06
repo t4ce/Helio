@@ -69,15 +69,41 @@ cargo run -p examples --bin load_fbx --release -- path/to/model.fbx
 ### Minimal setup
 
 ```rust
-use helio::{Camera, Renderer, RendererConfig, required_wgpu_features, required_wgpu_limits};
+use helio::{Camera, DebugDrawState, Renderer, RendererConfig, Scene, required_wgpu_features, required_wgpu_limits};
+use helio_default_graphs::build_default_graph;
 
 let features = required_wgpu_features(adapter.features());
 let limits   = required_wgpu_limits(adapter.limits());
 
+let config = RendererConfig::new(width, height, surface_format);
+let scene = Scene::new(device.clone(), queue.clone());
+let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+    label: Some("Debug Camera Buffer"),
+    size: std::mem::size_of::<[f32; 4]>() as u64,
+    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    mapped_at_creation: false,
+});
+let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+    label: Some("Cull Stats Buffer"),
+    size: 32,
+    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+    mapped_at_creation: false,
+});
+let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
+let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
 let mut renderer = Renderer::new(
     device.clone(),
     queue.clone(),
-    RendererConfig::new(width, height, surface_format),
+    config.surface_format,
+    config.width,
+    config.height,
+    config.render_scale,
+    config,
+    scene,
+    graph,
+    debug_state,
+    debug_camera_buf,
+    cull_stats_buf,
 );
 
 let camera = Camera::perspective_look_at(
@@ -137,7 +163,7 @@ let _light_id = renderer
 
 ```
 crates/helio               ── Public API: Renderer, Scene, Camera, editor tools
-crates/helio-v3            ── Render graph runtime, GpuScene, RenderPass trait
+crates/helio-core            ── Render graph runtime, GpuScene, RenderPass trait
 crates/libhelio            ── GPU-shared types (GpuLight, GpuMaterial, uniforms, Tracked<T>)
 crates/helio-pass-*        ── One crate per render pass
 crates/helio-asset-compat  ── FBX / glTF / OBJ / USD loading

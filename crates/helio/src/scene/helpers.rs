@@ -1,7 +1,7 @@
 //! Internal helper functions for scene object management.
 
 use glam::{Mat3, Mat4, Vec3};
-use helio_v3::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
+use helio_core::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
 
 use crate::groups::GroupMask;
 use crate::handles::MeshId;

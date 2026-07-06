@@ -4,7 +4,7 @@
 //! Unlike other resources, lights have no reference counting (they exist
 //! independently of objects).
 
-use helio_v3::GpuLight;
+use helio_core::GpuLight;
 
 use crate::handles::LightId;
 

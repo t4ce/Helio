@@ -5,7 +5,7 @@
 //! Multiple objects can reference the same material.
 
 use bytemuck::Zeroable;
-use helio_v3::GpuMaterial;
+use helio_core::GpuMaterial;
 
 use crate::handles::MaterialId;
 use crate::material::{MaterialAsset, MaterialTextures};

@@ -3,7 +3,7 @@
 //! Provides the [`Scene::insert_object`](crate::Scene::insert_object) method for adding
 //! renderable objects to the scene with O(1) performance in persistent mode.
 
-use helio_v3::{DrawIndexedIndirectArgs, GpuDrawCall};
+use helio_core::{DrawIndexedIndirectArgs, GpuDrawCall};
 
 use crate::handles::ObjectId;
 
@@ -100,7 +100,9 @@ impl super::super::Scene {
         let (id, dense_index) = self.objects.insert(record);
 
         // Track static topology changes for shadow atlas caching
-        let inserted_movability = self.objects.get_dense(dense_index)
+        let inserted_movability = self
+            .objects
+            .get_dense(dense_index)
             .map(|r| r.movability)
             .unwrap_or_default();
         if !inserted_movability.can_move() {
@@ -161,4 +163,3 @@ impl super::super::Scene {
         Ok(id)
     }
 }
-

@@ -3,7 +3,7 @@
 //! Provides methods for creating instances of virtual meshes and updating their transforms.
 
 use glam::Mat4;
-use helio_v3::GpuInstanceData;
+use helio_core::GpuInstanceData;
 
 use crate::handles::VirtualObjectId;
 use crate::vg::VirtualObjectDescriptor;

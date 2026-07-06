@@ -1,12 +1,11 @@
 mod config;
 mod debug;
-mod graph;
+mod fullscreen;
+mod render;
 mod renderer_impl;
+mod resize;
+mod setup;
 
-pub use config::{required_wgpu_features, required_wgpu_limits, GiConfig, RendererConfig};
-pub use graph::{
-    build_simple_graph, build_hlfs_graph, build_default_graph_external,
-    build_fxaa_graph, build_fxaa_graph_external,
-    build_fxaa_hlfs_graph, build_fxaa_hlfs_graph_external,
-};
-pub use renderer_impl::{DebugBatch, Renderer};
+pub use config::{required_wgpu_features, required_wgpu_limits, GiConfig, PerfOverlayMode, RendererConfig};
+pub use debug::{DebugDrawPass, DebugDrawState};
+pub use renderer_impl::{DebugBatch, DebugCameraUniform, GraphRebuilder, Renderer};

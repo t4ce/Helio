@@ -34,7 +34,7 @@
 //! Subsequent frames return to normal per-object dirty detection.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -97,9 +97,7 @@ impl ShadowDirtyPass {
         // ── Shader ────────────────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ShadowDirty Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/shadow_dirty.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow_dirty.wgsl").into()),
         });
 
         // ── Bind Group Layout ─────────────────────────────────────────────────
@@ -216,7 +214,7 @@ impl ShadowDirtyPass {
         // more than a few dozen movable shadow casters.
         let prev_positions_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ShadowDirty/PrevPositions"),
-            size: (MAX_SHADOW_FACES * 16) as u64,  // 256 × vec4f
+            size: (MAX_SHADOW_FACES * 16) as u64, // 256 × vec4f
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -299,9 +297,9 @@ impl RenderPass for ShadowDirtyPass {
         }
 
         // ── Lazy bind group rebuild on GrowableBuffer reallocation ─────────────
-        let inst_ptr     = ctx.scene.instances as *const _ as usize;
-        let mov_ptr      = ctx.scene.shadow_movable_indirect as *const _ as usize;
-        let sm_ptr       = ctx.scene.shadow_matrices as *const _ as usize;
+        let inst_ptr = ctx.scene.instances as *const _ as usize;
+        let mov_ptr = ctx.scene.shadow_movable_indirect as *const _ as usize;
+        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
         let key = (inst_ptr, mov_ptr, sm_ptr);
 
         if self.bind_group_key != Some(key) {
@@ -349,10 +347,11 @@ impl RenderPass for ShadowDirtyPass {
         let thread_count = movable_draw_count.max(1);
         let workgroups = thread_count.div_ceil(WORKGROUP_SIZE);
 
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("ShadowDirty"),
-            timestamp_writes: None,
-        });
+        let mut pass =
+            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ShadowDirty"),
+                timestamp_writes: None,
+            });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bg, &[]);
         pass.dispatch_workgroups(workgroups, 1, 1);

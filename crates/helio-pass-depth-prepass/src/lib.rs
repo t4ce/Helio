@@ -8,7 +8,7 @@
 //! shared mesh vertex buffer (slot 0) and index buffer **before** this pass
 //! executes, or the GPU draw will read from undefined memory.
 
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub struct DepthPrepassPass {
     pipeline: wgpu::RenderPipeline,
@@ -164,7 +164,7 @@ impl RenderPass for DepthPrepassPass {
             return Ok(());
         }
         let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "DepthPrepass requires main_scene mesh buffers".to_string(),
             )
         })?;

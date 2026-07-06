@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -619,7 +619,7 @@ impl RenderPass for DeferredLightPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let gbuffer_opt = ctx.resources.gbuffer.read("DeferredLight");
         let gbuffer = gbuffer_opt.as_ref().ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "DeferredLight requires published gbuffer resources".to_string(),
             )
         })?;
@@ -627,7 +627,7 @@ impl RenderPass for DeferredLightPass {
         // Screen-space AO: use baked AO (via frame.ssao, which SsaoPass publishes as override
         // when a baked AO texture is present) or fall back to the 1×1 white texture.
         let ao_view = ctx.resources.ssao.get().unwrap_or(&self.fallback_ao_view);
-        
+
         // Lightmap UVs from GBuffer
         let lightmap_uv_view = ctx.resources.gbuffer_lightmap_uv.get().unwrap_or(&self.fallback_lightmap_uv_view);
 
@@ -673,11 +673,11 @@ impl RenderPass for DeferredLightPass {
             .get().unwrap_or(&self.fallback_shadow_sampler);
         let rc_view = ctx.resources.rc_view.get().unwrap_or(&self.fallback_rc_view);
         let env_view = &self.fallback_env_view;
-        
+
         // Baked lightmap atlas from bake inject pass
         let lightmap_view = ctx.resources.baked_lightmap.get().unwrap_or(&self.fallback_lightmap_view);
         let lightmap_sampler = ctx.resources.baked_lightmap_sampler.get().unwrap_or(&self.fallback_lightmap_sampler);
-        
+
         let scene_key = (
             ctx.scene.lights as *const _ as usize,
             shadow_view as *const _ as usize,
@@ -939,4 +939,3 @@ fn black_cube_texture(
     });
     (texture, view)
 }
-

@@ -15,7 +15,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use helio::{Camera, Renderer, RendererConfig};
+use helio::{Camera, DebugDrawState, Renderer, RendererConfig, Scene};
 
 use crate::{HelioWasmApp, InputState};
 
@@ -340,10 +340,48 @@ async fn init_wgpu<T: HelioWasmApp>(
         },
     );
 
+    let scene = Scene::new(device.clone(), queue.clone());
+
+    let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Debug Camera Buffer"),
+        size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Cull Stats Buffer"),
+        size: 32,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
+
+    let graph = helio_default_graphs::build_default_graph(
+        &device,
+        &queue,
+        &scene,
+        RendererConfig::new(size.width, size.height, surface_format),
+        debug_state.clone(),
+        &debug_camera_buf,
+        &cull_stats_buf,
+        None, // debug_overlay
+    );
+
     let mut renderer = Renderer::new(
         device.clone(),
         queue.clone(),
+        surface_format,
+        size.width,
+        size.height,
+        0.75,
         RendererConfig::new(size.width, size.height, surface_format),
+        scene,
+        graph,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
     );
 
     let demo = T::init(

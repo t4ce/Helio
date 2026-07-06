@@ -27,10 +27,11 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, build_fxaa_graph, Camera, EditorState,
-    GizmoMode, Renderer, RendererConfig, SceneActor, ScenePicker, VirtualMeshUpload,
+    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, EditorState,
+    GizmoMode, Renderer, RendererConfig, Scene, SceneActor, ScenePicker, VirtualMeshUpload,
     VirtualObjectDescriptor,
 };
+use helio_default_graphs::{build_default_graph, build_fxaa_graph};
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use v3_demo_common::{
     box_mesh, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh,
@@ -157,11 +158,27 @@ impl ApplicationHandler for App {
         );
 
         // ── Renderer (FXAA pipeline: full-res, no TAA jitter/upscaling) ───
+        let config = RendererConfig::new(sz.width, sz.height, format)
+                .with_render_scale(1.0);
+        let scene = Scene::new(device.clone(), queue.clone());
+        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Camera Buffer"),
+            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Stats Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
+        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
         let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            RendererConfig::new(sz.width, sz.height, format)
-                .with_render_scale(1.0),
+            device.clone(), queue.clone(),
+            config.surface_format, config.width, config.height, config.render_scale,
+            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
         renderer.set_editor_mode(true);
         // Night sky — deep navy
@@ -726,6 +743,7 @@ impl ApplicationHandler for App {
         // Switch to FXAA pipeline: full-res rendering, no TAA jitter/upscaling
         let fxaa_config = RendererConfig::new(sz.width, sz.height, format)
             .with_render_scale(1.0);
+        let debug_overlay_shared = helio_pass_debug_overlay::DebugOverlayState::new();
         let fxaa_graph = build_fxaa_graph(
             &device,
             &queue,
@@ -734,15 +752,9 @@ impl ApplicationHandler for App {
             renderer.debug_state(),
             renderer.debug_camera_buf(),
             renderer.cull_stats_buf(),
-            Some(renderer.debug_overlay_shared()),
+            Some(&debug_overlay_shared),
         );
-        renderer.set_graph_custom(
-            fxaa_graph,
-            fxaa_config,
-            Arc::new(|device, queue, scene, cfg, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
-                build_fxaa_graph(device, queue, scene, cfg, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay)
-            }),
-        );
+        renderer.set_graph(fxaa_graph);
 
         self.state = Some(AppState {
             window,
@@ -900,7 +912,9 @@ impl ApplicationHandler for App {
                         }
                         KeyCode::F2 | KeyCode::F5 => {
                             state.debug_overlay_enabled = !state.debug_overlay_enabled;
-                            state.renderer.set_debug_overlay_enabled(state.debug_overlay_enabled);
+                            if let Some(pass) = state.renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>() {
+                                pass.set_enabled(state.debug_overlay_enabled);
+                            }
                         }
                         KeyCode::KeyL if !state.right_mouse_held => {
                             let pos = state.cam_pos.to_array();

@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
-helio-v3 = { workspace = true }
+helio-core = { workspace = true }
 libhelio = { workspace = true }
 log = { workspace = true }
 wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }

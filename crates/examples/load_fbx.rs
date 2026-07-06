@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::Vec3;
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig};
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, Renderer, RendererConfig, Scene};
+use helio_default_graphs::build_default_graph;
 use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials};
 use v3_demo_common::{point_light, update_point_light};
 use winit::{
@@ -144,10 +145,26 @@ impl ApplicationHandler for App {
             },
         );
 
+        let config = RendererConfig::new(size.width, size.height, surface_format);
+        let scene = Scene::new(device.clone(), queue.clone());
+        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Camera Buffer"),
+            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Stats Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
+        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
         let mut renderer = Renderer::new(
-            device.clone(),
-            queue,
-            RendererConfig::new(size.width, size.height, surface_format),
+            device.clone(), queue.clone(),
+            config.surface_format, config.width, config.height, config.render_scale,
+            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
         renderer.set_clear_color([0.03, 0.03, 0.04, 1.0]);
         renderer.set_ambient([0.06, 0.06, 0.09], 1.0);

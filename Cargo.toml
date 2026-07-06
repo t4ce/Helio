@@ -1,55 +1,6 @@
 [workspace]
 members = [
-    "crates/helio-v3",
-    "crates/helio",
-    "crates/libhelio",
-    "crates/helio-live-portal",
-    "crates/helio-asset-compat",
-    "crates/examples",
-
-    # GPU-driven pass crates (each O(1) CPU)
-    "crates/helio-pass-sky-lut",
-    "crates/helio-pass-sky",
-    "crates/helio-pass-indirect-dispatch",
-    "crates/helio-pass-depth-prepass",
-    "crates/helio-pass-hiz",
-    "crates/helio-pass-occlusion-cull",
-    "crates/helio-pass-light-cull",
-    "crates/helio-pass-shadow-matrix",
-    "crates/helio-pass-shadow-dirty",
-    "crates/helio-pass-shadow-cull",
-    "crates/helio-pass-shadow",
-    "crates/helio-pass-gbuffer",
-    "crates/helio-pass-ssao",
-    "crates/helio-pass-deferred-light",
-    "crates/helio-pass-hlfs",
-    "crates/helio-pass-transparent",
-    "crates/helio-pass-billboard",
-    "crates/helio-pass-virtual-geometry",
-    "crates/helio-pass-taa",
-    "crates/helio-pass-fxaa",
-    "crates/helio-pass-smaa",
-    "crates/helio-pass-debug",
-    "crates/helio-pass-perf-overlay",
-    "crates/helio-pass-radiance-cascades",
-    "crates/helio-pass-simple-cube",
-    "crates/helio-pass-sdf",
-    "crates/helio-pass-water-sim",
-    "crates/helio-pass-water-caustics",
-    "crates/helio-pass-water-surface",
-    "crates/helio-pass-underwater",
-    "crates/helio-pass-corona",
-    "crates/helio-pass-debug-overlay",
-
-    # WASM infrastructure
-    "crates/helio-wasm",
-    "crates/helio-web-demos",
-
-    # Baking (offline AO, lightmaps, reflection probes, PVS via Nebula)
-    "crates/helio-bake",
-
-    # Offline / tooling crates (no window required)
-    "crates_other/helio-snapshot",
+    "crates/*"
 ]
 resolver = "2"
 
@@ -75,7 +26,8 @@ thiserror = "2.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
-helio-v3 = { path = "crates/helio-v3" }
+helio-core = { path = "crates/helio-core" }
+helio-default-graphs = { path = "crates/helio-default-graphs"}
 wasm-bindgen = "0.2"
 helio-pass-taa = { path = "crates/helio-pass-taa" }
 helio = { path = "crates/helio" }

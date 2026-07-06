@@ -4,8 +4,8 @@
 //! O(1) CPU: single fullscreen draw.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const LUT_WIDTH: u32 = 192;
 const LUT_HEIGHT: u32 = 108;

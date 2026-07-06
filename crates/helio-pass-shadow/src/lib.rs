@@ -46,8 +46,8 @@
 //! Light movement is still detected CPU-side via `per_caster_dirty_gen` (O(N_lights),
 //! negligible).  Light-dirty faces use `LoadOp::Clear` + full movable geometry draws.
 
-use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -493,7 +493,7 @@ impl RenderPass for ShadowPass {
         }
 
         let main_scene = ctx.resources.main_scene.read("Shadow").ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig("ShadowPass requires main_scene".into())
+            helio_core::Error::InvalidPassConfig("ShadowPass requires main_scene".into())
         })?;
 
         let vertices = main_scene.mesh_buffers.vertices;

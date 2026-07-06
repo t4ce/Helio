@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::{EulerRot, Quat, Vec3};
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig};
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, Renderer, RendererConfig, Scene};
+use helio_default_graphs::build_simple_graph;
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -186,8 +187,26 @@ impl ApplicationHandler for App {
 
         // ── renderer with simple graph ────────────────────────────────────────
         let config = RendererConfig::new(size.width, size.height, surface_format);
-        let mut renderer = Renderer::new(device.clone(), queue.clone(), config);
-        renderer.use_simple_graph();
+        let scene = Scene::new(device.clone(), queue.clone());
+        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Camera Buffer"),
+            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Stats Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
+        let graph = build_simple_graph(&device, &queue, surface_format);
+        let mut renderer = Renderer::new(
+            device.clone(), queue.clone(),
+            config.surface_format, config.width, config.height, config.render_scale,
+            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+        );
 
         // ── initial camera: 4 units back, looking at origin ───────────────────
         self.state = Some(AppState {

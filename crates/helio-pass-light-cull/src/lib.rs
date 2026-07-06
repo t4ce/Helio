@@ -11,8 +11,8 @@
 //! skip every light that doesn't touch the current pixel's tile.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub const TILE_SIZE: u32 = 16;
 pub const MAX_LIGHTS_PER_TILE: u32 = 64;
@@ -201,8 +201,8 @@ impl RenderPass for LightCullPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_legacy("tile_light_lists");
-        builder.write_legacy("tile_light_counts");
+        builder.write_buffer("tile_light_lists");
+        builder.write_buffer("tile_light_counts");
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {

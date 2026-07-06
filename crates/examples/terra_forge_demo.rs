@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, RenderGraph, Renderer, RendererConfig,
+    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, RenderGraph, Renderer, RendererConfig, Scene,
 };
 use helio_pass_taa::TaaPass;
 use helio_pass_terra_forge::{TerraForgePass, DEFAULT_PLANET_RADIUS};
@@ -170,7 +170,20 @@ impl ApplicationHandler for App {
 
         let config =
             RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
-        let mut renderer = Renderer::new(device.clone(), queue.clone(), config);
+        let scene = Scene::new(device.clone(), queue.clone());
+        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Camera Buffer"),
+            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Stats Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
 
         let pass = TerraForgePass::new(&device, &queue, size.width, size.height, surface_format);
         let taa = TaaPass::new(&device, size.width, size.height, size.width, size.height, surface_format);
@@ -178,7 +191,11 @@ impl ApplicationHandler for App {
         let mut graph = RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(pass));
         graph.add_pass(Box::new(taa));
-        renderer.set_graph(graph);
+        let mut renderer = Renderer::new(
+            device.clone(), queue.clone(),
+            config.surface_format, config.width, config.height, config.render_scale,
+            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+        );
 
         // Start camera just above the planet surface (not 2× radius away!).
         let planet_r = DEFAULT_PLANET_RADIUS;

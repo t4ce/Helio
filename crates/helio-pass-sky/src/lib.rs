@@ -4,8 +4,8 @@
 //! O(1) CPU: single fullscreen draw.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// Sky uniforms matching the WGSL shader layout (112 bytes, 16-byte aligned).
 /// Must match the layout used in sky.wgsl and sky_lut.wgsl.

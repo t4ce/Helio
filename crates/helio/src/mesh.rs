@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use helio_v3::GrowableBuffer;
+use helio_core::GrowableBuffer;
 
 use crate::arena::SparsePool;
 use crate::handles::MeshId;

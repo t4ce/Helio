@@ -9,6 +9,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 helio = { workspace = true }
+helio-default-graphs = { path = "../helio-default-graphs" }
 wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }
 winit = { workspace = true }
 log = { workspace = true }

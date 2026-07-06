@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use libhelio::FrameResources;
 
 use crate::data::BakedData;

@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use glam::Vec3;
 use helio::{
-    Camera, GpuLight, GpuMaterial, GroupMask, LightType,
-    ObjectDescriptor, Renderer, RendererConfig, SceneActor,
+    Camera, DebugDrawState, GpuLight, GpuMaterial, GroupMask, LightType,
+    ObjectDescriptor, Renderer, RendererConfig, Scene, SceneActor,
 };
+use helio_default_graphs::build_default_graph_external;
 use helio_asset_compat::{load_scene_file_with_config, upload_scene, LoadConfig};
 use thiserror::Error;
 
@@ -161,8 +162,26 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     // GPU timestamp readback — we drive polling ourselves after the frame.
     let renderer_cfg = RendererConfig::new(cfg.width, cfg.height, FORMAT)
         .with_render_scale(1.0);
-
-    let mut renderer = Renderer::new_with_external_device(device.clone(), queue.clone(), renderer_cfg);
+    let helio_scene = Scene::new(device.clone(), queue.clone());
+    let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Debug Camera Buffer"),
+        size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Cull Stats Buffer"),
+        size: 32,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
+    let graph = build_default_graph_external(&device, &queue, &helio_scene, renderer_cfg, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+    let mut renderer = Renderer::new_with_external_device(
+        device.clone(), queue.clone(),
+        renderer_cfg.surface_format, renderer_cfg.width, renderer_cfg.height, renderer_cfg.render_scale,
+        renderer_cfg, helio_scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+    );
 
     // ── 6. Upload all meshes + materials via helio-asset-compat ──────────────
     let uploaded = upload_scene(&mut renderer, &scene)
@@ -454,11 +473,25 @@ impl SnapshotBatch {
 
         let renderer_cfg = RendererConfig::new(config.width, config.height, FORMAT)
             .with_render_scale(1.0);
-
+        let helio_scene = Scene::new(device.clone(), queue.clone());
+        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Camera Buffer"),
+            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Stats Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
+        let graph = build_default_graph_external(&device, &queue, &helio_scene, renderer_cfg, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
         let renderer = Renderer::new_with_external_device(
-            device.clone(),
-            queue.clone(),
-            renderer_cfg,
+            device.clone(), queue.clone(),
+            renderer_cfg.surface_format, renderer_cfg.width, renderer_cfg.height, renderer_cfg.render_scale,
+            renderer_cfg, helio_scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
 
         Ok(Self { device, queue, renderer, target_texture, target_view, config })

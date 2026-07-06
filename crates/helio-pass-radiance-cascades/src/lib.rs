@@ -22,8 +22,8 @@
 const _RC_TRACE_WGSL: &str = include_str!("../shaders/rc_trace.wgsl");
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// Probe grid dimension (one axis). Probes are PROBE_DIM³.
 const PROBE_DIM: u32 = 8;
@@ -197,7 +197,7 @@ impl RenderPass for RadianceCascadesPass {
         // Lazily create bind group from graph-managed cascade texture.
         if self.bind_group.is_none() {
             let tex = ctx.resource_pool.get_texture("rc_cascades").ok_or_else(|| {
-                helio_v3::Error::InvalidPassConfig("RadianceCascades: missing rc_cascades texture".into())
+                helio_core::Error::InvalidPassConfig("RadianceCascades: missing rc_cascades texture".into())
             })?;
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {

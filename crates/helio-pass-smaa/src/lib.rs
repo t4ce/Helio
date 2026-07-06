@@ -14,8 +14,8 @@
 //! (e.g. after resize). `blend` bind group is rebuilt in `on_resize()` since it references
 //! the internal `edge_view` which is recreated then.
 
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, RenderPass, Result as HelioResult};
 
 /// SMAA pass (3 sequential fullscreen draws).
 pub struct SmaaPass {
@@ -212,10 +212,19 @@ impl SmaaPass {
         device: &wgpu::Device,
         width: u32,
         height: u32,
-    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Texture, wgpu::TextureView) {
+    ) -> (
+        wgpu::Texture,
+        wgpu::TextureView,
+        wgpu::Texture,
+        wgpu::TextureView,
+    ) {
         let edge_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("SMAA Edge Texture"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -227,7 +236,11 @@ impl SmaaPass {
 
         let blend_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("SMAA Blend Texture"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -298,27 +311,39 @@ impl RenderPass for SmaaPass {
         // Edge and neighbor bind groups reference the pre_aa view from frame resources.
         // They are rebuilt whenever that view's pointer changes (e.g. after resize).
         let pre_aa = ctx.resources.pre_aa.read("SMAA").ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "SmaaPass requires frame.pre_aa (published by the geometry pass)".to_string(),
             )
         })?;
         let input_key = pre_aa as *const _ as usize;
         if self.input_key != Some(input_key) {
             self.edge_bind_group = Some(Self::make_bg(
-                ctx.device, &self.edge_bgl, "SMAA Edge BG",
-                pre_aa, &self.linear_sampler, &self.point_sampler,
+                ctx.device,
+                &self.edge_bgl,
+                "SMAA Edge BG",
+                pre_aa,
+                &self.linear_sampler,
+                &self.point_sampler,
             ));
             self.neighbor_bind_group = Some(Self::make_bg(
-                ctx.device, &self.neighbor_bgl, "SMAA Neighbor BG",
-                pre_aa, &self.linear_sampler, &self.point_sampler,
+                ctx.device,
+                &self.neighbor_bgl,
+                "SMAA Neighbor BG",
+                pre_aa,
+                &self.linear_sampler,
+                &self.point_sampler,
             ));
             self.input_key = Some(input_key);
         }
         // Blend bind group references the internal edge_view; rebuilt in on_resize() when None.
         if self.blend_bind_group.is_none() {
             self.blend_bind_group = Some(Self::make_bg(
-                ctx.device, &self.blend_bgl, "SMAA Blend BG",
-                &self.edge_view, &self.linear_sampler, &self.point_sampler,
+                ctx.device,
+                &self.blend_bgl,
+                "SMAA Blend BG",
+                &self.edge_view,
+                &self.linear_sampler,
+                &self.point_sampler,
             ));
         }
 
@@ -415,4 +440,3 @@ impl RenderPass for SmaaPass {
         self.input_key = None;
     }
 }
-

@@ -4,9 +4,9 @@
 //! O(1) CPU: single fullscreen draw.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::graph::ResourceSize;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::graph::ResourceSize;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const KERNEL_SIZE: usize = 64;
 const NOISE_DIM: u32 = 4;
@@ -116,7 +116,7 @@ impl SsaoPass {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        helio_v3::upload::write_buffer(queue, &sample_kernel_buf, 0, bytemuck::cast_slice(&kernel));
+        helio_core::upload::write_buffer(queue, &sample_kernel_buf, 0, bytemuck::cast_slice(&kernel));
 
         // ── Noise texture (4×4 Rgba8Unorm, random rotation vectors) ───────────
         let noise_data = generate_noise();
@@ -134,7 +134,7 @@ impl SsaoPass {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        helio_v3::upload::write_texture(
+        helio_core::upload::write_texture(
             queue,
             wgpu::TexelCopyTextureInfo {
                 texture: &noise_texture,

@@ -28,7 +28,7 @@
 //! ```
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
 
 // ── Constants ─────────────────────────────────────────────────────────────────

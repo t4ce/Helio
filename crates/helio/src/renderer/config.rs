@@ -1,5 +1,15 @@
 use crate::material::MAX_TEXTURES;
-use helio_pass_perf_overlay::PerfOverlayMode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum PerfOverlayMode {
+    #[default]
+    Disabled = 0,
+    PassOverdraw = 1,
+    ShaderComplexity = 2,
+    TileLightCount = 3,
+    PassOutput = 4,
+}
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     #[cfg(not(target_arch = "wasm32"))]

@@ -3,7 +3,7 @@ name = "helio"
 version = "0.17.0"
 edition = "2021"
 authors = ["Helio Contributors"]
-description = "High-level facade over helio-v3 for stable scene handles and O(1)-style CPU updates"
+description = "High-level facade over helio-core for stable scene handles and O(1)-style CPU updates"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
@@ -11,49 +11,21 @@ arrayvec = "0.7"
 bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
 image = { workspace = true, features = ["png"] }
-helio-v3 = { workspace = true }
-helio-pass-billboard = { path = "../helio-pass-billboard" }
-helio-pass-light-cull = { path = "../helio-pass-light-cull" }
-helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
-helio-pass-deferred-light = { path = "../helio-pass-deferred-light" }
-helio-pass-depth-prepass = { path = "../helio-pass-depth-prepass" }
-helio-pass-indirect-dispatch = { path = "../helio-pass-indirect-dispatch" }
-helio-pass-hiz = { path = "../helio-pass-hiz" }
-helio-pass-occlusion-cull = { path = "../helio-pass-occlusion-cull" }
-helio-pass-fxaa = { path = "../helio-pass-fxaa" }
-helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
-helio-pass-hlfs = { path = "../helio-pass-hlfs" }
-helio-pass-shadow = { path = "../helio-pass-shadow" }
-helio-pass-shadow-dirty = { path = "../helio-pass-shadow-dirty" }
-helio-pass-shadow-cull = { path = "../helio-pass-shadow-cull" }
-helio-pass-shadow-matrix = { path = "../helio-pass-shadow-matrix" }
-helio-pass-simple-cube = { path = "../helio-pass-simple-cube" }
-helio-pass-sky = { path = "../helio-pass-sky" }
-helio-pass-sky-lut = { path = "../helio-pass-sky-lut" }
-helio-pass-smaa = { path = "../helio-pass-smaa" }
-helio-pass-ssao = { path = "../helio-pass-ssao" }
-helio-pass-taa = { workspace = true }
-helio-pass-transparent = { path = "../helio-pass-transparent" }
-helio-pass-debug = { path = "../helio-pass-debug" }
-helio-pass-water-sim = { path = "../helio-pass-water-sim" }
-helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
-helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
-helio-pass-corona = { path = "../helio-pass-corona" }
+helio-core = { workspace = true }
+
 libhelio = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 wgpu = { workspace = true, features = ["web", "webgpu", "wgsl", "dx12", "vulkan"] }
 pollster = { workspace = true }
 quark = { workspace = true, package = "quark" }
-helio-live-portal = { path = "../helio-live-portal", optional = true }
 helio-bake = { path = "../helio-bake", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 meshopt = "0.6.2"
 
 [features]
 default = ["profiling"]
-profiling = ["helio-v3/profiling"]
-live-portal = ["helio-live-portal"]
+profiling = ["helio-core/profiling"]
 bake = ["helio-bake", "uuid"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -63,4 +35,3 @@ web-time = "1"
 # Used for DXGI exclusive-fullscreen path (IDXGIFactory1::MakeWindowAssociation).
 # Version must match wgpu-hal's transitive dep so types are unified.
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi"] }
-
