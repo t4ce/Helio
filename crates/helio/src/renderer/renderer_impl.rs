@@ -90,7 +90,6 @@ pub struct Renderer {
     pub(crate) gi_config: GiConfig,
     pub(crate) shadow_quality: libhelio::ShadowQuality,
     pub(crate) debug_mode: u32,
-    pub(crate) debug_depth_test: bool,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
     pub(crate) billboard_instances: Vec<BillboardInstance>,

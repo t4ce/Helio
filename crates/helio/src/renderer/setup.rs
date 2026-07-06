@@ -134,7 +134,6 @@ impl Renderer {
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,
             debug_mode: config.debug_mode,
-            debug_depth_test: true,
             editor_mode: false,
             debug_state,
             billboard_instances: Vec::new(),
