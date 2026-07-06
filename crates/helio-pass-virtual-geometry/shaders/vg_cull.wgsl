@@ -107,8 +107,37 @@ fn select_lod_level(screen_size: f32) -> u32 {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
+/// Pre-normalised frustum planes (left, right, bottom, top, near, far), shared
+/// across the whole workgroup. Planes depend only on `camera.view_proj` — the
+/// same for every thread in the entire dispatch, not just within one workgroup
+/// — so computing them (and the length() normalisation) separately per meshlet
+/// thread bought nothing. One thread per workgroup computes them into workgroup
+/// memory instead of all 64 redoing the same math.
+var<workgroup> wg_planes: array<vec4<f32>, 6>;
+
 @compute @workgroup_size(64)
-fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    // Must run before any thread can `return` below, so the barrier stays in
+    // uniform control flow (reached by every invocation in the workgroup).
+    if lid == 0u {
+        let vp = camera.view_proj;
+        // Gribb/Hartmann (column-major, depth ∈ [0,1]); normalised so the
+        // per-meshlet test is a plain dot product (no per-thread length()).
+        let p0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]); // left
+        let p1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]); // right
+        let p2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]); // bottom
+        let p3 = vec4<f32>(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]); // top
+        let p4 = vec4<f32>(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);                                               // near
+        let p5 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]); // far
+        wg_planes[0] = p0 / length(p0.xyz);
+        wg_planes[1] = p1 / length(p1.xyz);
+        wg_planes[2] = p2 / length(p2.xyz);
+        wg_planes[3] = p3 / length(p3.xyz);
+        wg_planes[4] = p4 / length(p4.xyz);
+        wg_planes[5] = p5 / length(p5.xyz);
+    }
+    workgroupBarrier();
+
     let idx = gid.x;
     if idx >= cull_uni.meshlet_count {
         return;
@@ -140,22 +169,21 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // ── Frustum cull ──────────────────────────────────────────────────────────
-    // Planes extracted from VP using Gribb/Hartmann (column-major, depth ∈ [0,1]).
-    // Plane normals are NOT normalised; scale world_radius by |n| per plane.
-    let vp = camera.view_proj;
-    let pl0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]); // left
-    let pl1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]); // right
-    let pl2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]); // bottom
-    let pl3 = vec4<f32>(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]); // top
-    let pl4 = vec4<f32>(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);                                               // near (depth∈[0,1])
-    let pl5 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]); // far
+    // Planes were pre-normalised once per workgroup above (see wg_planes) —
+    // just dot-product against them here, no per-thread length() needed.
+    let pl0 = wg_planes[0];
+    let pl1 = wg_planes[1];
+    let pl2 = wg_planes[2];
+    let pl3 = wg_planes[3];
+    let pl4 = wg_planes[4];
+    let pl5 = wg_planes[5];
 
-    let visible = (dot(pl0.xyz, center_ws) + pl0.w >= -world_radius * length(pl0.xyz))
-               && (dot(pl1.xyz, center_ws) + pl1.w >= -world_radius * length(pl1.xyz))
-               && (dot(pl2.xyz, center_ws) + pl2.w >= -world_radius * length(pl2.xyz))
-               && (dot(pl3.xyz, center_ws) + pl3.w >= -world_radius * length(pl3.xyz))
-               && (dot(pl4.xyz, center_ws) + pl4.w >= -world_radius * length(pl4.xyz))
-               && (dot(pl5.xyz, center_ws) + pl5.w >= -world_radius * length(pl5.xyz));
+    let visible = (dot(pl0.xyz, center_ws) + pl0.w >= -world_radius)
+               && (dot(pl1.xyz, center_ws) + pl1.w >= -world_radius)
+               && (dot(pl2.xyz, center_ws) + pl2.w >= -world_radius)
+               && (dot(pl3.xyz, center_ws) + pl3.w >= -world_radius)
+               && (dot(pl4.xyz, center_ws) + pl4.w >= -world_radius)
+               && (dot(pl5.xyz, center_ws) + pl5.w >= -world_radius);
 
     if !visible {
         return;

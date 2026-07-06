@@ -275,12 +275,15 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         );
     }
 
-    let tex_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
+    // Sampled once and reused below — this used to be sampled a second time via
+    // an identical call further down, so every non-debug pixel paid for the
+    // same texture fetch twice for zero extra benefit.
+    let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
 
     // DEBUG MODE 2: Show texture sample directly (bypass material multiply AND lighting)
     if globals.debug_mode == 2u {
         return GBufferOutput(
-            vec4<f32>(tex_sample.rgb, 1.0),
+            vec4<f32>(base_sample.rgb, 1.0),
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0),
@@ -289,7 +292,6 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     }
 
     // Common for modes 0 and 3
-    let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
     let albedo = material.base_color * base_sample;
     let alpha = albedo.a;
 
