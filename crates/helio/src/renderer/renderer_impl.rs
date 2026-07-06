@@ -338,9 +338,10 @@ impl Renderer {
         self.ambient_intensity = intensity;
     }
 
-    pub fn set_graph(&mut self, graph: RenderGraph) {
+    pub fn set_graph(&mut self, mut graph: RenderGraph) {
+        // Extract rebuilder stored in the graph by the builder function
+        self.graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
         self.graph = graph;
-        self.graph_rebuilder = None;
     }
 
     pub fn set_graph_with_builder(&mut self, graph: RenderGraph, rebuilder: GraphRebuilder) {

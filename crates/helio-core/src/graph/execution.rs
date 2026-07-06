@@ -30,6 +30,9 @@ pub struct RenderGraph {
     locked: bool,
     pass_cache: Vec<Option<CachedPass>>,
     frame_count: u64,
+    /// Opaque storage for cross-crate data (e.g. a GraphRebuilder).
+    /// Set by graph builders, consumed by the Renderer on construction.
+    graph_data: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl RenderGraph {
@@ -55,6 +58,7 @@ impl RenderGraph {
             locked: false,
             pass_cache: Vec::new(),
             frame_count: 0,
+            graph_data: None,
         }
     }
 
@@ -69,6 +73,17 @@ impl RenderGraph {
     }
 
     // ── Public API ──────────────────────────────────────────────────────
+
+    /// Store opaque data (e.g. a GraphRebuilder) on the graph so the Renderer
+    /// can retrieve it later without the caller having to pass it explicitly.
+    pub fn set_graph_data<T: Send + Sync + 'static>(&mut self, data: T) {
+        self.graph_data = Some(Box::new(data));
+    }
+
+    /// Take the stored opaque data, if it matches type `T`.
+    pub fn take_graph_data<T: Send + Sync + 'static>(&mut self) -> Option<T> {
+        self.graph_data.take().map(|b| *b.downcast::<T>().unwrap())
+    }
 
     pub fn set_render_size(&mut self, width: u32, height: u32) {
         if self.output_w == width && self.output_h == height && self.resources_allocated {

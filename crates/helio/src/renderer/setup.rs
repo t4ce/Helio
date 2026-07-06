@@ -10,7 +10,7 @@ use helio_core::RenderGraph;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
-use super::renderer_impl::{Renderer, DebugCameraUniform, HALTON_JITTER};
+use super::renderer_impl::{GraphRebuilder, Renderer, DebugCameraUniform, HALTON_JITTER};
 
 impl Renderer {
     pub(crate) fn compute_jitter_matrices(width: u32, height: u32) -> [glam::Mat4; 16] {
@@ -55,7 +55,7 @@ impl Renderer {
         render_scale: f32,
         config: RendererConfig,
         mut scene: Scene,
-        graph: RenderGraph,
+        mut graph: RenderGraph,
         debug_state: Arc<Mutex<DebugDrawState>>,
         debug_camera_buffer: wgpu::Buffer,
         cull_stats_buffer: wgpu::Buffer,
@@ -110,6 +110,9 @@ impl Renderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+
+        // Extract the rebuilder that was stored in the graph by the builder function
+        let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
 
         Self {
             device,
@@ -166,7 +169,7 @@ impl Renderer {
             gizmo_camera: None,
             gizmo_viewport_height: 0.0,
             cull_stats_buffer,
-            graph_rebuilder: None,
+            graph_rebuilder,
             debug_overlay_shared: helio_pass_debug_overlay::DebugOverlayState::new(),
         }
     }

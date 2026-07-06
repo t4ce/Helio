@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use helio::DebugDrawState;
+use helio::GraphRebuilder;
 use helio::RendererConfig;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_corona::CoronaPass;
@@ -331,6 +332,12 @@ fn build_default_graph_internal(
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
 
     graph.lock(iw, ih);
+
+    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
+        build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, debug_overlay)
+    });
+    graph.set_graph_data(rebuilder);
+
     graph
 }
 
@@ -439,10 +446,16 @@ fn build_fxaa_graph_internal(
     );
 
     graph.lock(w, h);
+
+    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
+        build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, debug_overlay)
+    });
+    graph.set_graph_data(rebuilder);
+
     graph
 }
 
-pub fn build_hlfs_graph(
+fn build_hlfs_graph_internal(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
     scene: &Scene,
@@ -450,12 +463,13 @@ pub fn build_hlfs_graph(
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
+    owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
 
-    let mut graph = RenderGraph::new(device, queue);
+    let mut graph = new_graph(device, queue, owns_device);
 
     let perf = add_common_early_passes(
         &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, iw, ih,
@@ -476,7 +490,26 @@ pub fn build_hlfs_graph(
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
 
     graph.lock(iw, ih);
+
+    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
+        build_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, debug_overlay)
+    });
+    graph.set_graph_data(rebuilder);
+
     graph
+}
+
+pub fn build_hlfs_graph(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+) -> RenderGraph {
+    build_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay)
 }
 
 pub fn build_fxaa_hlfs_graph(
@@ -538,6 +571,12 @@ fn build_fxaa_hlfs_graph_internal(
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
 
     graph.lock(w, h);
+
+    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
+        build_fxaa_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, debug_overlay)
+    });
+    graph.set_graph_data(rebuilder);
+
     graph
 }
 
@@ -548,6 +587,14 @@ pub fn build_simple_graph(
 ) -> RenderGraph {
     let mut graph = RenderGraph::new(device, queue);
     graph.add_pass(Box::new(SimpleCubePass::new(device, surface_format)));
+
+    let rebuilder: GraphRebuilder = Arc::new(move |device, _queue, _scene, _config, _debug_state, _debug_camera_buf, _cull_stats_buf, _debug_overlay| {
+        let mut g = RenderGraph::new(device, _queue);
+        g.add_pass(Box::new(SimpleCubePass::new(device, surface_format)));
+        g
+    });
+    graph.set_graph_data(rebuilder);
+
     graph
 }
 

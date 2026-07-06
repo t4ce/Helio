@@ -27,7 +27,7 @@
 mod v3_demo_common;
 
 use helio::{
-    Camera, DebugDrawState, EditorState, GizmoMode, GraphRebuilder, Renderer, RendererConfig,
+    Camera, DebugDrawState, EditorState, GizmoMode, Renderer, RendererConfig,
     Scene, SceneActor, ScenePicker, required_wgpu_features, required_wgpu_limits,
 };
 use helio_default_graphs::build_default_graph;
@@ -175,15 +175,11 @@ impl ApplicationHandler for App {
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
         let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
-        let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
-            build_default_graph(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay)
-        });
         let mut renderer = Renderer::new(
             device.clone(), queue.clone(),
             config.surface_format, config.width, config.height, config.render_scale,
             config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
-        renderer.set_rebuilder(rebuilder);
         renderer.set_editor_mode(true);
         // Night sky — deep navy
         renderer.set_clear_color([0.03, 0.05, 0.10, 1.0]);
