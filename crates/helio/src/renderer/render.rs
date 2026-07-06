@@ -355,6 +355,23 @@ impl Renderer {
             self.queue.submit(std::iter::once(clear_encoder.finish()));
         }
 
+        // Populate debug overlay data for DebugOverlayPass
+        {
+            if let Ok(mut state) = self.debug_overlay_shared.lock() {
+                if state.enabled {
+                    state.clear();
+                    let cols = (self.output_width / 14).min(280);
+                    let rows = (self.output_height / 24).min(90);
+                    state.set_grid_size(cols, rows);
+                    let fps = if self.delta_time > 0.0 { (1.0 / self.delta_time) as u32 } else { 0 };
+                    let frame_ms = self.delta_time * 1000.0;
+                    let other_ms = (frame_ms - self.graph_time_ms).max(0.0);
+                    state.write_text(0, 0, &format!("Helio  FPS: {}  Frame: {:.1} ms  Graph: {:.2} ms  Other: {:.2} ms",
+                        fps, frame_ms, self.graph_time_ms, other_ms));
+                }
+            }
+        }
+
         let _graph_start = Instant::now();
         self.graph.execute_with_frame_resources(
             self.scene.gpu_scene(),

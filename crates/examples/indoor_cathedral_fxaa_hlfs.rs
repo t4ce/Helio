@@ -531,7 +531,6 @@ impl ApplicationHandler for App {
         let config = RendererConfig::new(size.width, size.height, format)
             .with_shadow_quality(helio::ShadowQuality::Ultra)
             .with_render_scale(1.0);
-        let debug_overlay_shared = helio_pass_debug_overlay::DebugOverlayState::new();
         let fxaa_graph = build_fxaa_hlfs_graph(
             &device,
             &queue,
@@ -540,7 +539,7 @@ impl ApplicationHandler for App {
             renderer.debug_state(),
             renderer.debug_camera_buf(),
             renderer.cull_stats_buf(),
-            Some(&debug_overlay_shared),
+            Some(renderer.debug_overlay_shared()),
         );
         renderer.set_graph(fxaa_graph);
 
