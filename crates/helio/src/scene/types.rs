@@ -109,7 +109,7 @@ pub struct PickableObject {
 ///
 /// Stores GPU data, texture references, and reference count for automatic cleanup.
 #[derive(Debug, Clone)]
-pub(crate) struct MaterialRecord {
+pub pub(crate) struct MaterialRecord {
     /// GPU-side material parameters (base color, roughness, metallic, etc.).
     pub gpu: GpuMaterial,
 
@@ -124,7 +124,7 @@ pub(crate) struct MaterialRecord {
 ///
 /// Simple wrapper around GPU light data.
 #[derive(Debug, Clone)]
-pub(crate) struct LightRecord {
+pub pub(crate) struct LightRecord {
     /// GPU-side light parameters (position, color, intensity, type, etc.).
     pub gpu: GpuLight,
     /// Mobility mode (Static, Stationary, Movable).
@@ -138,7 +138,7 @@ pub(crate) struct LightRecord {
 /// Stores all data needed to render an object: mesh/material references,
 /// GPU instance data, bounding volume, and cached GPU slot.
 #[derive(Debug, Clone)]
-pub(crate) struct ObjectRecord {
+pub pub(crate) struct ObjectRecord {
     /// Mesh handle (for ref counting).
     pub mesh: MeshId,
 
@@ -174,7 +174,7 @@ pub(crate) struct ObjectRecord {
 ///
 /// Stores GPU texture, view, sampler, and reference count.
 #[derive(Debug)]
-pub(crate) struct TextureRecord {
+pub pub(crate) struct TextureRecord {
     /// GPU texture resource (owned, not accessed directly).
     pub _texture: wgpu::Texture,
 
@@ -192,7 +192,7 @@ pub(crate) struct TextureRecord {
 ///
 /// Stores mesh handles for each LOD level and precomputed meshlet descriptors.
 #[derive(Debug, Clone)]
-pub(crate) struct VirtualMeshRecord {
+pub pub(crate) struct VirtualMeshRecord {
     /// Mesh pool handles for each LOD level: index 0 = full detail, 1 = medium, 2 = coarse.
     pub mesh_ids: Vec<MeshId>,
 
@@ -209,7 +209,7 @@ pub(crate) struct VirtualMeshRecord {
 ///
 /// References a virtual mesh and stores instance data for GPU-driven rendering.
 #[derive(Debug, Clone)]
-pub(crate) struct VirtualObjectRecord {
+pub pub(crate) struct VirtualObjectRecord {
     /// Virtual mesh handle.
     pub virtual_mesh: VirtualMeshId,
 
@@ -228,7 +228,7 @@ pub(crate) struct VirtualObjectRecord {
 /// Stores GPU-side water volume parameters for water rendering passes.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub(crate) struct WaterVolumeRecord {
+pub pub(crate) struct WaterVolumeRecord {
     /// GPU water volume descriptor with all rendering parameters.
     pub gpu: GpuWaterVolume,
 }
@@ -239,7 +239,7 @@ pub(crate) struct WaterVolumeRecord {
 /// simulation to produce realistic wave displacement on object entry/exit.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub(crate) struct WaterHitboxRecord {
+pub pub(crate) struct WaterHitboxRecord {
     /// GPU hitbox data (old bounds, new bounds, displacement params).
     pub gpu: GpuWaterHitbox,
 }

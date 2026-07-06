@@ -39,9 +39,8 @@ pub use renderer::{
     DebugDrawState, GiConfig, GraphRebuilder, PerfOverlayMode, Renderer, RendererConfig,
 };
 pub use scene::{
-    Camera, ObjectDescriptor, PickableObject, Result as SceneResult, Scene, SceneActor,
-    SceneActorId, SceneActorTrait, SceneError, WaterHitboxActor, WaterHitboxDescriptor,
-    WaterVolumeActor, WaterVolumeDescriptor,
+    Camera, IntoActor, ObjectDescriptor, PickableObject, Result as SceneResult, Scene,
+    SceneActorTrait, SceneError, WaterHitboxDescriptor, WaterVolumeDescriptor,
 };
 pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 

@@ -86,8 +86,7 @@ mod virtual_geometry;
 mod water;
 
 pub use actor::{
-    SceneActor, SceneActorId, SceneActorTrait, WaterHitboxDescriptor, WaterHitboxActor,
-    WaterVolumeDescriptor, WaterVolumeActor,
+    IntoActor, SceneActorTrait, WaterHitboxDescriptor, WaterVolumeDescriptor,
 };
 pub use camera::Camera;
 pub use core::Scene;
