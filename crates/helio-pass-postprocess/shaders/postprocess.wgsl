@@ -142,6 +142,10 @@ struct CameraUniforms {
 @group(0) @binding(10) var                     bloom_4:      texture_2d<f32>;
 // Auto-exposure luminance average
 @group(0) @binding(11) var<storage, read_write> avg_luminance: array<f32>;
+// Custom effect infrastructure: noise texture + params buffer
+@group(0) @binding(12) var                     noise_tex:    texture_2d<f32>;
+@group(0) @binding(13) var                     noise_samp:   sampler;
+@group(0) @binding(14) var<storage, read>      pp_custom:    array<vec4<f32>>;
 
 // ── Group 1: per-dispatch bloom compute src/dst ────────────────────────────────
 // Bound only during bloom compute passes. src unused by cs_bloom_down_extract.
@@ -515,6 +519,9 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
 
     // 10. Film grain
     color = apply_grain(color, uv, f32(postprocess.blend_weight_grain * 1000.0));
+
+    // 11. User-defined effects (injected via set_user_shader)
+    color = user_effects(color, uv, dims);
 
     return vec4<f32>(color, 1.0);
 }

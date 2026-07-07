@@ -2101,6 +2101,7 @@ dependencies = [
  "helio-pass-corona",
  "helio-pass-debug-overlay",
  "helio-pass-perf-overlay",
+ "helio-pass-postprocess",
  "helio-pass-sdf",
  "helio-pass-taa",
  "helio-pass-terra-forge",

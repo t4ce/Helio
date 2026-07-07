@@ -331,7 +331,7 @@ fn build_default_graph_internal(
     )));
 
     graph.add_pass(Box::new(PostProcessPass::new(
-        device, config.width, config.height, config.surface_format,
+        device, queue, config.width, config.height, config.surface_format,
     )));
 
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
@@ -441,7 +441,7 @@ fn build_fxaa_graph_internal(
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
     graph.add_pass(Box::new(PostProcessPass::new(
-        device, config.width, config.height, config.surface_format,
+        device, queue, config.width, config.height, config.surface_format,
     )));
 
     add_final_passes(
@@ -498,7 +498,7 @@ fn build_hlfs_graph_internal(
     )));
 
     graph.add_pass(Box::new(PostProcessPass::new(
-        device, config.width, config.height, config.surface_format,
+        device, queue, config.width, config.height, config.surface_format,
     )));
 
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
@@ -584,7 +584,7 @@ fn build_fxaa_hlfs_graph_internal(
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
     graph.add_pass(Box::new(PostProcessPass::new(
-        device, config.width, config.height, config.surface_format,
+        device, queue, config.width, config.height, config.surface_format,
     )));
 
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);

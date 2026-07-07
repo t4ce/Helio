@@ -18,8 +18,42 @@ use helio::{
     Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph;
+use helio_pass_postprocess::PostProcessPass;
 use libhelio::{PostProcessSettings, PostProcessVolumeDescriptor, TonemapOperator};
 use v3_demo_common::{box_mesh, make_material, point_light};
+
+// User shader snippet injected into the post-process pipeline.
+// Uses noise_tex, noise_samp, and pp_custom from the core bindings.
+const VHS_SHADER_SNIPPET: &str = "
+fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
+    var c = color;
+    // Scanlines
+    let sl_intensity = pp_custom[0].x;
+    if sl_intensity > 0.0 {
+        let line = abs(sin(uv.y * dims.y * 3.14159));
+        c *= 1.0 - sl_intensity * line * 0.5;
+    }
+    // Wobble — need to re-sample since we can't modify the initial UV here
+    let wb = pp_custom[0].y;
+    if wb > 0.0 {
+        let wobbled_uv = vec2<f32>(uv.x + wb * sin(uv.y * pp_custom[0].z + pp_custom[1].y), uv.y);
+        c = textureSampleLevel(hdr_input, linear_samp, wobbled_uv, 0.0).rgb;
+    }
+    // Flicker
+    let fl = pp_custom[0].w;
+    if fl > 0.0 {
+        c *= 1.0 + fl * sin(pp_custom[1].y * 7.5);
+    }
+    // Tracking noise
+    let tr = pp_custom[1].x;
+    if tr > 0.0 {
+        let n = textureSampleLevel(noise_tex, noise_samp, vec2<f32>(uv.y * 40.0, pp_custom[1].y * 0.5), 0.0).r;
+        let band = n * step(0.85, n);
+        c += vec3<f32>(0.8, 0.8, 1.0) * band * tr;
+    }
+    return c;
+}
+";
 
 use std::io::{self, BufRead};
 use std::sync::mpsc::Receiver;
@@ -502,6 +536,11 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.75, 0.7, 0.6], 0.04);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
+        // Inject VHS shader snippet into the post-process pass
+        if let Some(pass) = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>() {
+            pass.set_user_shader(&device, Some(VHS_SHADER_SNIPPET));
+        }
+
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();
         let command_bridge = Arc::new(bridge);
@@ -720,6 +759,16 @@ impl AppState {
                 HelioAction::SetEditorMode(enabled) => renderer.set_editor_mode(enabled),
                 HelioAction::DebugClear => renderer.debug_clear(),
             }
+        }
+
+        // Write VHS parameters to post-process custom params buffer
+        let time = self.start_time.elapsed().as_secs_f32();
+        let vhs_params: [[f32; 4]; 2] = [
+            [0.5, 0.02, 8.0, 0.12],
+            [0.2, time, 0.0, 0.0],
+        ];
+        if let Some(pass) = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>() {
+            pass.set_custom_params(&vhs_params);
         }
 
         let output = match self.surface.get_current_texture() {

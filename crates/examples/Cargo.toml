@@ -171,6 +171,7 @@ helio-pass-taa = { workspace = true }
 helio-pass-corona = { workspace = true }
 helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
+helio-pass-postprocess = { path = "../helio-pass-postprocess" }
 helio-default-graphs = { path = "../helio-default-graphs" }
 rapier3d = "0.24"
 rapier_testbed3d = "0.24"

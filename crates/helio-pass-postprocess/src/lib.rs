@@ -15,8 +15,11 @@
 //!                                                  bloom_0..4 sampled, avg_lum
 //!   bloom_compute_bgl (@group 1, compute only)  — per-dispatch bloom src + dst
 
+use bytemuck;
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+
+const BASE_SHADER_SRC: &str = include_str!("../shaders/postprocess.wgsl");
 
 const BLOOM_MIPS: u32 = 5;
 const WG_BLOOM: u32 = 8;
@@ -60,18 +63,32 @@ pub struct PostProcessPass {
     format: wgpu::TextureFormat,
 
     first_frame: bool,
+
+    // ── Custom effect infrastructure ──────────────────────────────────────────
+    noise_texture: wgpu::Texture,
+    noise_view: wgpu::TextureView,
+    noise_sampler: wgpu::Sampler,
+    custom_params_buf: wgpu::Buffer,
+    custom_params: Vec<[f32; 4]>,
+
+    // User shader snippet. Defines `user_effects(...) -> vec3<f32>`.
+    user_shader_snippet: Option<String>,
+    // Stored so we can rebuild the uber pipeline when the snippet changes.
+    uber_pl: wgpu::PipelineLayout,
 }
 
 impl PostProcessPass {
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         width: u32,
         height: u32,
         format: wgpu::TextureFormat,
     ) -> Self {
+        let initial_shader_src = format!("{}\n{}", BASE_SHADER_SRC, "fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> { return color; }");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/postprocess.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(initial_shader_src.into()),
         });
 
         let avg_luminance_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -151,30 +168,39 @@ impl PostProcessPass {
             },
             count: None,
         };
+        let storage_ro_entry = |binding: u32, vis: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: vis,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
 
         let cv = wgpu::ShaderStages::COMPUTE;
         let fv = wgpu::ShaderStages::FRAGMENT;
         let cfv = wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT;
 
-        // ── compute_main_bgl: b0-b5 + b11, NO bloom sampled ──────────────────────
-        // Used by all compute pipelines. Bloom mips are absent so they can be
-        // simultaneously bound as STORAGE_WRITE in group 1 without conflicts.
+        // ── compute_main_bgl: b0-b14, NO bloom sampled ──────────────────────────
         let compute_main_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PostProcess Compute Main BGL"),
             entries: &[
                 uniform_entry(0, cfv),           // GpuPostProcessUniforms
                 uniform_entry(1, cfv),           // CameraUniforms
                 sampled_tex_entry(2, cfv, false), // hdr_input
-                sampled_tex_entry(3, fv, true),  // depth_input (unused in compute, but keep for layout compat)
+                sampled_tex_entry(3, fv, true),  // depth_input
                 sampler_entry(4, cfv, true),     // linear_samp
                 sampler_entry(5, fv, false),     // point_samp
                 storage_buf_entry(11, cfv),      // avg_luminance
+                sampled_tex_entry(12, cfv, false), // noise_tex
+                sampler_entry(13, cfv, false),   // noise_sampler (point)
+                storage_ro_entry(14, cfv),       // pp_custom
             ],
         });
 
-        // ── render_main_bgl: b0-b11, WITH bloom sampled ──────────────────────────
-        // Used only by the render pipeline (fs_uber). No storage write textures in
-        // this scope so no conflicts with the bloom sampled views at b6-b10.
+        // ── render_main_bgl: b0-b14, WITH bloom sampled ─────────────────────────
         let render_main_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PostProcess Render Main BGL"),
             entries: &[
@@ -184,12 +210,15 @@ impl PostProcessPass {
                 sampled_tex_entry(3, fv, true),
                 sampler_entry(4, fv, true),
                 sampler_entry(5, fv, false),
-                sampled_tex_entry(6, fv, false),  // bloom_0
-                sampled_tex_entry(7, fv, false),  // bloom_1
-                sampled_tex_entry(8, fv, false),  // bloom_2
-                sampled_tex_entry(9, fv, false),  // bloom_3
-                sampled_tex_entry(10, fv, false), // bloom_4
+                sampled_tex_entry(6, fv, false),
+                sampled_tex_entry(7, fv, false),
+                sampled_tex_entry(8, fv, false),
+                sampled_tex_entry(9, fv, false),
+                sampled_tex_entry(10, fv, false),
                 storage_buf_entry(11, fv),
+                sampled_tex_entry(12, fv, false),
+                sampler_entry(13, fv, false),
+                storage_ro_entry(14, fv),
             ],
         });
 
@@ -286,6 +315,56 @@ impl PostProcessPass {
             cache: None,
         });
 
+        // ── Custom effect infrastructure ──────────────────────────────────────
+        let noise_size = 64u32;
+        let noise_data: Vec<u8> = {
+            let mut rng: u64 = 987654321;
+            let mut data = Vec::with_capacity((noise_size * noise_size) as usize);
+            for _ in 0..noise_size * noise_size {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                data.push((rng >> 40) as u8);
+            }
+            data
+        };
+        let noise_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("PostProcess Noise"),
+            size: wgpu::Extent3d { width: noise_size, height: noise_size, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &noise_texture, mip_level: 0,
+                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+            },
+            &noise_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(noise_size),
+                rows_per_image: Some(noise_size),
+            },
+            wgpu::Extent3d { width: noise_size, height: noise_size, depth_or_array_layers: 1 },
+        );
+        let noise_view = noise_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let noise_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("PostProcess Noise Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let custom_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PostProcess Custom Params"),
+            size: 64 * 16, // 64 vec4s
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             avg_luminance_buf,
             exposure_pipeline,
@@ -309,6 +388,13 @@ impl PostProcessPass {
             height,
             format,
             first_frame: true,
+            noise_texture,
+            noise_view,
+            noise_sampler,
+            custom_params_buf,
+            custom_params: Vec::new(),
+            user_shader_snippet: None,
+            uber_pl: render_pl,
         }
     }
 
@@ -409,6 +495,18 @@ impl PostProcessPass {
                     binding: 11,
                     resource: self.avg_luminance_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&self.noise_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Sampler(&self.noise_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: self.custom_params_buf.as_entire_binding(),
+                },
             ],
         }));
 
@@ -459,8 +557,68 @@ impl PostProcessPass {
                     binding: 11,
                     resource: self.avg_luminance_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&self.noise_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Sampler(&self.noise_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: self.custom_params_buf.as_entire_binding(),
+                },
             ],
         }));
+    }
+
+    /// Set custom float4 parameters that the shader reads from `pp_custom`.
+    /// Up to 64 vec4s. Call each frame before the graph executes.
+    pub fn set_custom_params(&mut self, params: &[[f32; 4]]) {
+        self.custom_params.clear();
+        self.custom_params.extend_from_slice(params);
+    }
+
+    /// Inject a custom WGSL snippet that defines `user_effects(...)`.
+    /// Pass `None` to restore the default no-op. Rebuilds the uber pipeline.
+    pub fn set_user_shader(&mut self, device: &wgpu::Device, wgsl: Option<&str>) {
+        self.user_shader_snippet = wgsl.map(|s| s.to_string());
+        let default_noop = "fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> { return color; }";
+        let effect_fn = wgsl.unwrap_or(default_noop);
+        let source = format!("{}\n{}", BASE_SHADER_SRC, effect_fn);
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("PostProcess Shader"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        self.uber_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("PostProcess Uber Pipeline"),
+            layout: Some(&self.uber_pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_uber"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
     }
 
     fn mip_dims(&self, mip: u32) -> (u32, u32) {
@@ -512,6 +670,12 @@ impl RenderPass for PostProcessPass {
             self.first_frame = false;
             let initial: f32 = 0.18;
             ctx.queue.write_buffer(&self.avg_luminance_buf, 0, bytemuck::bytes_of(&initial));
+        }
+        if !self.custom_params.is_empty() {
+            ctx.queue.write_buffer(
+                &self.custom_params_buf, 0,
+                bytemuck::cast_slice(&self.custom_params),
+            );
         }
         Ok(())
     }
