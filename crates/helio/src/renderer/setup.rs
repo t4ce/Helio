@@ -102,6 +102,13 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        let pp_volumes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PostProcess Volumes Buffer"),
+            size: 256 * std::mem::size_of::<libhelio::GpuPostProcessVolume>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let postprocess_buf_size = std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64;
         let postprocess_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Uniforms Buffer"),
@@ -156,6 +163,7 @@ impl Renderer {
             corona_emitter_generation: 0,
             water_volumes_buffer,
             water_hitboxes_buffer,
+            pp_volumes_buffer,
             postprocess_buffer,
             last_render_time: Instant::now(),
             delta_time: 0.0,

@@ -151,6 +151,10 @@ path = "editor_demo_mini.rs"
 name = "corona_demo"
 path = "corona_demo.rs"
 
+[[bin]]
+name = "indoor_cathedral_pp_volumes"
+path = "indoor_cathedral_pp_volumes.rs"
+
 
 
 [dependencies]

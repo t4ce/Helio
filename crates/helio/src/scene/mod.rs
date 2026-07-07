@@ -79,6 +79,7 @@ mod helpers;
 mod lifecycle;
 mod multi_mesh;
 mod objects;
+mod postprocess;
 mod resources;
 mod stats;
 mod types;
@@ -86,8 +87,8 @@ mod virtual_geometry;
 mod water;
 
 pub use actor::{
-    SceneActor, SceneActorId, SceneActorTrait, WaterHitboxDescriptor, WaterHitboxActor,
-    WaterVolumeDescriptor, WaterVolumeActor,
+    PostProcessVolumeActor, SceneActor, SceneActorId, SceneActorTrait,
+    WaterHitboxDescriptor, WaterHitboxActor, WaterVolumeDescriptor, WaterVolumeActor,
 };
 pub use camera::Camera;
 pub use core::Scene;

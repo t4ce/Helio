@@ -2,7 +2,7 @@
 
 use glam::Mat4;
 use helio_core::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial};
-use libhelio::{GpuMeshletEntry, GpuWaterHitbox, GpuWaterVolume};
+use libhelio::{GpuMeshletEntry, GpuPostProcessVolume, GpuWaterHitbox, GpuWaterVolume};
 use bytemuck::{Pod, Zeroable};
 
 use crate::groups::GroupMask;
@@ -242,5 +242,15 @@ pub(crate) struct WaterVolumeRecord {
 pub(crate) struct WaterHitboxRecord {
     /// GPU hitbox data (old bounds, new bounds, displacement params).
     pub gpu: GpuWaterHitbox,
+}
+
+/// Internal record for a post-process volume.
+///
+/// Stores GPU-side volume parameters for post-processing volume evaluation.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub(crate) struct PostProcessVolumeRecord {
+    /// GPU post-process volume descriptor with bounds, priority, and settings.
+    pub gpu: GpuPostProcessVolume,
 }
 

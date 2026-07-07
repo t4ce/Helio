@@ -98,7 +98,7 @@ impl Renderer {
             bytemuck::bytes_of(&debug_camera_uniform),
         );
 
-        let mut jittered_camera = *camera;
+        let mut jittered_camera = camera.clone();
         jittered_camera.proj = jitter_mat * camera.proj;
         jittered_camera.jitter = [jx, jy];
         self.scene.update_camera(jittered_camera);
@@ -173,6 +173,31 @@ impl Renderer {
                 );
             }
             self.scene.clear_water_hitboxes_dirty();
+        }
+
+        let pp_count = self.scene.post_process_volumes_count();
+        if pp_count > 0 && self.scene.post_process_volumes_dirty() {
+            let range = self.scene.consume_post_process_volumes_dirty_range();
+            if let Some((start, end)) = range {
+                let volumes = self.scene.get_post_process_volumes_gpu_slice();
+                self.queue.write_buffer(
+                    &self.pp_volumes_buffer,
+                    (start * std::mem::size_of::<libhelio::GpuPostProcessVolume>()) as u64,
+                    bytemuck::cast_slice(&volumes[start..end]),
+                );
+            }
+            self.scene.clear_post_process_volumes_dirty();
+        }
+
+        {
+            let camera_pos = camera.position.to_array();
+            let volumes = if pp_count > 0 {
+                self.scene.get_post_process_volumes_gpu_slice()
+            } else {
+                &[]
+            };
+            let pp = libhelio::PostProcessBlender::blend(camera_pos, volumes, &camera.postprocess_settings);
+            self.queue.write_buffer(&self.postprocess_buffer, 0, bytemuck::bytes_of(&pp));
         }
 
         let mut texture_views = ArrayVec::<&wgpu::TextureView, { crate::material::MAX_TEXTURES }>::new();
@@ -277,6 +302,9 @@ impl Renderer {
             frame_resources.water_hitboxes.write(&self.water_hitboxes_buffer, "Renderer");
         }
         frame_resources.water_hitbox_count = water_hitbox_count;
+        frame_resources.pp_volumes.write(&self.pp_volumes_buffer, "Renderer");
+        frame_resources.pp_volume_count = pp_count;
+        frame_resources.postprocess_uniforms.write(&self.postprocess_buffer, "Renderer");
         frame_resources.depth_texture.write(&self.depth_texture, "Renderer");
         if let Some(v) = self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView) {
             frame_resources.full_res_depth.write(v, "Renderer");
@@ -311,13 +339,6 @@ impl Renderer {
         }
         if let Some(pvs) = baked_pvs {
             frame_resources.baked_pvs.write(pvs, "Renderer");
-        }
-
-        // Upload post-process uniforms
-        {
-            let pp = libhelio::GpuPostProcessUniforms::default();
-            self.queue.write_buffer(&self.postprocess_buffer, 0, bytemuck::bytes_of(&pp));
-            frame_resources.postprocess_uniforms.write(&self.postprocess_buffer, "Renderer");
         }
 
         if self.clear_target_next_frame {

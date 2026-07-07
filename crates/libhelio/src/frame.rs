@@ -242,6 +242,12 @@ pub struct FrameResources<'a> {
     /// Number of water volumes in the buffer
     pub water_volume_count: u32,
 
+    /// Post-process volumes storage buffer (populated by Renderer)
+    pub pp_volumes: Tracked<&'a wgpu::Buffer>,
+
+    /// Number of post-process volumes in the buffer
+    pub pp_volume_count: u32,
+
     /// Water heightfield simulation texture (Rgba16Float 256×256, ping-pong current)
     /// R=height, G=velocity, B=normal.x, A=normal.z
     /// Populated by `WaterSimPass::publish()`.
@@ -396,6 +402,8 @@ impl<'a> FrameResources<'a> {
             water_caustics: Tracked::empty(),
             water_volumes: Tracked::empty(),
             water_volume_count: 0,
+            pp_volumes: Tracked::empty(),
+            pp_volume_count: 0,
             water_sim_texture: Tracked::empty(),
             water_sim_sampler: Tracked::empty(),
             water_hitboxes: Tracked::empty(),
@@ -454,6 +462,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(vg);
             reset_field!(water_caustics);
             reset_field!(water_volumes);
+            reset_field!(pp_volumes);
             reset_field!(water_sim_texture);
             reset_field!(water_sim_sampler);
             reset_field!(water_hitboxes);

@@ -104,6 +104,7 @@ pub struct Renderer {
     pub(crate) corona_emitter_generation: u64,
     pub(crate) water_volumes_buffer: wgpu::Buffer,
     pub(crate) water_hitboxes_buffer: wgpu::Buffer,
+    pub(crate) pp_volumes_buffer: wgpu::Buffer,
     pub(crate) postprocess_buffer: wgpu::Buffer,
     pub(crate) last_render_time: Instant,
     pub(crate) delta_time: f32,
@@ -376,7 +377,7 @@ impl Renderer {
     }
 
     pub fn set_gizmo_camera(&mut self, camera: &crate::scene::Camera, viewport_height: f32) {
-        self.gizmo_camera = Some(*camera);
+        self.gizmo_camera = Some(camera.clone());
         self.gizmo_viewport_height = viewport_height;
     }
 

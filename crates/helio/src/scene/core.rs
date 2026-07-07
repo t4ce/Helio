@@ -14,8 +14,8 @@ use wgpu::util::DeviceExt;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
-    LightId, MaterialId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId, VirtualObjectId,
-    WaterHitboxId, WaterVolumeId,
+    LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, SectionedInstanceId,
+    TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::scene::multi_mesh::SectionedInstanceRecord;
@@ -23,8 +23,8 @@ use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
 
 use super::types::{
-    LightRecord, MaterialRecord, ObjectRecord, TextureRecord, VirtualMeshRecord,
-    VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
+    LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord, TextureRecord,
+    VirtualMeshRecord, VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
 };
 
 /// High-level scene management with persistent GPU-driven state.
@@ -147,6 +147,15 @@ pub struct Scene {
 
     /// Dirty range of water hitboxes that need GPU upload.
     pub(in crate::scene) water_hitboxes_dirty_range: Option<(usize, usize)>,
+
+    // ── Post-process volumes ─────────────────────────────────────────────────────
+    /// Post-process volumes (dense array)
+    pub(in crate::scene) pp_volumes: DenseArena<PostProcessVolumeRecord, PostProcessVolumeId>,
+
+    pub(in crate::scene) pp_volumes_dirty: bool,
+
+    pub(in crate::scene) pp_volumes_dirty_range: Option<(usize, usize)>,
+
     // ── Multi-material (sectioned) meshes ─────────────────────────────────────
     /// Sectioned mesh assets: one record per `insert_sectioned_mesh` call.
     /// Each record stores N `MeshId`s (one per section) all sharing the same vertex buffer.
@@ -267,6 +276,9 @@ impl Scene {
             water_hitboxes: DenseArena::new(),
             water_hitboxes_dirty: false,
             water_hitboxes_dirty_range: None,
+            pp_volumes: DenseArena::new(),
+            pp_volumes_dirty: false,
+            pp_volumes_dirty_range: None,
             multi_meshes: SparsePool::new(),
             sectioned_instances: SparsePool::new(),
             section_to_instance: HashMap::new(),

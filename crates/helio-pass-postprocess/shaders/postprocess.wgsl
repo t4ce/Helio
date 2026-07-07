@@ -165,6 +165,10 @@ fn luminance(c: vec3<f32>) -> f32 {
 // Computes average log-luminance from the HDR input using a workgroup-reduced
 // histogram. Writes result to avg_luminance[0].
 
+// Workgroup-shared memory for histogram reduction (must be module-scope in WGSL)
+var<workgroup> wg_sum:   array<f32, 256>;
+var<workgroup> wg_count: array<u32, 256>;
+
 @compute @workgroup_size(16, 16)
 fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
     let dims = textureDimensions(hdr_input);
@@ -186,23 +190,21 @@ fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
     }
 
     // Workgroup reduction via shared memory
-    var<workgroup> wg_sum: array<f32, 256>;
-    var<workgroup> wg_count: array<u32, 256>;
     let lidx = lid.y * 16u + lid.x;
     wg_sum[lidx] = sum_log;
     wg_count[lidx] = count;
     workgroupBarrier();
 
     // Tree reduction
-    var active = 128u;
+    var reduce_active = 128u;
     loop {
-        if active == 0u { break; }
-        if lidx < active {
-            wg_sum[lidx] += wg_sum[lidx + active];
-            wg_count[lidx] += wg_count[lidx + active];
+        if reduce_active == 0u { break; }
+        if lidx < reduce_active {
+            wg_sum[lidx] += wg_sum[lidx + reduce_active];
+            wg_count[lidx] += wg_count[lidx + reduce_active];
         }
         workgroupBarrier();
-        active >>= 1u;
+        reduce_active >>= 1u;
     }
 
     if lidx == 0u && wg_count[0] > 0u {
@@ -337,30 +339,29 @@ fn tonemap_reinhard(x: vec3<f32>) -> vec3<f32> {
     return x / (1.0 + x);
 }
 
-fn tonemap_uncharted2(x: vec3<f32>) -> vec3<f32> {
-    // John Hable's Uncharted 2 filmic curve
+fn uncharted2_curve(v: vec3<f32>) -> vec3<f32> {
     let A = 0.15; let B = 0.50; let C = 0.10; let D = 0.20;
     let E = 0.02; let F = 0.30;
+    return ((v * (A * v + C * B) + D * E) / (v * (A * v + B) + D * F)) - E / F;
+}
+
+fn tonemap_uncharted2(x: vec3<f32>) -> vec3<f32> {
     let W = 11.2;
-    fn filmic(v: vec3<f32>) -> vec3<f32> {
-        return ((v * (A * v + C * B) + D * E) / (v * (A * v + B) + D * F)) - E / F;
-    }
-    let white_scale = 1.0 / filmic(vec3<f32>(W));
-    return saturate(filmic(x) * white_scale);
+    let white_scale = 1.0 / uncharted2_curve(vec3<f32>(W));
+    return saturate(uncharted2_curve(x) * white_scale);
+}
+
+fn lottes_curve(v: vec3<f32>, a: f32, b: f32, c: f32, d: f32) -> vec3<f32> {
+    return ((v * (a * v + b)) / (v * (a - 1.0) * v + (b + 1.0))) * c + d;
 }
 
 fn tonemap_lottes(x: vec3<f32>) -> vec3<f32> {
-    // Timothy Lottes' curve
     let a = 1.6; let d = 0.977;
-    let hdr_max = 8.0;
     let mid_in = 0.18;
     let mid_out = 0.267;
     let b = (-d * mid_in + (a - 1.0) * mid_out) / ((a - 1.0) * d * mid_in + mid_out);
     let c = (a * d * mid_in + (a - 1.0) * b * mid_out) / ((a - 1.0) * d * mid_in + mid_out);
-    fn filmic_lottes(v: vec3<f32>, a: f32, b: f32, c: f32, d: f32) -> vec3<f32> {
-        return ((v * (a * v + b)) / (v * (a - 1.0) * v + (b + 1.0))) * c + d;
-    }
-    return saturate(filmic_lottes(x, a, b, c, d));
+    return saturate(lottes_curve(x, a, b, c, d));
 }
 
 fn apply_tonemap(color: vec3<f32>) -> vec3<f32> {

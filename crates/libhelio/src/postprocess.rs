@@ -473,6 +473,20 @@ impl Default for PostProcessVolumeDescriptor {
     }
 }
 
+impl PostProcessVolumeDescriptor {
+    pub fn to_gpu(&self) -> GpuPostProcessVolume {
+        GpuPostProcessVolume {
+            bounds_min: [self.bounds_min[0], self.bounds_min[1], self.bounds_min[2], 0.0],
+            bounds_max: [self.bounds_max[0], self.bounds_max[1], self.bounds_max[2], 0.0],
+            priority: self.priority,
+            blend_radius: self.blend_radius,
+            blend_weight: self.blend_weight,
+            pad: [0.0; 3],
+            settings: self.settings.to_gpu(),
+        }
+    }
+}
+
 // ── PostProcessBlender ─────────────────────────────────────────────────────────
 //
 // CPU-side blender that evaluates active volumes and produces final uniforms.
