@@ -10,18 +10,12 @@
 //!   override LIGHT_COUNT:       u32  = 0u;
 //!   override ENABLE_SHADOWS:    bool = false;
 //!   override MAX_SHADOW_LIGHTS: u32  = 0u;
-//!   override ENABLE_BLOOM:      bool = false;
-//!   override BLOOM_INTENSITY:   f32  = 0.3;
-//!   override BLOOM_THRESHOLD:   f32  = 1.0;
 
 // ── Uniforms ──────────────────────────────────────────────────────────────────
 
 const ENABLE_LIGHTING: bool = true;
 const ENABLE_SHADOWS: bool = true;
-const ENABLE_BLOOM: bool = false;
 const MAX_SHADOW_LIGHTS: u32 = 42u;
-const BLOOM_INTENSITY: f32 = 0.3;
-const BLOOM_THRESHOLD: f32 = 1.0;
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -693,20 +687,8 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
 }
 
 // ── Tonemapping & bloom ───────────────────────────────────────────────────────
-
-fn luminance(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)); }
-
-fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
-    let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
-    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
-}
-
-fn apply_bloom(color: vec3<f32>) -> vec3<f32> {
-    if !ENABLE_BLOOM { return color; }
-    let lum    = luminance(color);
-    let excess = max(lum - BLOOM_THRESHOLD, 0.0);
-    return color + color * (excess * BLOOM_INTENSITY);
-}
+// Handled by PostProcessPass (helio-pass-postprocess). This pass writes raw HDR
+// linear light to pre_aa — no tonemapping or bloom here.
 
 // ── Fragment entry ────────────────────────────────────────────────────────────
 
@@ -940,8 +922,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
     }
 
-    color         = apply_bloom(color);
-    color         = aces_tonemap(color);
-
+    // Tonemapping & bloom handled by PostProcessPass — write raw HDR linear.
     return vec4<f32>(color, alpha);
 }

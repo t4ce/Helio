@@ -313,6 +313,13 @@ impl Renderer {
             frame_resources.baked_pvs.write(pvs, "Renderer");
         }
 
+        // Upload post-process uniforms
+        {
+            let pp = libhelio::GpuPostProcessUniforms::default();
+            self.queue.write_buffer(&self.postprocess_buffer, 0, bytemuck::bytes_of(&pp));
+            frame_resources.postprocess_uniforms.write(&self.postprocess_buffer, "Renderer");
+        }
+
         if self.clear_target_next_frame {
             let clear = wgpu::Color {
                 r: self.clear_color[0] as f64,

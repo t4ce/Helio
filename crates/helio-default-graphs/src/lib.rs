@@ -22,6 +22,7 @@ use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky::SkyPass;
 use helio_pass_sky_lut::SkyLutPass;
+use helio_pass_postprocess::PostProcessPass;
 use helio_pass_taa::TaaPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_water_sim::WaterSimPass;
@@ -329,6 +330,10 @@ fn build_default_graph_internal(
         device, iw, ih, config.width, config.height, config.surface_format,
     )));
 
+    graph.add_pass(Box::new(PostProcessPass::new(
+        device, config.width, config.height, config.surface_format,
+    )));
+
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
 
     graph.lock(iw, ih);
@@ -435,6 +440,10 @@ fn build_fxaa_graph_internal(
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
+    graph.add_pass(Box::new(PostProcessPass::new(
+        device, config.width, config.height, config.surface_format,
+    )));
+
     add_final_passes(
         &mut graph,
         device,
@@ -452,7 +461,6 @@ fn build_fxaa_graph_internal(
     let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
         build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref())
     });
-    graph.set_graph_data(rebuilder);
 
     graph
 }
@@ -487,6 +495,10 @@ fn build_hlfs_graph_internal(
 
     graph.add_pass(Box::new(TaaPass::new(
         device, iw, ih, config.width, config.height, config.surface_format,
+    )));
+
+    graph.add_pass(Box::new(PostProcessPass::new(
+        device, config.width, config.height, config.surface_format,
     )));
 
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
@@ -570,6 +582,10 @@ fn build_fxaa_hlfs_graph_internal(
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, w, h);
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
+
+    graph.add_pass(Box::new(PostProcessPass::new(
+        device, config.width, config.height, config.surface_format,
+    )));
 
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
 

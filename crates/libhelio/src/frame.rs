@@ -303,6 +303,10 @@ pub struct FrameResources<'a> {
 
     /// Corona particle emitter definitions (uploaded by the Renderer each frame)
     pub corona_emitters: Tracked<CoronaEmitterFrameData<'a>>,
+
+    /// Post-process uniform buffer (written by the Renderer, read by PostProcessPass).
+    /// Points to the pass's own `GpuPostProcessUniforms` buffer.
+    pub postprocess_uniforms: Tracked<&'a wgpu::Buffer>,
 }
 
 // ── PVS CPU reference ──────────────────────────────────────────────────────────
@@ -407,6 +411,7 @@ impl<'a> FrameResources<'a> {
             baked_irradiance_sh: Tracked::empty(),
             baked_pvs: Tracked::empty(),
             corona_emitters: Tracked::empty(),
+            postprocess_uniforms: Tracked::empty(),
         }
     }
 
@@ -463,6 +468,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(baked_irradiance_sh);
             reset_field!(baked_pvs);
             reset_field!(corona_emitters);
+            reset_field!(postprocess_uniforms);
         }
     }
 }

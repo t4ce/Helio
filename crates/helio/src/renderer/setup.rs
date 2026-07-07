@@ -102,6 +102,14 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        let postprocess_buf_size = std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64;
+        let postprocess_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PostProcess Uniforms Buffer"),
+            size: postprocess_buf_size,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
 
         let cull_stats_staging = device.create_buffer(&wgpu::BufferDescriptor {
@@ -148,6 +156,7 @@ impl Renderer {
             corona_emitter_generation: 0,
             water_volumes_buffer,
             water_hitboxes_buffer,
+            postprocess_buffer,
             last_render_time: Instant::now(),
             delta_time: 0.0,
             cull_stats_staging,
