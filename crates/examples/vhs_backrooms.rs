@@ -6,6 +6,11 @@
 //! width, dead-end alcoves, and pillar halls in larger rooms — all
 //! immersed in a degraded VHS look (CA, grain, vignette, desaturated).
 //!
+//! A subset of the fluorescent lights are "flickering" lights: they run
+//! their own little state machine (steady / rapid-burst / dark-or-dim)
+//! independently of everything else, so the space feels alive rather than
+//! uniformly lit.
+//!
 //! Controls:
 //!   WASD        — move
 //!   Space/Shift — up/down
@@ -68,6 +73,7 @@ use std::collections::HashSet;
 //   5. Flood-fill from a room to strip any unreachable pockets.
 //   6. Scatter pillars through big/atrium rooms (purely decorative).
 //   7. Place lights sparsely: a few per room, one every few corridor cells.
+//      A fraction of those lights are flagged to flicker at runtime.
 
 const CELL: f32 = 4.0; // metres per grid cell
 const H_CELL: f32 = CELL / 2.0;
@@ -390,7 +396,9 @@ fn generate_map() -> BackroomsMap {
     }
 
     // ---- 7. Sparse light placement: a few per room, plus a spaced-out
-    //         string along corridors — not one light per walkable tile. ----
+    //         string along corridors — not one light per walkable tile.
+    //         Which of these end up flickering is decided later, when the
+    //         actual light entities are created. ----
     let mut lights = Vec::new();
     for (room, &(h, _)) in rooms.iter().zip(room_heights.iter()) {
         let count = (1 + (room.w * room.h) / 16).max(1);
@@ -430,6 +438,222 @@ fn generate_map() -> BackroomsMap {
 
 // ── End Map Generator ─────────────────────────────────────────────────────────
 
+// ── Flickering fluorescent lights ──────────────────────────────────────────────
+//
+// A subset of tube lights run a little state machine instead of shining at a
+// constant intensity:
+//   - Fine  : steady baseline brightness, with rare single-frame blips
+//   - Burst : rapid, uneven on/off strobing for a short stretch
+//   - Dark  : an extended period fully off or knocked down to a dim glow,
+//             with an occasional failed-reignition flicker partway through
+//
+// Since this renderer doesn't expose a "set light intensity" call, a change
+// in brightness is applied by removing the old light and inserting a new one
+// with the updated intensity — using only APIs already used elsewhere in
+// this file (remove_light / insert_actor).
+
+#[derive(Clone, Copy, PartialEq)]
+enum FlickerPhase {
+    Fine,
+    Burst,
+    Dark,
+}
+
+struct FlickerLight {
+    main_id: LightId,
+    fill_id: LightId,
+
+    pos: [f32; 3],
+    fill_pos: [f32; 3],
+    color: [f32; 3],
+    fill_color: [f32; 3],
+    base_intensity: f32,
+    fill_base_intensity: f32,
+    radius: f32,
+    fill_radius: f32,
+
+    phase: FlickerPhase,
+    phase_timer: f32,
+    toggle_timer: f32,
+    lit: bool,
+    dark_is_full_off: bool,
+    last_ratio: f32,
+    rng: Rng,
+}
+
+impl FlickerLight {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        main_id: LightId,
+        fill_id: LightId,
+        pos: [f32; 3],
+        fill_pos: [f32; 3],
+        color: [f32; 3],
+        fill_color: [f32; 3],
+        base_intensity: f32,
+        fill_base_intensity: f32,
+        radius: f32,
+        fill_radius: f32,
+        seed: u64,
+    ) -> Self {
+        let mut rng = Rng::new(seed);
+        // Stagger initial "fine" durations so lights don't sync up.
+        let phase_timer = 3.0 + rng.next_f32() * 8.0;
+        FlickerLight {
+            main_id,
+            fill_id,
+            pos,
+            fill_pos,
+            color,
+            fill_color,
+            base_intensity,
+            fill_base_intensity,
+            radius,
+            fill_radius,
+            phase: FlickerPhase::Fine,
+            phase_timer,
+            toggle_timer: 0.0,
+            lit: true,
+            dark_is_full_off: false,
+            last_ratio: 1.0,
+            rng,
+        }
+    }
+
+    /// Advance the flicker state machine by `dt` seconds, swapping the
+    /// underlying lights in `scene` whenever brightness changes enough to
+    /// matter (a full phase change, a toggle, or a blip).
+    fn update(&mut self, scene: &mut Scene, dt: f32) {
+        self.phase_timer -= dt;
+        let mut ratio = self.last_ratio;
+        let mut force_apply = false;
+
+        match self.phase {
+            FlickerPhase::Fine => {
+                ratio = 1.0;
+                if self.toggle_timer > 0.0 {
+                    self.toggle_timer -= dt;
+                    if self.toggle_timer <= 0.0 {
+                        self.lit = true;
+                        ratio = 1.0;
+                        force_apply = true;
+                    } else {
+                        ratio = if self.lit { 1.0 } else { 0.05 };
+                    }
+                } else if self.rng.chance(dt * 0.15) {
+                    // A rare single-frame blip during an otherwise steady stretch.
+                    self.lit = false;
+                    self.toggle_timer = 0.03 + self.rng.next_f32() * 0.06;
+                    ratio = 0.05;
+                    force_apply = true;
+                }
+
+                if self.phase_timer <= 0.0 {
+                    self.toggle_timer = 0.0;
+                    self.lit = true;
+                    if self.rng.chance(0.6) {
+                        self.phase = FlickerPhase::Burst;
+                        self.phase_timer = 0.4 + self.rng.next_f32() * 1.2;
+                    } else {
+                        self.phase = FlickerPhase::Dark;
+                        self.phase_timer = 1.5 + self.rng.next_f32() * 4.5;
+                        self.dark_is_full_off = self.rng.chance(0.5);
+                    }
+                    ratio = 1.0;
+                    force_apply = true;
+                }
+            }
+            FlickerPhase::Burst => {
+                self.toggle_timer -= dt;
+                if self.toggle_timer <= 0.0 {
+                    self.lit = !self.lit;
+                    self.toggle_timer = 0.02 + self.rng.next_f32() * 0.07;
+                    force_apply = true;
+                }
+                ratio = if self.lit { 1.0 } else { 0.04 };
+
+                if self.phase_timer <= 0.0 {
+                    self.lit = true;
+                    if self.rng.chance(0.55) {
+                        self.phase = FlickerPhase::Dark;
+                        self.phase_timer = 1.5 + self.rng.next_f32() * 4.5;
+                        self.dark_is_full_off = self.rng.chance(0.5);
+                    } else {
+                        self.phase = FlickerPhase::Fine;
+                        self.phase_timer = 4.0 + self.rng.next_f32() * 10.0;
+                    }
+                    ratio = 1.0;
+                    force_apply = true;
+                }
+            }
+            FlickerPhase::Dark => {
+                let base_ratio = if self.dark_is_full_off { 0.0 } else { 0.18 };
+                if self.toggle_timer > 0.0 {
+                    self.toggle_timer -= dt;
+                    if self.toggle_timer <= 0.0 {
+                        ratio = base_ratio;
+                        force_apply = true;
+                    } else {
+                        ratio = 0.9;
+                    }
+                } else if self.rng.chance(dt * 0.1) {
+                    // A dying tube occasionally tries to reignite mid-dark.
+                    self.toggle_timer = 0.03 + self.rng.next_f32() * 0.05;
+                    ratio = 0.9;
+                    force_apply = true;
+                } else {
+                    ratio = base_ratio;
+                }
+
+                if self.phase_timer <= 0.0 {
+                    self.toggle_timer = 0.0;
+                    self.lit = true;
+                    if self.rng.chance(0.7) {
+                        self.phase = FlickerPhase::Fine;
+                        self.phase_timer = 4.0 + self.rng.next_f32() * 10.0;
+                    } else {
+                        self.phase = FlickerPhase::Burst;
+                        self.phase_timer = 0.4 + self.rng.next_f32() * 1.2;
+                    }
+                    ratio = 1.0;
+                    force_apply = true;
+                }
+            }
+        }
+
+        if force_apply || (ratio - self.last_ratio).abs() > 0.02 {
+            self.last_ratio = ratio;
+            let main_intensity = (self.base_intensity * ratio).max(0.0);
+            let fill_intensity = (self.fill_base_intensity * (0.3 + 0.7 * ratio)).max(0.0);
+
+            let _ = scene.remove_light(self.main_id);
+            self.main_id = scene
+                .insert_actor(helio::SceneActor::light_with_movability(
+                    point_light(self.pos, self.color, main_intensity, self.radius),
+                    Some(Movability::Movable),
+                ))
+                .as_light()
+                .unwrap();
+
+            let _ = scene.remove_light(self.fill_id);
+            self.fill_id = scene
+                .insert_actor(helio::SceneActor::light_with_movability(
+                    point_light(
+                        self.fill_pos,
+                        self.fill_color,
+                        fill_intensity,
+                        self.fill_radius,
+                    ),
+                    Some(Movability::Movable),
+                ))
+                .as_light()
+                .unwrap();
+        }
+    }
+}
+
+// ── End Flickering Lights ──────────────────────────────────────────────────────
+
 fn main() {
     env_logger::init();
     let event_loop = EventLoop::new().expect("event loop");
@@ -460,6 +684,7 @@ struct AppState {
     last_frame: std::time::Instant,
 
     map_resources: Option<MapResources>,
+    flicker_lights: Vec<FlickerLight>,
 
     cam_pos: glam::Vec3,
     cam_yaw: f32,
@@ -522,6 +747,12 @@ impl App {
             for &id in &res.light_ids {
                 let _ = scene.remove_light(id);
             }
+        }
+        // Flickering lights carry their own, runtime-evolving light ids that
+        // aren't tracked in MapResources, so they need their own cleanup pass.
+        for fl in state.flicker_lights.drain(..) {
+            let _ = scene.remove_light(fl.main_id);
+            let _ = scene.remove_light(fl.fill_id);
         }
 
         let wall_mat = scene.insert_material(make_material(
@@ -614,8 +845,7 @@ impl App {
                 // the wall mesh's long axis (local z) lies along the shared
                 // boundary: south/north boundaries run along world x (need a
                 // 90-degree turn), west/east boundaries run along world z
-                // (need no turn) — previously these were swapped, which is
-                // why walls looked rotated 90 degrees off from the corridors.
+                // (need no turn).
                 let neighbors = [
                     (0, -1, 0.0, -H_CELL, std::f32::consts::FRAC_PI_2 * 3.0), // south
                     (0, 1, 0.0, H_CELL, std::f32::consts::FRAC_PI_2),         // north
@@ -686,7 +916,9 @@ impl App {
             pillars.push(p);
         }
 
-        // Fluorescent lights — sparse: a few per room plus spaced corridor lights
+        // Fluorescent lights — sparse: a few per room plus spaced corridor
+        // lights. ~16% of them are picked to run the flicker state machine
+        // instead of just shining steadily.
         let light_colors = [
             [0.95, 0.92, 0.85],
             [0.92, 0.93, 0.88],
@@ -694,23 +926,59 @@ impl App {
             [0.90, 0.94, 0.86],
         ];
         let mut rng = Rng::new(0x9E37_79B9_7F4A_7C15 ^ (map.lights.len() as u64));
+        let mut new_flicker_lights = Vec::new();
         for &(lx, lz, h) in &map.lights {
             let ci = (rng.next_u32() as usize) % light_colors.len();
-            let _ = scene.insert_actor(helio::SceneActor::light_with_movability(
-                point_light([lx, h - 0.2, lz], light_colors[ci], 3.5, 8.0),
-                Some(Movability::Movable),
-            ));
-            // Dimmer fill light partway down, scaled to this cell's ceiling height
-            light_ids.push(
-                scene
-                    .insert_actor(helio::SceneActor::light_with_movability(
-                        point_light([lx, (h * 0.5).max(1.0), lz], [0.95, 0.92, 0.85], 1.2, 4.0),
-                        Some(Movability::Movable),
-                    ))
-                    .as_light()
-                    .unwrap(),
-            );
+            let color = light_colors[ci];
+            let fill_color = [0.95, 0.92, 0.85];
+            let main_pos = [lx, h - 0.2, lz];
+            let fill_pos = [lx, (h * 0.5).max(1.0), lz];
+            let main_intensity = 3.5;
+            let fill_intensity = 1.2;
+            let radius = 8.0;
+            let fill_radius = 4.0;
+
+            let is_flicker = rng.chance(0.16);
+
+            let main_id = scene
+                .insert_actor(helio::SceneActor::light_with_movability(
+                    point_light(main_pos, color, main_intensity, radius),
+                    Some(Movability::Movable),
+                ))
+                .as_light()
+                .unwrap();
+            let fill_id = scene
+                .insert_actor(helio::SceneActor::light_with_movability(
+                    point_light(fill_pos, fill_color, fill_intensity, fill_radius),
+                    Some(Movability::Movable),
+                ))
+                .as_light()
+                .unwrap();
+
+            if is_flicker {
+                let seed = 0xD1B5_4A32_9C3F_2717_u64
+                    ^ (lx.to_bits() as u64)
+                    ^ ((lz.to_bits() as u64) << 32)
+                    ^ (rng.next_u32() as u64);
+                new_flicker_lights.push(FlickerLight::new(
+                    main_id,
+                    fill_id,
+                    main_pos,
+                    fill_pos,
+                    color,
+                    fill_color,
+                    main_intensity,
+                    fill_intensity,
+                    radius,
+                    fill_radius,
+                    seed,
+                ));
+            } else {
+                light_ids.push(main_id);
+                light_ids.push(fill_id);
+            }
         }
+        state.flicker_lights = new_flicker_lights;
 
         state.map_resources = Some(MapResources {
             walls,
@@ -882,6 +1150,7 @@ impl ApplicationHandler for App {
             action_rx,
             last_frame: std::time::Instant::now(),
             map_resources: None,
+            flicker_lights: Vec::new(),
             cam_pos: glam::Vec3::new(0.0, 1.6, 0.0),
             cam_yaw: 0.0,
             cam_pitch: 0.0,
@@ -1068,6 +1337,14 @@ impl AppState {
                 HelioAction::SetDebugMode(mode) => renderer.set_debug_mode(mode),
                 HelioAction::SetEditorMode(enabled) => renderer.set_editor_mode(enabled),
                 HelioAction::DebugClear => renderer.debug_clear(),
+            }
+        }
+
+        // Advance every flickering light's state machine this frame.
+        {
+            let scene = renderer.scene_mut();
+            for fl in self.flicker_lights.iter_mut() {
+                fl.update(scene, dt);
             }
         }
 
