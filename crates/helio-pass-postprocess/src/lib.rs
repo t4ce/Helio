@@ -885,7 +885,6 @@ impl RenderPass for PostProcessPass {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-            eprintln!(self.main_bg_key.is_some());
             pass.set_pipeline(&self.uber_pipeline);
             pass.set_bind_group(0, render_bg, &[]);
             pass.draw(0..3, 0..1);
