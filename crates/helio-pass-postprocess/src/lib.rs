@@ -71,10 +71,8 @@ pub struct PostProcessPass {
     custom_params_buf: wgpu::Buffer,
     custom_params: Vec<[f32; 4]>,
 
-    // User shader snippet. Defines `user_effects(...) -> vec3<f32>`.
-    user_shader_snippet: Option<String>,
-    // Stored so we can rebuild the uber pipeline when the snippet changes.
     uber_pl: wgpu::PipelineLayout,
+    user_shader_snippet: Option<String>,
 }
 
 impl PostProcessPass {
@@ -580,12 +578,13 @@ impl PostProcessPass {
         self.custom_params.extend_from_slice(params);
     }
 
-    /// Inject a custom WGSL snippet that defines `user_effects(...)`.
-    /// Pass `None` to restore the default no-op. Rebuilds the uber pipeline.
-    pub fn set_user_shader(&mut self, device: &wgpu::Device, wgsl: Option<&str>) {
-        self.user_shader_snippet = wgsl.map(|s| s.to_string());
-        let effect_fn = "fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> { return vec3<f32>(0.0, 1.0, 1.0); }";
-        let source = format!("{}\n{}", BASE_SHADER_SRC, effect_fn);
+    fn set_user_shader_inner(&mut self, device: &wgpu::Device, wgsl: &str) {
+        let source = format!("{}\n// --- CUSTOM SNIPPET ---\n{}", BASE_SHADER_SRC, wgsl);
+        // Debug: verify the compiled shader
+        let has_sampler = source.contains("textureSampleLevel(hdr_input");
+        let snippet_idx = source.find("CUSTOM SNIPPET").unwrap_or(0);
+        let after_snippet = &source[snippet_idx..snippet_idx + 80.min(source.len() - snippet_idx)];
+        eprintln!("[PP] rebuild: sampler_in_fs_uber={}, after_custom_marker={:?}", has_sampler, after_snippet);
         let shader_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -618,6 +617,16 @@ impl PostProcessPass {
             multiview_mask: None,
             cache: None,
         });
+    }
+
+    /// Inject a custom WGSL snippet that defines `user_effects(...)`.
+    /// Pass `None` to restore the default no-op. Rebuilds the uber pipeline.
+    pub fn set_user_shader(&mut self, device: &wgpu::Device, wgsl: Option<&str>) {
+        let stored = wgsl.map(|s| s.to_string());
+        if let Some(ref snippet) = stored {
+            self.set_user_shader_inner(device, snippet);
+        }
+        self.user_shader_snippet = stored;
     }
 
     fn mip_dims(&self, mip: u32) -> (u32, u32) {
@@ -669,6 +678,10 @@ impl RenderPass for PostProcessPass {
             self.first_frame = false;
             let initial: f32 = 0.18;
             ctx.queue.write_buffer(&self.avg_luminance_buf, 0, bytemuck::bytes_of(&initial));
+            // Re-apply user shader if one was set (graph may have been rebuilt since set_user_shader)
+            if let Some(snippet) = self.user_shader_snippet.clone() {
+                self.set_user_shader_inner(ctx.device, &snippet);
+            }
         }
         if !self.custom_params.is_empty() {
             ctx.queue.write_buffer(
@@ -799,6 +812,8 @@ impl RenderPass for PostProcessPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            eprintln!("[PostProcess] drawing with uber_pipeline, bg valid={}",
+                self.main_bg_key.is_some());
             pass.set_pipeline(&self.uber_pipeline);
             pass.set_bind_group(0, render_bg, &[]);
             pass.draw(0..3, 0..1);

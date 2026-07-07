@@ -181,7 +181,12 @@ impl Renderer {
             baked_data: None,
             clear_target_next_frame: true,
             owns_device: true,
-            pending_resize: Some((width, height)),
+            pending_resize: None,
+            // Note: pending_resize is intentionally None on init. The graph's
+            // lock() already sized textures to config.width/height. Setting it
+            // to Some would trigger an unnecessary graph rebuild on the first
+            // frame, destroying any pass state set between construction and
+            // first render (e.g. set_user_shader).
             gizmo_camera: None,
             gizmo_viewport_height: 0.0,
             cull_stats_buffer,
