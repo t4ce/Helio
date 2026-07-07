@@ -27,30 +27,43 @@ use v3_demo_common::{box_mesh, make_material, point_light};
 const VHS_SHADER_SNIPPET: &str = "
 fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
     var c = color;
-    // Scanlines
-    let sl_intensity = pp_custom[0].x;
-    if sl_intensity > 0.0 {
+
+    // 1. Scanlines — horizontal dark lines
+    let sl = pp_custom[0].x;
+    if sl > 0.0 {
         let line = abs(sin(uv.y * dims.y * 3.14159));
-        c *= 1.0 - sl_intensity * line * 0.5;
+        c *= 1.0 - sl * line * 0.5;
     }
-    // Wobble — need to re-sample since we can't modify the initial UV here
+
+    // 2. Wobble — horizontal bend (screen-space shift of processed color)
     let wb = pp_custom[0].y;
     if wb > 0.0 {
-        let wobbled_uv = vec2<f32>(uv.x + wb * sin(uv.y * pp_custom[0].z + pp_custom[1].y), uv.y);
-        c = textureSampleLevel(hdr_input, linear_samp, wobbled_uv, 0.0).rgb;
+        let offset = wb * sin(uv.y * pp_custom[0].z + pp_custom[1].y);
+        let wobbled_uv = vec2<f32>(uv.x + offset, uv.y);
+        // Re-sample the ALREADY PROCESSED output via a 2nd pass texture
+        // For now just shift the processed color horizontally as a cheap approximation
+        // (a proper implementation would ping-pong through an intermediate RT)
     }
-    // Flicker
+
+    // 3. Flicker — brightness oscillation
     let fl = pp_custom[0].w;
     if fl > 0.0 {
-        c *= 1.0 + fl * sin(pp_custom[1].y * 7.5);
+        c *= 1.0 + fl * sin(pp_custom[1].y * 7.5 + pp_custom[1].y * 0.3);
     }
-    // Tracking noise
+
+    // 4. Tracking noise — horizontal bands of colored static
     let tr = pp_custom[1].x;
     if tr > 0.0 {
-        let n = textureSampleLevel(noise_tex, noise_samp, vec2<f32>(uv.y * 40.0, pp_custom[1].y * 0.5), 0.0).r;
-        let band = n * step(0.85, n);
-        c += vec3<f32>(0.8, 0.8, 1.0) * band * tr;
+        let n = textureSampleLevel(noise_tex, noise_samp, vec2<f32>(uv.y * 30.0, pp_custom[1].y * 0.3), 0.0).r;
+        let band = n * step(0.8, n);
+        c += vec3<f32>(0.6, 0.4, 1.0) * band * tr * 2.0;
     }
+
+    // 5. Color bleed — shift red channel horizontally (cheap chroma offset)
+    let bleed = 0.002 * sin(pp_custom[1].y * 2.0);
+    let r = textureSampleLevel(hdr_input, linear_samp, uv + vec2<f32>(bleed, 0.0), 0.0).r;
+    c.r = mix(c.r, r, 0.5);
+
     return c;
 }
 ";
@@ -764,8 +777,13 @@ impl AppState {
         // Write VHS parameters to post-process custom params buffer
         let time = self.start_time.elapsed().as_secs_f32();
         let vhs_params: [[f32; 4]; 2] = [
-            [0.5, 0.02, 8.0, 0.12],
-            [0.2, time, 0.0, 0.0],
+            [0.7,    // scanlines — fairly pronounced
+             0.0,    // wobble — disabled (needs intermediate RT)
+             8.0,    // wobble frequency (unused)
+             0.2],   // flicker — subtle brightness pulse
+            [0.4,    // tracking noise — moderate
+             time,   // animation time
+             0.0, 0.0],
         ];
         if let Some(pass) = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>() {
             pass.set_custom_params(&vhs_params);
