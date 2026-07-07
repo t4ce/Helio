@@ -65,11 +65,21 @@ fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
     let px = 1.0 / dims;
     let frame = floor(time * 60.0);
 
-    // ── Per-scanline tape jitter ──────────────────────────────────────────
     let line = uv.y * dims.y;
+
+    // ── Rolling scanline offset error ─────────────────────────────────────
+    // VCR head tracking misalignment: a band of the image slowly rolls
+    // vertically with per-scanline horizontal displacement.
+    let roll_pos = fract(time * 0.025 + 0.3);
+    let roll_width = 0.06;
+    let roll_dist = abs(uv.y - roll_pos);
+    let roll_weight = 1.0 - smoothstep(0.0, roll_width, roll_dist);
+    let roll_shift = sin(line * 50.0 + time * 2.0) * roll_weight * 2.5;
+
+    // ── Per-scanline tape jitter ──────────────────────────────────────────
     let jit = (sin(line * jitter_freq + time * 3.7) * 5.0
              + sin(line * 17.0 + time * 5.3) * 2.0) * tape_jitter;
-    let ju = uv + vec2<f32>(jit * px.x, 0.0);
+    let ju = uv + vec2<f32>((jit + roll_shift) * px.x, 0.0);
 
     // ── YIQ separation with per-channel blur ─────────────────────────────
     let yuv = blur_ring(ju, 0.5 * px.x, 5u);
@@ -103,7 +113,7 @@ fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
 
     // Dark areas get more noise (VHS shadow SNR is terrible)
     let luma = dot(result, vec3<f32>(0.299, 0.587, 0.114));
-    let noise_strength = (0.04 + 0.08 * (1.0 - luma)) * noise_amt;
+    let noise_strength = (0.015 + 0.03 * (1.0 - luma)) * noise_amt;
     let grain = (r0 * 2.0 - 1.0) * noise_strength;
     result += grain;
 
@@ -590,7 +600,7 @@ impl ApplicationHandler for App {
                     color_gamma: [0.95, 0.95, 0.95],
                     color_gain: [0.95, 0.9, 0.85],
                     color_offset: [0.0, 0.01, 0.0],
-                    bloom_intensity: 0.3,
+                    bloom_intensity: 0.8,
                     bloom_threshold: 0.8,
                     bloom_knee: 0.3,
                     bloom_enabled: true,
