@@ -1,8 +1,10 @@
 //! Procedural backrooms map with VHS camcorder effect.
 //!
-//! Generates a random but reliably navigable map each run:
-//! corridors, rooms, fluorescent lighting, all immersed in a
-//! degraded VHS look (CA, grain, vignette, desaturated).
+//! Generates a random but reliably navigable map each run using a
+//! room-scatter + graph-connection approach: varied room sizes, varied
+//! ceiling heights (low/normal/tall/atrium), looping corridors of varied
+//! width, dead-end alcoves, and pillar halls in larger rooms — all
+//! immersed in a degraded VHS look (CA, grain, vignette, desaturated).
 //!
 //! Controls:
 //!   WASD        — move
@@ -57,100 +59,290 @@ use std::collections::HashSet;
 
 // ── Map Generator ─────────────────────────────────────────────────────────────
 //
-// Simple grid-based generator: drunkard's walk carves corridors, rooms branch off.
+// Room-scatter + graph-connection generator:
+//   1. Scatter non-overlapping rectangular rooms of varied size across the grid.
+//   2. Assign each room a ceiling height (low / normal / tall / atrium).
+//   3. Connect all rooms with corridors (chain + extra random links -> loops),
+//      corridors have randomized width and L-bend direction.
+//   4. Branch a handful of dead-end alcoves off corridors for texture.
+//   5. Flood-fill from a room to strip any unreachable pockets.
+//   6. Scatter pillars through big/atrium rooms (purely decorative).
+//   7. Place lights sparsely: a few per room, one every few corridor cells.
 
 const CELL: f32 = 4.0; // metres per grid cell
 const H_CELL: f32 = CELL / 2.0;
-const WALL_H: f32 = 3.2; // wall height
-const GRID_W: usize = 32;
-const GRID_H: usize = 24;
+const GRID_W: usize = 56;
+const GRID_H: usize = 42;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+const WALL_H: f32 = 3.2; // baseline / corridor ceiling height
+const LOW_H: f32 = 2.4; // cramped storage-nook feel
+const TALL_H: f32 = 4.6; // office hall
+const ATRIUM_H: f32 = 6.8; // big open pillar hall
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Cell {
     Wall,
     Corridor,
     Room,
 }
 
+/// Small deterministic-per-seed PRNG (PCG-style LCG), reseeded from the
+/// system clock each generation so every regenerate (R key) is different.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Rng(seed)
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 32) as u32
+    }
+
+    fn next_f32(&mut self) -> f32 {
+        self.next_u32() as f32 / u32::MAX as f32
+    }
+
+    /// Inclusive-lo, exclusive-hi integer range.
+    fn range_i32(&mut self, lo: i32, hi: i32) -> i32 {
+        let span = (hi - lo).max(1) as u32;
+        lo + (self.next_u32() % span) as i32
+    }
+
+    fn chance(&mut self, p: f32) -> bool {
+        self.next_f32() < p
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RoomRect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+impl RoomRect {
+    fn center(&self) -> (i32, i32) {
+        (self.x + self.w / 2, self.y + self.h / 2)
+    }
+
+    fn overlaps(&self, other: &RoomRect, pad: i32) -> bool {
+        self.x - pad < other.x + other.w
+            && self.x + self.w + pad > other.x
+            && self.y - pad < other.y + other.h
+            && self.y + self.h + pad > other.y
+    }
+}
+
 struct BackroomsMap {
     grid: Vec<Vec<Cell>>,
-    lights: Vec<(f32, f32)>, // world-space (x, z) for each light
+    ceiling_h: Vec<Vec<f32>>,
+    lights: Vec<(f32, f32, f32)>, // world x, world z, ceiling height there
+    pillars: Vec<(f32, f32, f32)>, // world x, world z, pillar height
+}
+
+fn carve_pt(grid: &mut [Vec<Cell>], ceiling_h: &mut [Vec<f32>], x: i32, y: i32, width_extra: i32) {
+    for ox in 0..=width_extra {
+        for oy in 0..=width_extra {
+            let gx = x + ox;
+            let gy = y + oy;
+            if gx > 0 && gx < GRID_W as i32 - 1 && gy > 0 && gy < GRID_H as i32 - 1 {
+                let (ux, uy) = (gx as usize, gy as usize);
+                if grid[ux][uy] == Cell::Wall {
+                    grid[ux][uy] = Cell::Corridor;
+                    ceiling_h[ux][uy] = WALL_H;
+                }
+            }
+        }
+    }
+}
+
+fn carve_corridor(
+    grid: &mut Vec<Vec<Cell>>,
+    ceiling_h: &mut Vec<Vec<f32>>,
+    rng: &mut Rng,
+    from: (i32, i32),
+    to: (i32, i32),
+) {
+    // 30% chance of a 2-wide corridor instead of the usual 1-wide.
+    let width_extra = if rng.chance(0.3) { 1 } else { 0 };
+    let horizontal_first = rng.chance(0.5);
+    let (x1, y1) = from;
+    let (x2, y2) = to;
+
+    if horizontal_first {
+        let (lo, hi) = (x1.min(x2), x1.max(x2));
+        for x in lo..=hi {
+            carve_pt(grid, ceiling_h, x, y1, width_extra);
+        }
+        let (lo, hi) = (y1.min(y2), y1.max(y2));
+        for y in lo..=hi {
+            carve_pt(grid, ceiling_h, x2, y, width_extra);
+        }
+    } else {
+        let (lo, hi) = (y1.min(y2), y1.max(y2));
+        for y in lo..=hi {
+            carve_pt(grid, ceiling_h, x1, y, width_extra);
+        }
+        let (lo, hi) = (x1.min(x2), x1.max(x2));
+        for x in lo..=hi {
+            carve_pt(grid, ceiling_h, x, y2, width_extra);
+        }
+    }
 }
 
 fn generate_map() -> BackroomsMap {
     let mut grid = vec![vec![Cell::Wall; GRID_H]; GRID_W];
+    let mut ceiling_h = vec![vec![WALL_H; GRID_H]; GRID_W];
 
-    // Start near centre
-    let mut cx = GRID_W as i32 / 2;
-    let mut cy = GRID_H as i32 / 2;
-    grid[cx as usize][cy as usize] = Cell::Corridor;
+    let time_seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1);
+    let mut rng = Rng::new(0x5EED_F00D_1234_5678 ^ time_seed);
 
-    // Drunkard's walk — carve main corridor
-    let steps = 140;
-    let dirs = [(0, -1), (0, 1), (-1, 0), (1, 0)];
-    let mut rng = 12345_u64;
+    // ---- 1. Scatter non-overlapping rooms of varied size ----
+    let mut rooms: Vec<RoomRect> = Vec::new();
+    let target_rooms = 26;
+    let mut attempts = 0;
+    while rooms.len() < target_rooms && attempts < 800 {
+        attempts += 1;
+        let w = rng.range_i32(3, 10);
+        let h = rng.range_i32(3, 8);
+        let x = rng.range_i32(2, GRID_W as i32 - w - 2);
+        let y = rng.range_i32(2, GRID_H as i32 - h - 2);
+        let candidate = RoomRect { x, y, w, h };
+        if rooms.iter().any(|r| candidate.overlaps(r, 2)) {
+            continue;
+        }
+        rooms.push(candidate);
+    }
 
-    let mut rng_u32 = || -> u32 {
-        rng = rng
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (rng >> 32) as u32
-    };
-
-    for _ in 0..steps {
-        let d = dirs[(rng_u32() as usize) & 3];
-        let nx = cx + d.0;
-        let ny = cy + d.1;
-        if nx > 0 && nx < GRID_W as i32 - 1 && ny > 0 && ny < GRID_H as i32 - 1 {
-            cx = nx;
-            cy = ny;
-            grid[cx as usize][cy as usize] = Cell::Corridor;
+    // ---- 2. Stamp rooms, rolling a ceiling-height variant per room ----
+    let mut room_heights: Vec<(f32, bool)> = Vec::with_capacity(rooms.len());
+    for room in &rooms {
+        let roll = rng.next_f32();
+        let (h, is_atrium) = if roll < 0.10 && room.w >= 6 && room.h >= 5 {
+            (ATRIUM_H, true)
+        } else if roll < 0.28 {
+            (TALL_H, false)
+        } else if roll < 0.50 {
+            (LOW_H, false)
+        } else {
+            (WALL_H, false)
+        };
+        room_heights.push((h, is_atrium));
+        for dx in 0..room.w {
+            for dy in 0..room.h {
+                let (ux, uy) = ((room.x + dx) as usize, (room.y + dy) as usize);
+                grid[ux][uy] = Cell::Room;
+                ceiling_h[ux][uy] = h;
+            }
         }
     }
 
-    // Place rooms branching off corridor cells
-    for _ in 0..20 {
-        // Pick a random corridor cell
-        let rx = (rng_u32() as usize) % GRID_W;
-        let ry = (rng_u32() as usize) % GRID_H;
-        if grid[rx][ry] != Cell::Corridor {
+    // ---- 3. Connect every room: a chain first (guarantees reachability),
+    //         then extra random links layered on top so the map has loops
+    //         instead of reading as a strict tree/maze. ----
+    let mut order: Vec<usize> = (0..rooms.len()).collect();
+    for i in (1..order.len()).rev() {
+        let j = rng.range_i32(0, i as i32 + 1) as usize;
+        order.swap(i, j);
+    }
+    for pair in order.windows(2) {
+        let a = rooms[pair[0]].center();
+        let b = rooms[pair[1]].center();
+        carve_corridor(&mut grid, &mut ceiling_h, &mut rng, a, b);
+    }
+    let extra_links = ((rooms.len() as f32) * 0.45) as usize;
+    for _ in 0..extra_links {
+        if rooms.len() < 2 {
+            break;
+        }
+        let i = rng.range_i32(0, rooms.len() as i32) as usize;
+        let j = rng.range_i32(0, rooms.len() as i32) as usize;
+        if i == j {
             continue;
         }
+        carve_corridor(
+            &mut grid,
+            &mut ceiling_h,
+            &mut rng,
+            rooms[i].center(),
+            rooms[j].center(),
+        );
+    }
 
-        let rw = 2 + (rng_u32() % 3) as usize; // 2-4 cells wide
-        let rh = 2 + (rng_u32() % 2) as usize; // 2-3 cells deep
-        let rdir = dirs[(rng_u32() as usize) & 3];
-
-        // Carve room in the chosen direction
-        let mut ok = true;
-        for dy in 0..rh {
-            for dx in 0..rw {
-                let gx = rx as i32 + rdir.0 * (1 + dx as i32);
-                let gy = ry as i32 + rdir.1 * (1 + dy as i32);
-                if gx < 1 || gx >= GRID_W as i32 - 1 || gy < 1 || gy >= GRID_H as i32 - 1 {
-                    ok = false;
-                } else if grid[gx as usize][gy as usize] != Cell::Wall {
-                    ok = false;
+    // ---- 4. Dead-end alcoves branching off corridors, for texture ----
+    let mut corridor_cells: Vec<(i32, i32)> = Vec::new();
+    for x in 0..GRID_W {
+        for y in 0..GRID_H {
+            if grid[x][y] == Cell::Corridor {
+                corridor_cells.push((x as i32, y as i32));
+            }
+        }
+    }
+    let alcove_tries = corridor_cells.len() / 10;
+    for _ in 0..alcove_tries {
+        if corridor_cells.is_empty() {
+            break;
+        }
+        let idx = rng.range_i32(0, corridor_cells.len() as i32) as usize;
+        let (cx, cy) = corridor_cells[idx];
+        let dirs = [(0i32, -1i32), (0, 1), (-1, 0), (1, 0)];
+        let d = dirs[(rng.next_u32() as usize) & 3];
+        let aw = rng.range_i32(2, 4);
+        let ah = rng.range_i32(2, 4);
+        let ax = cx + d.0 * 2;
+        let ay = cy + d.1 * 2;
+        let cand = RoomRect {
+            x: ax,
+            y: ay,
+            w: aw,
+            h: ah,
+        };
+        if cand.x < 1
+            || cand.y < 1
+            || cand.x + cand.w >= GRID_W as i32 - 1
+            || cand.y + cand.h >= GRID_H as i32 - 1
+        {
+            continue;
+        }
+        let mut clear = true;
+        for dx in 0..cand.w {
+            for dy in 0..cand.h {
+                if grid[(cand.x + dx) as usize][(cand.y + dy) as usize] != Cell::Wall {
+                    clear = false;
                 }
             }
         }
-        if !ok {
+        if !clear {
             continue;
         }
-
-        for dy in 0..rh {
-            for dx in 0..rw {
-                let gx = rx as i32 + rdir.0 * (1 + dx as i32);
-                let gy = ry as i32 + rdir.1 * (1 + dy as i32);
-                grid[gx as usize][gy as usize] = Cell::Room;
+        let h = if rng.chance(0.3) { LOW_H } else { WALL_H };
+        for dx in 0..cand.w {
+            for dy in 0..cand.h {
+                let (ux, uy) = ((cand.x + dx) as usize, (cand.y + dy) as usize);
+                grid[ux][uy] = Cell::Room;
+                ceiling_h[ux][uy] = h;
             }
         }
+        carve_corridor(&mut grid, &mut ceiling_h, &mut rng, (cx, cy), cand.center());
     }
 
-    // Flood-fill connectivity: ensure all walkable cells reach the start
+    // ---- 5. Flood-fill connectivity: strip anything unreachable ----
     let mut visited = vec![vec![false; GRID_H]; GRID_W];
-    let start_x = GRID_W / 2;
-    let start_y = GRID_H / 2;
+    let (start_x, start_y) = if let Some(r) = rooms.first() {
+        let c = r.center();
+        (c.0 as usize, c.1 as usize)
+    } else {
+        (GRID_W / 2, GRID_H / 2)
+    };
     let mut stack = vec![(start_x, start_y)];
     visited[start_x][start_y] = true;
     while let Some((x, y)) = stack.pop() {
@@ -166,8 +358,6 @@ fn generate_map() -> BackroomsMap {
             }
         }
     }
-
-    // Remove unreachable walkable cells (turn them back to Wall)
     for x in 0..GRID_W {
         for y in 0..GRID_H {
             if grid[x][y] != Cell::Wall && !visited[x][y] {
@@ -176,19 +366,66 @@ fn generate_map() -> BackroomsMap {
         }
     }
 
-    // Place lights: one per walkable cell, slightly randomised
+    // ---- 6. Pillars scattered through big/atrium rooms (decorative only —
+    //         this demo has no collision, camera moves freely regardless) ----
+    let mut pillars = Vec::new();
+    for (room, &(h, is_atrium)) in rooms.iter().zip(room_heights.iter()) {
+        let big_enough = room.w >= 6 && room.h >= 5;
+        if !(is_atrium || (big_enough && rng.chance(0.35))) {
+            continue;
+        }
+        let mut px = room.x + 1;
+        while px < room.x + room.w - 1 {
+            let mut py = room.y + 1;
+            while py < room.y + room.h - 1 {
+                if visited[px as usize][py as usize] {
+                    let wx = px as f32 * CELL - GRID_W as f32 * H_CELL + H_CELL;
+                    let wz = py as f32 * CELL - GRID_H as f32 * H_CELL + H_CELL;
+                    pillars.push((wx, wz, h));
+                }
+                py += 3;
+            }
+            px += 3;
+        }
+    }
+
+    // ---- 7. Sparse light placement: a few per room, plus a spaced-out
+    //         string along corridors — not one light per walkable tile. ----
     let mut lights = Vec::new();
+    for (room, &(h, _)) in rooms.iter().zip(room_heights.iter()) {
+        let count = (1 + (room.w * room.h) / 16).max(1);
+        for i in 0..count {
+            let lx = (room.x + 1 + (i % room.w.max(1))).clamp(room.x, room.x + room.w - 1) as usize;
+            let ly = (room.y + 1 + ((i * 2) % room.h.max(1))).clamp(room.y, room.y + room.h - 1)
+                as usize;
+            if visited[lx][ly] {
+                let wx = lx as f32 * CELL - GRID_W as f32 * H_CELL + H_CELL;
+                let wz = ly as f32 * CELL - GRID_H as f32 * H_CELL + H_CELL;
+                lights.push((wx, wz, h));
+            }
+        }
+    }
+    let mut since_last_light = 0;
     for x in 0..GRID_W {
         for y in 0..GRID_H {
-            if grid[x][y] != Cell::Wall {
-                let wx = x as f32 * CELL - GRID_W as f32 * H_CELL + H_CELL;
-                let wz = y as f32 * CELL - GRID_H as f32 * H_CELL + H_CELL;
-                lights.push((wx, wz));
+            if grid[x][y] == Cell::Corridor && visited[x][y] {
+                since_last_light += 1;
+                if since_last_light >= 3 {
+                    since_last_light = 0;
+                    let wx = x as f32 * CELL - GRID_W as f32 * H_CELL + H_CELL;
+                    let wz = y as f32 * CELL - GRID_H as f32 * H_CELL + H_CELL;
+                    lights.push((wx, wz, ceiling_h[x][y]));
+                }
             }
         }
     }
 
-    BackroomsMap { grid, lights }
+    BackroomsMap {
+        grid,
+        ceiling_h,
+        lights,
+        pillars,
+    }
 }
 
 // ── End Map Generator ─────────────────────────────────────────────────────────
@@ -205,6 +442,7 @@ struct MapResources {
     walls: Vec<MeshId>,
     floors: Vec<MeshId>,
     ceilings: Vec<MeshId>,
+    pillars: Vec<MeshId>,
     light_ids: Vec<LightId>,
 }
 
@@ -278,6 +516,9 @@ impl App {
             for &id in &res.ceilings {
                 let _ = scene.remove_mesh(id);
             }
+            for &id in &res.pillars {
+                let _ = scene.remove_mesh(id);
+            }
             for &id in &res.light_ids {
                 let _ = scene.remove_light(id);
             }
@@ -311,10 +552,18 @@ impl App {
             [0.0, 0.0, 0.0],
             0.0,
         ));
+        let pillar_mat = scene.insert_material(make_material(
+            [0.5, 0.46, 0.36, 1.0],
+            0.5,
+            0.02,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
         let mut walls = Vec::new();
         let mut floors = Vec::new();
         let mut ceilings = Vec::new();
+        let mut pillars = Vec::new();
         let mut light_ids = Vec::new();
 
         for x in 0..GRID_W {
@@ -325,6 +574,7 @@ impl App {
 
                 let wx = x as f32 * CELL - GRID_W as f32 * H_CELL + H_CELL;
                 let wz = y as f32 * CELL - GRID_H as f32 * H_CELL + H_CELL;
+                let h = map.ceiling_h[x][y];
 
                 // Floor tile
                 let f = scene
@@ -343,7 +593,7 @@ impl App {
                 );
                 floors.push(f);
 
-                // Ceiling tile
+                // Ceiling tile — height varies per room (low/normal/tall/atrium)
                 let c = scene
                     .insert_actor(helio::SceneActor::mesh(box_mesh(
                         [0.0, 0.0, 0.0],
@@ -355,17 +605,22 @@ impl App {
                     scene,
                     c,
                     ceiling_mat,
-                    glam::Mat4::from_translation(glam::Vec3::new(wx, WALL_H, wz)),
+                    glam::Mat4::from_translation(glam::Vec3::new(wx, h, wz)),
                     H_CELL,
                 );
                 ceilings.push(c);
 
-                // Walls on edges adjacent to Wall cells
+                // Walls on edges adjacent to Wall cells. Rotation is chosen so
+                // the wall mesh's long axis (local z) lies along the shared
+                // boundary: south/north boundaries run along world x (need a
+                // 90-degree turn), west/east boundaries run along world z
+                // (need no turn) — previously these were swapped, which is
+                // why walls looked rotated 90 degrees off from the corridors.
                 let neighbors = [
-                    (0, -1, 0.0, -H_CELL, 0.0),                               // south
-                    (0, 1, 0.0, H_CELL, std::f32::consts::PI),                // north
-                    (-1, 0, -H_CELL, 0.0, std::f32::consts::FRAC_PI_2 * 3.0), // west
-                    (1, 0, H_CELL, 0.0, std::f32::consts::FRAC_PI_2),         // east
+                    (0, -1, 0.0, -H_CELL, std::f32::consts::FRAC_PI_2 * 3.0), // south
+                    (0, 1, 0.0, H_CELL, std::f32::consts::FRAC_PI_2),         // north
+                    (-1, 0, -H_CELL, 0.0, 0.0),                               // west
+                    (1, 0, H_CELL, 0.0, std::f32::consts::PI),                // east
                 ];
                 for &(dx, dy, ox, oz, rot_y) in &neighbors {
                     let nx = x as i32 + dx;
@@ -379,19 +634,20 @@ impl App {
                         continue;
                     }
 
-                    // Wall
+                    // Wall — height matches this cell's own ceiling height,
+                    // so height transitions between neighbouring rooms show
+                    // up as an open ceiling ledge rather than a mismatched
+                    // wall (there's no wall between two walkable cells).
                     let w = scene
                         .insert_actor(helio::SceneActor::mesh(box_mesh(
                             [0.0, 0.0, 0.0],
-                            [0.1, WALL_H / 2.0, CELL / 2.0],
+                            [0.1, h / 2.0, CELL / 2.0],
                         )))
                         .as_mesh()
                         .unwrap();
-                    let t = glam::Mat4::from_translation(glam::Vec3::new(
-                        wx + ox,
-                        WALL_H / 2.0,
-                        wz + oz,
-                    )) * glam::Mat4::from_rotation_y(rot_y);
+                    let t =
+                        glam::Mat4::from_translation(glam::Vec3::new(wx + ox, h / 2.0, wz + oz))
+                            * glam::Mat4::from_rotation_y(rot_y);
                     Self::place(scene, w, wall_mat, t, H_CELL);
                     walls.push(w);
 
@@ -411,33 +667,45 @@ impl App {
             }
         }
 
-        // Fluorescent lights
+        // Pillars — decorative columns scattered through big/atrium rooms
+        for &(px, pz, ph) in &map.pillars {
+            let p = scene
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [0.35, ph / 2.0, 0.35],
+                )))
+                .as_mesh()
+                .unwrap();
+            Self::place(
+                scene,
+                p,
+                pillar_mat,
+                glam::Mat4::from_translation(glam::Vec3::new(px, ph / 2.0, pz)),
+                0.5,
+            );
+            pillars.push(p);
+        }
+
+        // Fluorescent lights — sparse: a few per room plus spaced corridor lights
         let light_colors = [
             [0.95, 0.92, 0.85],
             [0.92, 0.93, 0.88],
             [0.96, 0.91, 0.82],
             [0.90, 0.94, 0.86],
         ];
-        let mut rng = 54321_u64;
-        let mut rng_u32 = || -> u32 {
-            rng = rng
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (rng >> 32) as u32
-        };
-        for &(lx, lz) in &map.lights {
-            let ci = (rng_u32() as usize) % light_colors.len();
-            let flicker_offset = (rng_u32() as f32 / u32::MAX as f32) * 100.0;
+        let mut rng = Rng::new(0x9E37_79B9_7F4A_7C15 ^ (map.lights.len() as u64));
+        for &(lx, lz, h) in &map.lights {
+            let ci = (rng.next_u32() as usize) % light_colors.len();
             let _ = scene.insert_actor(helio::SceneActor::light_with_movability(
-                point_light([lx, WALL_H - 0.2, lz], light_colors[ci], 3.5, 8.0),
-                Some(helio::Movability::Movable),
+                point_light([lx, h - 0.2, lz], light_colors[ci], 3.5, 8.0),
+                Some(Movability::Movable),
             ));
-            // Also add a dimmer fill light slightly lower
+            // Dimmer fill light partway down, scaled to this cell's ceiling height
             light_ids.push(
                 scene
                     .insert_actor(helio::SceneActor::light_with_movability(
-                        point_light([lx, WALL_H - 1.5, lz], [0.95, 0.92, 0.85], 1.2, 4.0),
-                        Some(helio::Movability::Movable),
+                        point_light([lx, (h * 0.5).max(1.0), lz], [0.95, 0.92, 0.85], 1.2, 4.0),
+                        Some(Movability::Movable),
                     ))
                     .as_light()
                     .unwrap(),
@@ -448,6 +716,7 @@ impl App {
             walls,
             floors,
             ceilings,
+            pillars,
             light_ids,
         });
     }
@@ -836,4 +1105,3 @@ impl AppState {
         output.present();
     }
 }
-
