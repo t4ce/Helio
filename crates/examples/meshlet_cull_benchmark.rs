@@ -7,6 +7,8 @@
 //!
 //! Run with:
 //! `cargo run --release -p examples --bin meshlet_cull_benchmark`
+//! Set `HELIO_BENCH_BACKEND=dx12` (or `vulkan`, `metal`, `gl`, `browser`)
+//! to force one backend for cross-backend verification.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -89,7 +91,7 @@ fn main() {
 
 async fn run() {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
+        backends: benchmark_backends(),
         flags: wgpu::InstanceFlags::empty(),
         ..Default::default()
     });
@@ -842,4 +844,21 @@ fn env_u32(name: &str, fallback: u32) -> u32 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(fallback)
+}
+
+fn benchmark_backends() -> wgpu::Backends {
+    let Ok(value) = std::env::var("HELIO_BENCH_BACKEND") else {
+        return wgpu::Backends::all();
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "dx12" => wgpu::Backends::DX12,
+        "vulkan" => wgpu::Backends::VULKAN,
+        "metal" => wgpu::Backends::METAL,
+        "gl" => wgpu::Backends::GL,
+        "browser" => wgpu::Backends::BROWSER_WEBGPU,
+        "all" => wgpu::Backends::all(),
+        other => panic!(
+            "unknown HELIO_BENCH_BACKEND '{other}'; expected dx12, vulkan, metal, gl, browser, or all"
+        ),
+    }
 }
