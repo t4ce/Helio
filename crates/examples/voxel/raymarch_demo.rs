@@ -296,11 +296,18 @@ impl ApplicationHandler for App {
         graph.add_pass(Box::new(FxaaPass::new(&device, surface_format)));
         graph.lock(size.width, size.height);
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             device.clone(), queue.clone(),
             config.surface_format, config.width, config.height, config.render_scale,
             config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
+        // Renderer applies TAA-style subpixel camera jitter every frame
+        // unconditionally; without a TaaPass to resolve it (we only have
+        // FXAA, which is spatial-only), that jitter just makes the image
+        // visibly shimmer/flicker frame to frame — and for a per-pixel
+        // raymarch it also changes which voxel each pixel samples, making it
+        // noisier still.
+        renderer.set_jitter_enabled(false);
 
         self.state = Some(AppState {
             window,

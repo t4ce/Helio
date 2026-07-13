@@ -175,6 +175,7 @@ impl Renderer {
             jitter_matrices,
             jitter_cache_width: internal_w,
             jitter_cache_height: internal_h,
+            enable_jitter: true,
             #[cfg(feature = "bake")]
             bake_pending: None,
             #[cfg(feature = "bake")]

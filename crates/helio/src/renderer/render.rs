@@ -78,10 +78,15 @@ impl Renderer {
         }
 
         let frame_idx = self.scene.gpu_scene().frame_count;
-        let jitter_mat = self.jitter_matrices[(frame_idx % 16) as usize];
-        let raw = HALTON_JITTER[(frame_idx % 16) as usize];
-        let jx = ((raw[0] - 0.5) * 2.0) / (internal_w as f32);
-        let jy = ((raw[1] - 0.5) * 2.0) / (internal_h as f32);
+        let (jitter_mat, jx, jy) = if self.enable_jitter {
+            let jitter_mat = self.jitter_matrices[(frame_idx % 16) as usize];
+            let raw = HALTON_JITTER[(frame_idx % 16) as usize];
+            let jx = ((raw[0] - 0.5) * 2.0) / (internal_w as f32);
+            let jy = ((raw[1] - 0.5) * 2.0) / (internal_h as f32);
+            (jitter_mat, jx, jy)
+        } else {
+            (glam::Mat4::IDENTITY, 0.0, 0.0)
+        };
         let jittered_m = jitter_mat * camera.proj * camera.view;
         let col = jittered_m.to_cols_array();
         let debug_camera_uniform = DebugCameraUniform {

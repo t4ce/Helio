@@ -290,6 +290,11 @@ impl ApplicationHandler for App {
             config.surface_format, config.width, config.height, config.render_scale,
             config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
+        // Renderer applies TAA-style subpixel camera jitter every frame
+        // unconditionally; without a TaaPass to resolve it (we only have
+        // FXAA, which is spatial-only), that jitter just makes the image
+        // visibly shimmer/flicker frame to frame.
+        renderer.set_jitter_enabled(false);
 
         {
             let pass = renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");

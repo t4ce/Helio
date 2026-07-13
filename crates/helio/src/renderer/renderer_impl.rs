@@ -116,6 +116,12 @@ pub struct Renderer {
     pub(crate) jitter_matrices: [glam::Mat4; 16],
     pub(crate) jitter_cache_width: u32,
     pub(crate) jitter_cache_height: u32,
+    /// Whether per-frame TAA-style subpixel camera jitter is applied. This is
+    /// unconditional history: graphs built around TaaPass need it (that's
+    /// what resolves it into a stable image), but a graph with no temporal
+    /// accumulation step (e.g. FXAA-only) would otherwise visibly shimmer
+    /// every frame since the jittered projection never gets resolved.
+    pub(crate) enable_jitter: bool,
     pub(crate) gizmo_camera: Option<crate::scene::Camera>,
     pub(crate) gizmo_viewport_height: f32,
     #[cfg(feature = "bake")]
@@ -251,6 +257,15 @@ impl Renderer {
 
     pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality) {
         self.shadow_quality = quality;
+    }
+
+    /// Enables/disables per-frame TAA-style subpixel camera jitter (on by
+    /// default). Turn this off for graphs that have no temporal-accumulation
+    /// pass (e.g. an FXAA-only or raymarch graph without TaaPass) — otherwise
+    /// the jittered projection never gets resolved and the image visibly
+    /// shimmers every frame.
+    pub fn set_jitter_enabled(&mut self, enabled: bool) {
+        self.enable_jitter = enabled;
     }
 
     pub fn set_debug_mode(&mut self, mode: u32) {
