@@ -70,6 +70,7 @@ struct AppState {
     surface: wgpu::Surface<'static>,
     device: Arc<wgpu::Device>,
     surface_format: wgpu::TextureFormat,
+    surface_alpha_mode: wgpu::CompositeAlphaMode,
     renderer: Renderer,
     last_frame: std::time::Instant,
 
@@ -79,6 +80,7 @@ struct AppState {
     cam_pitch: f32,
     keys: HashSet<KeyCode>,
     right_mouse_held: bool,
+    left_mouse_held: bool,
     mouse_delta: (f32, f32),
     cursor_pos: (f32, f32),
     cam_speed: f32,
@@ -143,6 +145,7 @@ impl ApplicationHandler for App {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
+        let alpha_mode = caps.alpha_modes[0];
         let sz = window.inner_size();
         surface.configure(
             &device,
@@ -152,7 +155,7 @@ impl ApplicationHandler for App {
                 width: sz.width,
                 height: sz.height,
                 present_mode: wgpu::PresentMode::AutoVsync,
-                alpha_mode: caps.alpha_modes[0],
+                alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             },
@@ -566,6 +569,7 @@ impl ApplicationHandler for App {
             surface,
             device,
             surface_format: format,
+            surface_alpha_mode: alpha_mode,
             renderer,
             last_frame: std::time::Instant::now(),
             // Start back and high for a wide overview of the full expanded yard
@@ -574,6 +578,7 @@ impl ApplicationHandler for App {
             cam_pitch: -0.38,
             keys: HashSet::new(),
             right_mouse_held: false,
+            left_mouse_held: false,
             mouse_delta: (0.0, 0.0),
             cursor_pos: (640.0, 360.0),
             cam_speed: 18.0,
@@ -597,30 +602,21 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
-            WindowEvent::Resized(sz) if sz.width > 0 && sz.height > 0 => {
-                state.surface.configure(
-                    &state.device,
-                    &wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        format: state.surface_format,
-                        width: sz.width,
-                        height: sz.height,
-                        present_mode: wgpu::PresentMode::AutoVsync,
-                        alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                        view_formats: vec![],
-                        desired_maximum_frame_latency: 2,
-                    },
-                );
-                state.renderer.set_render_size(sz.width, sz.height);
-            }
+            WindowEvent::Resized(sz) => state.resize(sz.width, sz.height),
+
+            WindowEvent::Focused(false) => state.reset_transient_input(),
+            WindowEvent::Focused(true) => state.last_frame = std::time::Instant::now(),
+            WindowEvent::CursorLeft { .. } => state.reset_transient_input(),
 
             WindowEvent::CursorMoved { position, .. } => {
                 state.cursor_pos = (position.x as f32, position.y as f32);
                     if !state.right_mouse_held {
                         let (ray_o, ray_d) = state.build_ray();
                         state.editor.update_hover(ray_o, ray_d, &state.renderer);
-                        if state.editor.is_dragging() {
+                        if state.left_mouse_held && state.editor.is_dragging() {
                             state.editor.update_drag(ray_o, ray_d, &mut state.renderer);
+                        } else if state.editor.is_dragging() {
+                            state.editor.end_drag();
                         }
                     }
             }
@@ -714,6 +710,7 @@ impl ApplicationHandler for App {
                 button: MouseButton::Right,
                 ..
             } => {
+                state.left_mouse_held = true;
                 if !state.right_mouse_held {
                     let _ = state
                         .window
@@ -759,6 +756,7 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                state.left_mouse_held = false;
                 state.editor.end_drag();
             }
 
@@ -775,7 +773,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
-                let dt = (now - state.last_frame).as_secs_f32();
+                let dt = (now - state.last_frame).as_secs_f32().min(0.1);
                 state.last_frame = now;
                 state.update_camera(dt);
                 state.render();
@@ -813,6 +811,42 @@ impl ApplicationHandler for App {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl AppState {
+    fn reset_transient_input(&mut self) {
+        self.keys.clear();
+        self.mouse_delta = (0.0, 0.0);
+        self.right_mouse_held = false;
+        self.left_mouse_held = false;
+        self.editor.end_drag();
+        let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+        self.last_frame = std::time::Instant::now();
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        // Native resize loops can swallow mouse/key release events. Cancel any
+        // capture before rebuilding size-dependent render targets so camera and
+        // gizmo input cannot remain latched after the resize completes.
+        self.reset_transient_input();
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        self.surface.configure(
+            &self.device,
+            &wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: self.surface_format,
+                width,
+                height,
+                present_mode: wgpu::PresentMode::AutoVsync,
+                alpha_mode: self.surface_alpha_mode,
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            },
+        );
+        self.renderer.set_render_size(width, height);
+    }
+
     fn build_ray(&self) -> (glam::Vec3, glam::Vec3) {
         let sz     = self.window.inner_size();
         let width  = sz.width as f32;
