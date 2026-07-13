@@ -100,6 +100,18 @@ fn trace_volume(ro: vec3<f32>, rd: vec3<f32>, vol: GpuVoxelVolume) -> HitResult 
     let next_border = (vec3<f32>(grid) + vec3<f32>(select(vec3<i32>(1), vec3<i32>(0), step < vec3(0)))) * vs - half;
     var t_max = (next_border - ro) / rd;
 
+    // Axis crossed to reach the current cell (0=x, 1=y, 2=z) — needed for a
+    // correct single-axis face normal instead of the constant per-ray
+    // -sign(rd) vector, which only depends on the ray's octant and produces
+    // screen-space quadrant banding instead of real per-voxel-face shading.
+    // Initialized to the AABB entry face.
+    var last_axis = 0u;
+    var entry_axis_max = min((bmin.x - ro.x) * inv_rd.x, (bmax.x - ro.x) * inv_rd.x);
+    let entry_y = min((bmin.y - ro.y) * inv_rd.y, (bmax.y - ro.y) * inv_rd.y);
+    if entry_y > entry_axis_max { entry_axis_max = entry_y; last_axis = 1u; }
+    let entry_z = min((bmin.z - ro.z) * inv_rd.z, (bmax.z - ro.z) * inv_rd.z);
+    if entry_z > entry_axis_max { entry_axis_max = entry_z; last_axis = 2u; }
+
     var t_hit = t_entry;
     let max_steps = 256u;
 
@@ -130,8 +142,11 @@ fn trace_volume(ro: vec3<f32>, rd: vec3<f32>, vol: GpuVoxelVolume) -> HitResult 
 
                 if mat > 0u {
                     let hit_pos = ro + rd * t_hit;
-                    let normal = vec3<f32>(-vec3<f32>(step));
-                    return HitResult(1u, mat, hit_pos, normalize(normal));
+                    var normal = vec3<f32>(0.0);
+                    if last_axis == 0u { normal.x = -f32(step.x); }
+                    else if last_axis == 1u { normal.y = -f32(step.y); }
+                    else { normal.z = -f32(step.z); }
+                    return HitResult(1u, mat, hit_pos, normal);
                 }
             }
         }
@@ -142,20 +157,24 @@ fn trace_volume(ro: vec3<f32>, rd: vec3<f32>, vol: GpuVoxelVolume) -> HitResult 
                 t_hit = t_max.x;
                 grid.x += step.x;
                 t_max.x += t_delta.x;
+                last_axis = 0u;
             } else {
                 t_hit = t_max.z;
                 grid.z += step.z;
                 t_max.z += t_delta.z;
+                last_axis = 2u;
             }
         } else {
             if t_max.y < t_max.z {
                 t_hit = t_max.y;
                 grid.y += step.y;
                 t_max.y += t_delta.y;
+                last_axis = 1u;
             } else {
                 t_hit = t_max.z;
                 grid.z += step.z;
                 t_max.z += t_delta.z;
+                last_axis = 2u;
             }
         }
 
