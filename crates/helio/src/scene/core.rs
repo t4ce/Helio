@@ -126,11 +126,17 @@ pub struct Scene {
     /// The VG pass re-uploads GPU buffers only when this advances.
     pub(in crate::scene) vg_buffer_version: u64,
 
-    /// Flattened meshlet entries for the current VG layout (rebuilt when dirty).
+    /// Unique meshlet entries for virtual meshes referenced by the current VG layout.
     pub(in crate::scene) vg_cpu_meshlets: Vec<libhelio::GpuMeshletEntry>,
+
+    /// Object-level LOD ranges and bounds (one entry per VG object).
+    pub(in crate::scene) vg_cpu_objects: Vec<libhelio::GpuVgObject>,
 
     /// Instance data for all VG objects (one entry per VG object, in order).
     pub(in crate::scene) vg_cpu_instances: Vec<helio_core::GpuInstanceData>,
+
+    /// Exact worst-case number of draws after choosing one LOD per object.
+    pub(in crate::scene) vg_max_draw_count: u32,
 
     // ── Water volumes ─────────────────────────────────────────────────────────
     /// Water volumes (dense array)
@@ -277,7 +283,9 @@ impl Scene {
             vg_objects_dirty: false,
             vg_buffer_version: 0,
             vg_cpu_meshlets: Vec::new(),
+            vg_cpu_objects: Vec::new(),
             vg_cpu_instances: Vec::new(),
+            vg_max_draw_count: 0,
             water_volumes: DenseArena::new(),
             water_volumes_dirty: false,
             water_volumes_dirty_range: None,

@@ -482,7 +482,7 @@ impl<'a> FrameResources<'a> {
     }
 }
 
-/// Per-frame virtual geometry data: CPU-side meshlet and instance byte slices.
+/// Per-frame virtual geometry data: immutable mesh, object, and instance slices.
 ///
 /// The `VirtualGeometryPass` uploads these slices to its owned GPU buffers on the
 /// first frame and whenever `buffer_version` advances (topology or transform change).
@@ -490,12 +490,16 @@ impl<'a> FrameResources<'a> {
 pub struct VgFrameData<'a> {
     /// Raw bytes of a `GpuMeshletEntry` array.
     pub meshlets: &'a [u8],
+    /// Raw bytes of a `GpuVgObject` array (one entry per VG object).
+    pub objects: &'a [u8],
     /// Raw bytes of a `GpuInstanceData` array (one entry per VG object).
     pub instances: &'a [u8],
-    /// Total number of meshlets across all VG objects.
+    /// Number of unique meshlet descriptors across all referenced virtual meshes.
     pub meshlet_count: u32,
-    /// Number of VG object instances.
-    pub instance_count: u32,
+    /// Number of VG objects (and corresponding instance entries).
+    pub object_count: u32,
+    /// Exact worst-case number of indirect draws after selecting one LOD per object.
+    pub max_draw_count: u32,
     /// Version counter incremented each time meshlet or instance data changes.
     /// The pass re-uploads GPU buffers only when this advances.
     pub buffer_version: u64,

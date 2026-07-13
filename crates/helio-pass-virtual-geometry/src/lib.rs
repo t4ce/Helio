@@ -19,6 +19,7 @@ pub(crate) const MAX_TEXTURES: usize = 16;
 pub const LOD_LEVEL_COUNT: u32 = 8;
 
 pub(crate) const INITIAL_MESHLETS: u64 = 1024;
+pub(crate) const INITIAL_OBJECTS: u64 = 256;
 pub(crate) const INITIAL_INSTANCES: u64 = 256;
 
 /// Per-instance values used by meshlet culling. Kept separate from
@@ -94,6 +95,48 @@ impl LodQuality {
             LodQuality::Ultra => [0.008, 0.005, 0.003, 0.002, 0.001, 0.0005, 0.0002],
         }
     }
+
+    /// Maximum tolerated geometric simplification error in output pixels.
+    /// The cull shader selects the coarsest whole-object LOD below this bound.
+    pub fn max_error_pixels(self) -> f32 {
+        match self {
+            LodQuality::Low => 4.0,
+            LodQuality::Medium => 2.0,
+            LodQuality::High => 1.0,
+            LodQuality::Ultra => 0.5,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn select_object_lod(
+    errors: &[f32; LOD_LEVEL_COUNT as usize],
+    lod_count: u32,
+    max_scale: f32,
+    focal_pixels: f32,
+    closest_distance: f32,
+    max_error_pixels: f32,
+) -> u32 {
+    if lod_count == 0
+        || !max_scale.is_finite()
+        || !focal_pixels.is_finite()
+        || !closest_distance.is_finite()
+        || !max_error_pixels.is_finite()
+    {
+        return 0;
+    }
+
+    let mut selected = 0;
+    let denominator = closest_distance.max(1.0e-4);
+    for level in 1..lod_count.min(LOD_LEVEL_COUNT) {
+        let projected_error = errors[level as usize] * max_scale * focal_pixels / denominator;
+        if projected_error <= max_error_pixels {
+            selected = level;
+        } else {
+            break;
+        }
+    }
+    selected
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -120,17 +163,19 @@ pub(crate) struct VgGlobals {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct CullUniforms {
-    pub meshlet_count: u32,
+    pub object_count: u32,
     pub screen_width: u32,
     pub screen_height: u32,
     pub hiz_mip_count: u32,
-    pub lod_thresholds: [f32; 7],
-    _pad3: f32,
+    pub draw_capacity: u32,
+    pub lod_error_threshold_px: f32,
+    pub dispatch_width: u32,
+    _pad0: u32,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::InstanceCullData;
+    use super::{select_object_lod, CullUniforms, InstanceCullData, LodQuality};
     use helio_core::GpuInstanceData;
 
     fn instance_with_model(model: [f32; 16]) -> GpuInstanceData {
@@ -148,6 +193,7 @@ mod tests {
     #[test]
     fn instance_cull_data_is_gpu_aligned() {
         assert_eq!(std::mem::size_of::<InstanceCullData>(), 16);
+        assert_eq!(std::mem::size_of::<CullUniforms>(), 32);
     }
 
     #[test]
@@ -207,5 +253,21 @@ mod tests {
             InstanceCullData::from_instance(&reflection).cone_cull_enabled,
             0
         );
+    }
+
+    #[test]
+    fn object_lod_uses_measured_projected_error() {
+        let errors = [0.0, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64];
+
+        assert_eq!(select_object_lod(&errors, 8, 1.0, 1000.0, 100.0, 1.0), 4);
+        assert_eq!(select_object_lod(&errors, 8, 1.0, 1000.0, 10.0, 1.0), 1);
+        assert_eq!(select_object_lod(&errors, 8, 2.0, 1000.0, 100.0, 1.0), 3);
+    }
+
+    #[test]
+    fn higher_lod_quality_has_a_stricter_pixel_error_bound() {
+        assert!(LodQuality::Low.max_error_pixels() > LodQuality::Medium.max_error_pixels());
+        assert!(LodQuality::Medium.max_error_pixels() > LodQuality::High.max_error_pixels());
+        assert!(LodQuality::High.max_error_pixels() > LodQuality::Ultra.max_error_pixels());
     }
 }

@@ -21,7 +21,6 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     let optional =
         wgpu::Features::INDIRECT_FIRST_INSTANCE | // non-zero firstInstance in indirect draws (WebGPU: indirect-first-instance)
         wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
-        wgpu::Features::SHADER_PRIMITIVE_INDEX | // @builtin(primitive_index) in fs
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
         wgpu::Features::VERTEX_WRITABLE_STORAGE;

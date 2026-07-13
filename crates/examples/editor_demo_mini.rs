@@ -90,7 +90,9 @@ struct AppState {
     is_fullscreen: bool,
     /// Index into the debug views list (0 = off).
     debug_view_index: usize,
+    active_debug_mode: u32,
     debug_overlay_enabled: bool,
+    debug_overlay: Arc<std::sync::Mutex<helio_pass_debug_overlay::DebugOverlayState>>,
 }
 
 impl ApplicationHandler for App {
@@ -777,7 +779,9 @@ impl ApplicationHandler for App {
             grid_enabled: true,
             is_fullscreen: false,
             debug_view_index: 0,
+            active_debug_mode: 0,
             debug_overlay_enabled: false,
+            debug_overlay,
         });
     }
 
@@ -881,11 +885,11 @@ impl ApplicationHandler for App {
                             } else {
                                 state.debug_view_index = (state.debug_view_index + 1) % (views.len() + 1);
                                 if state.debug_view_index == 0 {
-                                    state.renderer.set_debug_mode(0);
+                                    state.apply_debug_mode(0);
                                     eprintln!("[debug] Debug view: OFF");
                                 } else {
                                     let view = &views[state.debug_view_index - 1];
-                                    state.renderer.set_debug_mode(view.debug_mode);
+                                    state.apply_debug_mode(view.debug_mode);
                                     eprintln!("[debug] Debug view: {} — {}", view.name, view.description);
                                 }
                             }
@@ -901,11 +905,11 @@ impl ApplicationHandler for App {
                                     state.debug_view_index -= 1;
                                 }
                                 if state.debug_view_index == 0 {
-                                    state.renderer.set_debug_mode(0);
+                                    state.apply_debug_mode(0);
                                     eprintln!("[debug] Debug view: OFF");
                                 } else {
                                     let view = &views[state.debug_view_index - 1];
-                                    state.renderer.set_debug_mode(view.debug_mode);
+                                    state.apply_debug_mode(view.debug_mode);
                                     eprintln!("[debug] Debug view: {} — {}", view.name, view.description);
                                 }
                             }
@@ -913,7 +917,7 @@ impl ApplicationHandler for App {
                         KeyCode::F2 | KeyCode::F5 => {
                             state.debug_overlay_enabled = !state.debug_overlay_enabled;
                             if let Some(pass) = state.renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>() {
-                                pass.set_enabled(state.debug_overlay_enabled);
+                                pass.set_enabled(state.debug_overlay_enabled || state.active_debug_mode == 21);
                             }
                         }
                         KeyCode::KeyL if !state.right_mouse_held => {
@@ -1031,6 +1035,45 @@ impl ApplicationHandler for App {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl AppState {
+    fn apply_debug_mode(&mut self, mode: u32) {
+        const LOD_COLORS: [[f32; 3]; 8] = [
+            [0.10, 0.95, 0.10],
+            [0.50, 0.95, 0.10],
+            [0.85, 0.90, 0.10],
+            [1.00, 0.70, 0.10],
+            [1.00, 0.45, 0.05],
+            [1.00, 0.25, 0.05],
+            [0.90, 0.10, 0.05],
+            [0.60, 0.05, 0.30],
+        ];
+
+        self.active_debug_mode = mode;
+        self.renderer.set_debug_mode(mode);
+
+        let show_lod_legend = mode == 21;
+        {
+            let mut overlay = self.debug_overlay.lock().unwrap();
+            overlay.populate = show_lod_legend.then(|| {
+                Box::new(|overlay: &mut helio_pass_debug_overlay::DebugOverlayState| {
+                    overlay.write_text(0, 2, "VG LOD HEATMAP");
+                    for (lod, color) in LOD_COLORS.iter().enumerate() {
+                        let x = 8.0 + lod as f32 * 68.0;
+                        overlay.add_bar(x, 76.0, 20.0, 14.0, color[0], color[1], color[2], 1.0);
+                        overlay.write_small((x / 8.0) as u32 + 3, 6, &format!("LOD{lod}"));
+                    }
+                    overlay.write_text(0, 5, "LOD0 = full detail                     LOD7 = coarsest");
+                }) as Box<dyn Fn(&mut helio_pass_debug_overlay::DebugOverlayState) + Send + Sync>
+            });
+        }
+
+        if let Some(pass) = self
+            .renderer
+            .find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>()
+        {
+            pass.set_enabled(self.debug_overlay_enabled || show_lod_legend);
+        }
+    }
+
     fn build_ray(&self) -> (glam::Vec3, glam::Vec3) {
         let sz = self.window.inner_size();
         let width = sz.width as f32;

@@ -100,6 +100,9 @@ pub(crate) fn generate_lod_meshes(
     if vertices.is_empty()
         || indices.is_empty()
         || indices.len() % 3 != 0
+        || vertices
+            .iter()
+            .any(|vertex| vertex.position.iter().any(|value| !value.is_finite()))
         || indices
             .iter()
             .any(|&index| index as usize >= vertices.len())
@@ -393,6 +396,9 @@ mod tests {
 
         assert!(generate_lod_meshes(&vertices, &[0, 1]).is_empty());
         assert!(generate_lod_meshes(&vertices, &[0, 1, 3]).is_empty());
+        let mut non_finite = vertices.clone();
+        non_finite[0].position[0] = f32::NAN;
+        assert!(generate_lod_meshes(&non_finite, &[0, 1, 2]).is_empty());
         assert!(meshletize_with_indices(&vertices, &[0, 1], 0, 0)
             .0
             .is_empty());

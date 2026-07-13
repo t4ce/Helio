@@ -1,6 +1,9 @@
 use std::num::NonZeroU32;
 
-use crate::{CullUniforms, InstanceCullData, LodQuality, VgGlobals, INITIAL_INSTANCES, INITIAL_MESHLETS, MAX_TEXTURES};
+use crate::{
+    CullUniforms, InstanceCullData, LodQuality, VgGlobals, INITIAL_INSTANCES,
+    INITIAL_MESHLETS, INITIAL_OBJECTS, MAX_TEXTURES,
+};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
     DebugViewDescriptor, GpuInstanceData, PassContext, PrepareContext, RenderPass,
@@ -18,7 +21,7 @@ pub struct VirtualGeometryPass {
     pub(crate) cull_bind_group_hiz_key: Option<(usize, usize)>,
     pub(crate) cull_buf: wgpu::Buffer,
     pub(crate) draw_pipeline: wgpu::RenderPipeline,
-    pub(crate) debug_draw_pipeline: Option<wgpu::RenderPipeline>,
+    pub(crate) debug_draw_pipeline: wgpu::RenderPipeline,
     pub(crate) lod_debug_pipeline: wgpu::RenderPipeline,
     pub(crate) draw_bgl_0: wgpu::BindGroupLayout,
     pub(crate) draw_bgl_1: wgpu::BindGroupLayout,
@@ -27,15 +30,20 @@ pub struct VirtualGeometryPass {
     pub(crate) bg1_version: Option<u64>,
     pub(crate) globals_buf: wgpu::Buffer,
     pub(crate) meshlet_buf: wgpu::Buffer,
+    pub(crate) object_buf: wgpu::Buffer,
     pub(crate) instance_buf: wgpu::Buffer,
     pub(crate) instance_cull_buf: wgpu::Buffer,
     pub(crate) indirect_buf: wgpu::Buffer,
+    pub(crate) draw_metadata_buf: wgpu::Buffer,
     pub(crate) draw_count_buf: wgpu::Buffer,
     pub(crate) use_count_indirect: bool,
     pub debug_mode: u32,
     pub lod_quality: LodQuality,
     pub(crate) last_version: u64,
     pub(crate) last_meshlet_count: u32,
+    pub(crate) last_object_count: u32,
+    pub(crate) last_max_draw_count: u32,
+    pub(crate) last_dispatch_width: u32,
 }
 
 impl VirtualGeometryPass {
@@ -65,20 +73,17 @@ impl VirtualGeometryPass {
                     .replace(
                         "return textureSample(scene_textures, scene_samplers, uv);",
                         "return textureSampleLevel(scene_textures, scene_samplers, uv, 0.0);",
-                    )
-                    .replace(", @builtin(primitive_index) prim_id: u32", "")
-                    .replace(
-                        "    var h = prim_id *",
-                        "    let prim_id: u32 = 0u;\n    var h = prim_id *",
                     );
                 s.into()
             }),
         });
 
         let meshlet_buf = Self::make_meshlet_buf(device, INITIAL_MESHLETS);
+        let object_buf = Self::make_object_buf(device, INITIAL_OBJECTS);
         let instance_buf = Self::make_instance_buf(device, INITIAL_INSTANCES);
         let instance_cull_buf = Self::make_instance_cull_buf(device, INITIAL_INSTANCES);
         let indirect_buf = Self::make_indirect_buf(device, INITIAL_MESHLETS);
+        let draw_metadata_buf = Self::make_draw_metadata_buf(device, INITIAL_MESHLETS);
         let draw_count_buf = Self::make_draw_count_buf(device);
         let use_count_indirect = device
             .features()
@@ -101,6 +106,7 @@ impl VirtualGeometryPass {
         let cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("VG Cull BGL"),
             entries: &[
+                // Camera and cull uniforms.
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -121,6 +127,7 @@ impl VirtualGeometryPass {
                     },
                     count: None,
                 },
+                // Immutable shared meshlet descriptors.
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -131,6 +138,7 @@ impl VirtualGeometryPass {
                     },
                     count: None,
                 },
+                // Immutable per-object LOD ranges and bounds.
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -141,16 +149,18 @@ impl VirtualGeometryPass {
                     },
                     count: None,
                 },
+                // Instance transforms/materials.
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
                     count: None,
                 },
+                // Compacted indirect commands, parallel draw metadata, and count.
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -162,7 +172,27 @@ impl VirtualGeometryPass {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding:    6,
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding:    8,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
                         sample_type:    wgpu::TextureSampleType::Float { filterable: false },
@@ -172,13 +202,13 @@ impl VirtualGeometryPass {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding:    7,
+                    binding:    9,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 8,
+                    binding: 10,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -237,6 +267,16 @@ impl VirtualGeometryPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -247,6 +287,7 @@ impl VirtualGeometryPass {
                 wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: globals_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: instance_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: draw_metadata_buf.as_entire_binding() },
             ],
         }));
 
@@ -310,11 +351,8 @@ impl VirtualGeometryPass {
             cache: None,
         });
 
-        let debug_draw_pipeline = if device
-            .features()
-            .contains(wgpu::Features::SHADER_PRIMITIVE_INDEX)
-        {
-            Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let debug_draw_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("VG Debug Pipeline"),
                 layout: Some(&draw_pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -334,10 +372,7 @@ impl VirtualGeometryPass {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            }))
-        } else {
-            None
-        };
+            });
 
         let lod_debug_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -378,15 +413,20 @@ impl VirtualGeometryPass {
             bg1_version: None,
             globals_buf,
             meshlet_buf,
+            object_buf,
             instance_buf,
             instance_cull_buf,
             indirect_buf,
+            draw_metadata_buf,
             draw_count_buf,
             use_count_indirect,
             debug_mode: 0,
             lod_quality: LodQuality::default(),
             last_version: u64::MAX,
             last_meshlet_count: 0,
+            last_object_count: 0,
+            last_max_draw_count: 0,
+            last_dispatch_width: 1,
         }
     }
 
@@ -403,6 +443,15 @@ impl VirtualGeometryPass {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Instance Buffer"),
             size: capacity * 144,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn make_object_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Object Buffer"),
+            size: capacity * 128,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -428,6 +477,15 @@ impl VirtualGeometryPass {
         })
     }
 
+    fn make_draw_metadata_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Draw Metadata Buffer"),
+            size: capacity * std::mem::size_of::<libhelio::GpuVgDraw>() as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        })
+    }
+
     fn make_draw_count_buf(device: &wgpu::Device) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Draw Count"),
@@ -448,6 +506,7 @@ impl VirtualGeometryPass {
                 wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: self.globals_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: self.instance_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.draw_metadata_buf.as_entire_binding() },
             ],
         }));
     }
@@ -474,13 +533,25 @@ impl RenderPass for VirtualGeometryPass {
             let meshlet_capacity = self.meshlet_buf.size() / 64;
             if (vg.meshlet_count as u64) > meshlet_capacity {
                 self.meshlet_buf = Self::make_meshlet_buf(ctx.device, vg.meshlet_count as u64 * 2);
-                self.indirect_buf = Self::make_indirect_buf(ctx.device, vg.meshlet_count as u64 * 2);
+                grew = true;
+            }
+            let object_capacity = self.object_buf.size() / 128;
+            if (vg.object_count as u64) > object_capacity {
+                self.object_buf = Self::make_object_buf(ctx.device, vg.object_count as u64 * 2);
                 grew = true;
             }
             let instance_capacity = self.instance_buf.size() / 144;
-            if (vg.instance_count as u64) > instance_capacity {
-                self.instance_buf = Self::make_instance_buf(ctx.device, vg.instance_count as u64 * 2);
-                self.instance_cull_buf = Self::make_instance_cull_buf(ctx.device, vg.instance_count as u64 * 2);
+            if (vg.object_count as u64) > instance_capacity {
+                self.instance_buf = Self::make_instance_buf(ctx.device, vg.object_count as u64 * 2);
+                self.instance_cull_buf = Self::make_instance_cull_buf(ctx.device, vg.object_count as u64 * 2);
+                grew = true;
+            }
+            let indirect_capacity = self.indirect_buf.size() / 20;
+            if (vg.max_draw_count as u64) > indirect_capacity {
+                let new_capacity = vg.max_draw_count as u64 * 2;
+                self.indirect_buf = Self::make_indirect_buf(ctx.device, new_capacity);
+                self.draw_metadata_buf =
+                    Self::make_draw_metadata_buf(ctx.device, new_capacity);
                 grew = true;
             }
 
@@ -489,6 +560,7 @@ impl RenderPass for VirtualGeometryPass {
             }
 
             ctx.write_buffer(&self.meshlet_buf, 0, vg.meshlets);
+            ctx.write_buffer(&self.object_buf, 0, vg.objects);
             ctx.write_buffer(&self.instance_buf, 0, vg.instances);
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
@@ -500,22 +572,32 @@ impl RenderPass for VirtualGeometryPass {
 
             self.last_version = vg.buffer_version;
             self.last_meshlet_count = vg.meshlet_count;
+            self.last_object_count = vg.object_count;
+            self.last_max_draw_count = vg.max_draw_count;
         }
 
-        if self.last_meshlet_count == 0 {
+        if self.last_object_count == 0 || self.last_max_draw_count == 0 {
             return Ok(());
         }
 
-        let lod_thresholds = self.lod_quality.thresholds();
         let max_dim = ctx.width.max(ctx.height);
         let hiz_mip_count = (u32::BITS - max_dim.leading_zeros()).max(1);
+        let max_dispatch = ctx.device.limits().max_compute_workgroups_per_dimension;
+        self.last_dispatch_width = self.last_object_count.min(max_dispatch).max(1);
+        let dispatch_height = self.last_object_count.div_ceil(self.last_dispatch_width);
+        assert!(
+            dispatch_height <= max_dispatch,
+            "virtual geometry object dispatch exceeds the device's 2D workgroup grid"
+        );
         let cull_uni = CullUniforms {
-            meshlet_count: self.last_meshlet_count,
+            object_count: self.last_object_count,
             screen_width:  ctx.width,
             screen_height: ctx.height,
             hiz_mip_count,
-            lod_thresholds,
-            _pad3: 0.0,
+            draw_capacity: self.last_max_draw_count,
+            lod_error_threshold_px: self.lod_quality.max_error_pixels(),
+            dispatch_width: self.last_dispatch_width,
+            _pad0: 0,
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
@@ -599,7 +681,10 @@ impl RenderPass for VirtualGeometryPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if self.last_meshlet_count == 0 || ctx.resources.vg.is_none() {
+        if self.last_object_count == 0
+            || self.last_max_draw_count == 0
+            || ctx.resources.vg.is_none()
+        {
             return Ok(());
         }
 
@@ -616,12 +701,14 @@ impl RenderPass for VirtualGeometryPass {
                     wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.camera.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: self.cull_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: self.meshlet_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: self.instance_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: self.indirect_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: self.draw_count_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(hiz_view) },
-                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(hiz_sampler) },
-                    wgpu::BindGroupEntry { binding: 8, resource: self.instance_cull_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: self.object_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: self.instance_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: self.indirect_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: self.draw_metadata_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: self.draw_count_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(hiz_view) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(hiz_sampler) },
+                    wgpu::BindGroupEntry { binding: 10, resource: self.instance_cull_buf.as_entire_binding() },
                 ],
             }));
             self.cull_bind_group_hiz_key = Some(hiz_key);
@@ -632,7 +719,8 @@ impl RenderPass for VirtualGeometryPass {
         let Some(draw_bg1) = self.draw_bg_1.as_ref() else { return Ok(()); };
         let Some(main_scene) = ctx.resources.main_scene.read("VirtualGeometry") else { return Ok(()); };
 
-        let meshlet_count = self.last_meshlet_count;
+        let object_count = self.last_object_count;
+        let max_draw_count = self.last_max_draw_count;
 
         unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&self.draw_count_buf, 0, None);
         if !self.use_count_indirect {
@@ -647,14 +735,18 @@ impl RenderPass for VirtualGeometryPass {
                 });
             cpass.set_pipeline(&self.cull_pipeline);
             cpass.set_bind_group(0, cull_bg, &[]);
-            cpass.dispatch_workgroups((meshlet_count + 63) / 64, 1, 1);
+            cpass.dispatch_workgroups(
+                self.last_dispatch_width,
+                object_count.div_ceil(self.last_dispatch_width),
+                1,
+            );
         }
 
         {
             let rpass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
 
             let active_pipeline = match self.debug_mode {
-                20 => self.debug_draw_pipeline.as_ref().unwrap_or(&self.draw_pipeline),
+                20 => &self.debug_draw_pipeline,
                 21 => &self.lod_debug_pipeline,
                 _ => &self.draw_pipeline,
             };
@@ -664,12 +756,12 @@ impl RenderPass for VirtualGeometryPass {
             rpass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
             rpass.set_index_buffer(main_scene.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
             if self.use_count_indirect {
-                rpass.multi_draw_indexed_indirect_count(&self.indirect_buf, 0, &self.draw_count_buf, 0, meshlet_count);
+                rpass.multi_draw_indexed_indirect_count(&self.indirect_buf, 0, &self.draw_count_buf, 0, max_draw_count);
             } else {
                 #[cfg(not(target_arch = "wasm32"))]
-                rpass.multi_draw_indexed_indirect(&self.indirect_buf, 0, meshlet_count);
+                rpass.multi_draw_indexed_indirect(&self.indirect_buf, 0, max_draw_count);
                 #[cfg(target_arch = "wasm32")]
-                for i in 0..meshlet_count {
+                for i in 0..max_draw_count {
                     rpass.draw_indexed_indirect(&self.indirect_buf, i as u64 * 20);
                 }
             }
@@ -693,8 +785,8 @@ impl RenderPass for VirtualGeometryPass {
 
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {
         static VIEWS: &[DebugViewDescriptor] = &[
-            DebugViewDescriptor { name: "VG Mesh Triangles", debug_mode: 20, description: "Per-meshlet solid colour — visualises meshlet boundaries" },
-            DebugViewDescriptor { name: "VG LOD Heatmap",    debug_mode: 21, description: "Colour by LOD level: green=LOD0 through red=LOD7" },
+            DebugViewDescriptor { name: "VG Meshlets", debug_mode: 20, description: "One solid colour per meshlet — visualises cluster boundaries" },
+            DebugViewDescriptor { name: "VG LOD Heatmap",    debug_mode: 21, description: "One flat colour per object LOD; green=LOD0 through magenta=LOD7" },
         ];
         VIEWS
     }

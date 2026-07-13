@@ -7,16 +7,18 @@ use std::mem;
 
 // ── Mirror private types ──────────────────────────────────────────────────────
 
-/// Mirrors private CullUniforms (48 bytes: 16 header + 32 thresholds).
+/// Mirrors private CullUniforms (32 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CullUniforms {
-    meshlet_count: u32,
+    object_count: u32,
+    screen_width: u32,
+    screen_height: u32,
+    hiz_mip_count: u32,
+    draw_capacity: u32,
+    lod_error_threshold_px: f32,
+    dispatch_width: u32,
     _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
-    lod_thresholds: [f32; 7],
-    _pad3: f32,
 }
 
 /// Mirrors private VgGlobals (96 bytes).
@@ -39,6 +41,7 @@ struct VgGlobals {
 
 const WORKGROUP_SIZE: u32 = 64;
 const INITIAL_MESHLETS: u64 = 1024;
+const INITIAL_OBJECTS: u64 = 256;
 const INITIAL_INSTANCES: u64 = 256;
 
 #[test]
@@ -54,11 +57,24 @@ fn cull_shader_parses_and_validates() {
         .expect("VG cull shader must validate");
 }
 
+#[test]
+fn gbuffer_shader_parses_and_validates() {
+    let source = include_str!("../shaders/vg_gbuffer.wgsl");
+    let module = wgpu::naga::front::wgsl::parse_str(source).expect("VG draw shader must parse");
+    let mut validator = wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::all(),
+    );
+    validator
+        .validate(&module)
+        .expect("VG draw shader must validate");
+}
+
 // ── CullUniforms layout tests ─────────────────────────────────────────────────
 
 #[test]
-fn cull_uniforms_size_is_48() {
-    assert_eq!(mem::size_of::<CullUniforms>(), 48);
+fn cull_uniforms_size_is_32() {
+    assert_eq!(mem::size_of::<CullUniforms>(), 32);
 }
 
 #[test]
@@ -86,6 +102,11 @@ fn initial_meshlets_is_1024() {
 }
 
 #[test]
+fn initial_objects_is_256() {
+    assert_eq!(INITIAL_OBJECTS, 256u64);
+}
+
+#[test]
 fn initial_instances_is_256() {
     assert_eq!(INITIAL_INSTANCES, 256u64);
 }
@@ -98,15 +119,19 @@ fn workgroup_size_is_64() {
 }
 
 #[test]
-fn dispatch_groups_ceil_division() {
-    fn ceil_div(n: u32, d: u32) -> u32 {
-        (n + d - 1) / d
+fn dispatch_uses_one_workgroup_per_object_across_a_2d_grid() {
+    fn grid(object_count: u32, limit: u32) -> (u32, u32) {
+        if object_count == 0 {
+            return (0, 0);
+        }
+        let width = object_count.min(limit);
+        (width, object_count.div_ceil(width))
     }
-    assert_eq!(ceil_div(64, 64), 1);
-    assert_eq!(ceil_div(65, 64), 2);
-    assert_eq!(ceil_div(128, 64), 2);
-    assert_eq!(ceil_div(1024, 64), 16);
-    assert_eq!(ceil_div(0, 64), 0);
+
+    assert_eq!(grid(1, 65_535), (1, 1));
+    assert_eq!(grid(65_535, 65_535), (65_535, 1));
+    assert_eq!(grid(65_536, 65_535), (65_535, 2));
+    assert_eq!(grid(0, 65_535), (0, 0));
 }
 
 // ── Meshlet visibility / LOD threshold tests ────────────────────────────────
