@@ -161,7 +161,11 @@ path = "vhs_backrooms.rs"
 
 [[bin]]
 name = "voxel_demo"
-path = "voxel_demo.rs"
+path = "voxel/mesh_demo.rs"
+
+[[bin]]
+name = "voxel_demo_raymarch"
+path = "voxel/raymarch_demo.rs"
 
 
 [dependencies]

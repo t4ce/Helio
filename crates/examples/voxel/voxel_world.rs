@@ -1,14 +1,23 @@
-//! CPU-side procedural voxel world + brick baker for `voxel_demo`.
+//! CPU-side procedural voxel world + brick baker, shared by `voxel_demo`
+//! (mesh-rendered, via `VoxelMeshPass`) and `voxel_demo_raymarch`
+//! (per-frame raymarched, via `VoxelRayMarchPass`).
 //!
-//! Rendering goes through `VoxelMeshPass` (mesh mode): this module owns the
-//! voxel material data on the CPU, generates it procedurally, bakes each
-//! brick into `VoxelMeshPass`'s `brick_meta_buf`/`voxel_data_buf` layout, and
-//! the caller calls `VoxelMeshPass::mark_dirty()` per touched brick so its
-//! marching-cubes compute pass re-extracts a real triangle mesh — rendered
-//! through the normal rasterization pipeline instead of a per-frame raymarch.
+//! Both passes read a dense per-volume brick grid, but from different GPU
+//! buffers with different layouts:
+//! - `VoxelMeshPass` owns its own `brick_meta_buf`/`voxel_data_buf`, storing
+//!   each brick as a **padded 9x9x9** block (`upload_*_mesh`) so its
+//!   marching-cubes extract pass can read one voxel of +X/+Y/+Z halo and
+//!   close the seam between adjacent bricks (see `voxel_surface_extract.wgsl`
+//!   /`CELLS_PER_DIM`). It re-extracts real triangles on `mark_dirty()`.
+//! - `VoxelRayMarchPass` reads the *shared* `GpuScene::voxel_brick_pool`/
+//!   `voxel_data_pool` directly (`upload_*_raymarch`), storing each brick as
+//!   the raw **8x8x8** the DDA marcher indexes every frame — nothing in the
+//!   engine bakes edits into that pool on its own (the edit ring/CPU octree
+//!   exist but no compute pass consumes them), so this module owns that data
+//!   on the CPU and uploads it directly via `queue.write_buffer`.
 //!
 //! The grid is always a dense 64^3 voxel volume (8 bricks per axis of 8
-//! voxels each, matching `VOXEL_MESH_BRICK_VOXEL_WORDS`/`BRICK_SIZE`).
+//! voxels each — fixed GPU-side by the engine's `BRICK_SIZE` constant).
 
 use std::sync::Arc;
 
@@ -22,6 +31,11 @@ pub const GRID_DIM: u32 = BRICKS_PER_AXIS * BRICK_DIM; // 64
 pub const PADDED_DIM: u32 = BRICK_DIM + 1; // 9
 pub const PADDED_VOXELS_PER_BRICK: usize = (PADDED_DIM * PADDED_DIM * PADDED_DIM) as usize; // 729
 pub const WORDS_PER_BRICK: usize = PADDED_VOXELS_PER_BRICK.div_ceil(4); // 183
+
+// VoxelRayMarchPass indexes the raw (unpadded) 8x8x8 brick directly —
+// see voxel_raymarch.wgsl::read_voxel.
+pub const RAYMARCH_VOXELS_PER_BRICK: usize = (BRICK_DIM * BRICK_DIM * BRICK_DIM) as usize; // 512
+pub const RAYMARCH_WORDS_PER_BRICK: usize = RAYMARCH_VOXELS_PER_BRICK / 4; // 128
 
 // ── materials ───────────────────────────────────────────────────────────────
 
@@ -297,6 +311,73 @@ impl VoxelWorld {
             brick_meta_buf,
             voxel_data_buf,
             voxel_size,
+            BrickRange {
+                min: [0, 0, 0],
+                max: [BRICKS_PER_AXIS - 1, BRICKS_PER_AXIS - 1, BRICKS_PER_AXIS - 1],
+            },
+        )
+    }
+
+    /// Bakes a brick's raw (unpadded) 8x8x8 voxel block for VoxelRayMarchPass.
+    /// Matches voxel_raymarch.wgsl::read_voxel's `linear = z*64 + y*8 + x`.
+    fn bake_brick_raymarch(&self, bx: u32, by: u32, bz: u32, data_out: &mut [u32; RAYMARCH_WORDS_PER_BRICK]) -> bool {
+        let mut occupied = false;
+        for lz in 0..BRICK_DIM {
+            for ly in 0..BRICK_DIM {
+                for lx in 0..BRICK_DIM {
+                    let gx = bx * BRICK_DIM + lx;
+                    let gy = by * BRICK_DIM + ly;
+                    let gz = bz * BRICK_DIM + lz;
+                    let mat = self.materials[Self::idx(gx, gy, gz)];
+                    if mat != MAT_AIR {
+                        occupied = true;
+                    }
+                    let linear = (lz * BRICK_DIM * BRICK_DIM + ly * BRICK_DIM + lx) as usize;
+                    let word = linear / 4;
+                    let byte_in_word = linear % 4;
+                    data_out[word] |= (mat as u32) << (byte_in_word * 8);
+                }
+            }
+        }
+        occupied
+    }
+
+    /// Re-bakes and uploads the bricks touched by a `BrickRange` into the
+    /// scene's shared `voxel_brick_pool`/`voxel_data_pool` (VoxelRayMarchPass).
+    /// GpuBrickMeta here is a single packed word: occupancy in the top byte,
+    /// data_offset in the low 24 bits — see voxel_raymarch.wgsl's meta mask.
+    pub fn upload_range_raymarch(&self, queue: &Arc<wgpu::Queue>, brick_pool: &wgpu::Buffer, data_pool: &wgpu::Buffer, range: BrickRange) {
+        for bz in range.min[2]..=range.max[2] {
+            for by in range.min[1]..=range.max[1] {
+                for bx in range.min[0]..=range.max[0] {
+                    let brick_idx = bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS + by * BRICKS_PER_AXIS + bx;
+                    let mut brick_words = [0u32; RAYMARCH_WORDS_PER_BRICK];
+                    let occupied = self.bake_brick_raymarch(bx, by, bz, &mut brick_words);
+
+                    let data_offset = brick_idx * RAYMARCH_WORDS_PER_BRICK as u32;
+                    let meta_word = if occupied { (1u32 << 24) | data_offset } else { 0 };
+
+                    queue.write_buffer(
+                        brick_pool,
+                        (brick_idx as u64) * 2 * 4,
+                        bytemuck::bytes_of(&meta_word),
+                    );
+                    queue.write_buffer(
+                        data_pool,
+                        (data_offset as u64) * 4,
+                        bytemuck::cast_slice(&brick_words),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Uploads a full bake to the shared GPU voxel pools. See `upload_range_raymarch`.
+    pub fn upload_all_raymarch(&self, queue: &Arc<wgpu::Queue>, brick_pool: &wgpu::Buffer, data_pool: &wgpu::Buffer) {
+        self.upload_range_raymarch(
+            queue,
+            brick_pool,
+            data_pool,
             BrickRange {
                 min: [0, 0, 0],
                 max: [BRICKS_PER_AXIS - 1, BRICKS_PER_AXIS - 1, BRICKS_PER_AXIS - 1],
