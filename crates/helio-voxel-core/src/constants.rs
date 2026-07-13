@@ -1,0 +1,12 @@
+pub const BRICK_SIZE: u32 = 8;
+pub const BRICK_VOXEL_COUNT: usize = (BRICK_SIZE as usize).pow(3);
+pub const PADDED_BRICK_SIZE: u32 = BRICK_SIZE + 1;
+pub const PADDED_BRICK_VOXEL_COUNT: usize = (PADDED_BRICK_SIZE as usize).pow(3);
+pub const MAX_BRICKS_PER_VOLUME: u32 = 262144;
+pub const MAX_VOLUMES: u32 = 1024;
+pub const EDIT_RING_CAPACITY: u32 = 1024;
+pub const MAX_PALETTE_SIZE: u32 = 256;
+pub const MAX_SURFACE_VERTS_PER_BRICK: u32 = 256;
+pub const MAX_SURFACE_INDICES_PER_BRICK: u32 = 768;
+pub const BRICK_EMPTY: u32 = 0xFFFFFFFF;
+pub const BRICK_SOLID: u32 = 0xFFFFFFFE;

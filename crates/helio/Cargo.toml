@@ -20,6 +20,7 @@ thiserror = { workspace = true }
 wgpu = { workspace = true, features = ["web", "webgpu", "wgsl", "dx12", "vulkan"] }
 pollster = { workspace = true }
 quark = { workspace = true, package = "quark" }
+helio-voxel-core = { workspace = true }
 helio-bake = { path = "../helio-bake", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 meshopt = "0.6.2"

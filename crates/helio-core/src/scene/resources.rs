@@ -157,4 +157,11 @@ pub struct SceneResources<'a> {
 
     /// Component registry for type-erased storage access.
     pub components: &'a ComponentRegistry,
+
+    pub voxel_volumes: &'a wgpu::Buffer,
+    pub voxel_edit_ring: &'a wgpu::Buffer,
+    pub voxel_brick_pool: &'a wgpu::Buffer,
+    pub voxel_data_pool: &'a wgpu::Buffer,
+    pub voxel_volume_count: u32,
+    pub voxel_volumes_generation: u64,
 }

@@ -159,6 +159,9 @@ path = "indoor_cathedral_pp_volumes.rs"
 name = "vhs_backrooms"
 path = "vhs_backrooms.rs"
 
+[[bin]]
+name = "voxel_demo"
+path = "voxel_demo.rs"
 
 
 [dependencies]
@@ -172,6 +175,8 @@ helio-pass-corona = { workspace = true }
 helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
 helio-pass-postprocess = { path = "../helio-pass-postprocess" }
+helio-pass-voxel-raymarch = { path = "../helio-pass-voxel-raymarch" }
+helio-voxel-core = { path = "../helio-voxel-core" }
 helio-default-graphs = { path = "../helio-default-graphs" }
 rapier3d = "0.24"
 rapier_testbed3d = "0.24"

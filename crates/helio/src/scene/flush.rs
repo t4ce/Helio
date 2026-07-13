@@ -259,6 +259,22 @@ impl Scene {
             self.rebuild_vg_buffers();
             self.vg_objects_dirty = false;
         }
+
+        // ── Voxel volume flush ───────────────────────────────────────────────
+        {
+            let mut any_dirty = false;
+            for (_id, record) in self.voxel_volumes.iter_mut() {
+                if record.dirty {
+                    record.upload_to_gpu(&mut self.gpu_scene, record.gpu_slot);
+                    record.dirty = false;
+                    any_dirty = true;
+                }
+            }
+            if any_dirty {
+                self.gpu_scene.voxel_volumes_generation += 1;
+            }
+        }
+
         self.gpu_scene.flush();
     }
 }

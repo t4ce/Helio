@@ -2105,6 +2105,8 @@ dependencies = [
  "helio-pass-sdf",
  "helio-pass-taa",
  "helio-pass-terra-forge",
+ "helio-pass-voxel-raymarch",
+ "helio-voxel-core",
  "image",
  "libhelio",
  "log",
@@ -2592,6 +2594,7 @@ dependencies = [
  "helio-bake",
  "helio-core",
  "helio-pass-postprocess",
+ "helio-voxel-core",
  "image",
  "libhelio",
  "log",
@@ -2648,6 +2651,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.0",
+ "helio-voxel-core",
  "libhelio",
  "pollster 0.4.0",
  "thiserror 2.0.18",
@@ -3009,6 +3013,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-voxel-mesh"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.0",
+ "helio-core",
+ "helio-voxel-core",
+ "libhelio",
+ "log",
+ "wgpu 28.0.0",
+]
+
+[[package]]
+name = "helio-pass-voxel-raymarch"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.0",
+ "helio-core",
+ "helio-voxel-core",
+ "libhelio",
+ "log",
+ "wgpu 28.0.0",
+]
+
+[[package]]
 name = "helio-pass-water-caustics"
 version = "0.1.0"
 dependencies = [
@@ -3034,6 +3064,14 @@ dependencies = [
  "helio-core",
  "libhelio",
  "wgpu 28.0.0",
+]
+
+[[package]]
+name = "helio-voxel-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.0",
 ]
 
 [[package]]

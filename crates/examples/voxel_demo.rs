@@ -1,0 +1,461 @@
+//! Voxel Demo — procedurally generated voxel world with DDA ray marching.
+//!
+//! Controls:
+//!   Mouse click        – grab cursor / look around
+//!   W/A/S/D             – fly
+//!   Space/Shift         – up / down
+//!   Left mouse button   – add voxel sphere
+//!   Right mouse button  – subtract voxel sphere
+//!   1-4                 – select material (grass/dirt/stone/ore)
+//!   R                   – regenerate the world with a new random seed
+//!   Escape              – release cursor / quit
+
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Instant;
+
+use glam::{EulerRot, Quat, Vec3};
+use helio::{
+    required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig, Scene,
+    RenderGraph, VoxelVolumeDescriptor, VoxelMode, VoxelVolumeId,
+};
+use helio_pass_postprocess::PostProcessPass;
+use helio_pass_voxel_raymarch::VoxelRayMarchPass;
+use helio_voxel_core::GpuVoxelMaterial;
+use winit::{
+    application::ApplicationHandler,
+    dpi::PhysicalPosition,
+    event::*,
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    window::{CursorGrabMode, Window, WindowId},
+};
+
+mod voxel_world;
+use voxel_world::{VoxelWorld, GRID_DIM};
+
+// ── constants ─────────────────────────────────────────────────────────────────
+
+const LOOK_SENS: f32 = 0.002;
+const FLY_SPEED: f32 = 10.0;
+const DRAG: f32 = 6.0;
+// The GPU-side voxel volume is always a dense 64^3 grid (fixed by the engine's
+// BRICK_SIZE constant); `VOXEL_SIZE` just scales that grid into world units.
+const VOXEL_SIZE: f32 = 0.75;
+const ROOT_EXTENT: f32 = (GRID_DIM as f32) * VOXEL_SIZE;
+
+// ── app ───────────────────────────────────────────────────────────────────────
+
+struct App {
+    state: Option<AppState>,
+}
+
+struct AppState {
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    surface_format: wgpu::TextureFormat,
+    renderer: Renderer,
+    last_frame: Instant,
+    cam_pos: Vec3,
+    yaw: f32,
+    pitch: f32,
+    velocity: Vec3,
+    keys: HashSet<KeyCode>,
+    cursor_grabbed: bool,
+    mouse_delta: (f32, f32),
+    current_material: u8,
+    vol_id: VoxelVolumeId,
+    world: VoxelWorld,
+    world_seed: u32,
+}
+
+impl AppState {
+    fn update(&mut self, dt: f32) {
+        let (dx, dy) = self.mouse_delta;
+        self.mouse_delta = (0.0, 0.0);
+        self.yaw -= dx * LOOK_SENS;
+        self.pitch = (self.pitch - dy * LOOK_SENS).clamp(-1.5, 1.5);
+
+        let orientation = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
+        let forward = orientation * -Vec3::Z;
+        let right = orientation * Vec3::X;
+
+        let mut accel = Vec3::ZERO;
+        if self.keys.contains(&KeyCode::KeyW) { accel += forward; }
+        if self.keys.contains(&KeyCode::KeyS) { accel -= forward; }
+        if self.keys.contains(&KeyCode::KeyA) { accel -= right; }
+        if self.keys.contains(&KeyCode::KeyD) { accel += right; }
+        if self.keys.contains(&KeyCode::Space) { accel += Vec3::Y; }
+        if self.keys.contains(&KeyCode::ShiftLeft) { accel -= Vec3::Y; }
+
+        self.velocity += accel * FLY_SPEED * dt;
+        self.velocity /= 1.0 + DRAG * dt;
+        self.cam_pos += self.velocity * dt;
+    }
+
+    fn camera(&self, width: u32, height: u32) -> Camera {
+        let orientation = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
+        let target = self.cam_pos + orientation * -Vec3::Z;
+        let up = orientation * Vec3::Y;
+        Camera::perspective_look_at(
+            self.cam_pos,
+            target,
+            up,
+            std::f32::consts::FRAC_PI_4,
+            width as f32 / height.max(1) as f32,
+            0.01,
+            2000.0,
+        )
+    }
+
+    /// Converts a world-space position into the voxel volume's grid coordinates.
+    /// The volume is centered on the world origin, spanning `[-GRID_DIM/2, GRID_DIM/2)`
+    /// voxels scaled by `VOXEL_SIZE` (see `voxel_world` module docs for why).
+    fn world_to_grid(pos: Vec3) -> [f32; 3] {
+        let half = GRID_DIM as f32 / 2.0;
+        [
+            pos.x / VOXEL_SIZE + half,
+            pos.y / VOXEL_SIZE + half,
+            pos.z / VOXEL_SIZE + half,
+        ]
+    }
+
+    fn place_edit(
+        add: bool,
+        material: u8,
+        cam_pos: Vec3,
+        yaw: f32,
+        pitch: f32,
+        world: &mut VoxelWorld,
+        queue: &Arc<wgpu::Queue>,
+        brick_pool: &wgpu::Buffer,
+        data_pool: &wgpu::Buffer,
+    ) {
+        let orientation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+        let forward = orientation * -Vec3::Z;
+        let center_world = cam_pos + forward * 5.0;
+        let center_grid = Self::world_to_grid(center_world);
+        let radius_grid = 2.0 / VOXEL_SIZE;
+
+        if let Some(range) = world.paint_sphere(center_grid, radius_grid, material, add) {
+            world.upload_range(queue, brick_pool, data_pool, range);
+        }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.is_some() { return; }
+
+        let attrs = Window::default_attributes()
+            .with_title("Helio Voxel Demo")
+            .with_inner_size(winit::dpi::PhysicalSize::new(1280, 720));
+        let window = Arc::new(event_loop.create_window(attrs).unwrap());
+
+        let instance = wgpu::Instance::default();
+        let surface = instance.create_surface(window.clone()).unwrap();
+
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+        }))
+        .expect("No suitable GPU adapter");
+
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: required_wgpu_features(adapter.features()),
+                required_limits: required_wgpu_limits(adapter.limits()),
+                ..Default::default()
+            },
+        ))
+        .expect("Device request failed");
+
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+
+        device.on_uncaptured_error(Arc::new(|error| {
+            log::error!("wgpu uncaptured error: {}", error);
+        }));
+
+        let size = window.inner_size();
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps.formats.iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
+
+        surface.configure(
+            &device,
+            &wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: surface_format,
+                width: size.width,
+                height: size.height,
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: caps.alpha_modes[0],
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            },
+        );
+
+        // ── Renderer + custom graph with voxel pass ──────────────────────────
+        let config = RendererConfig::new(size.width, size.height, surface_format);
+        let mut scene = Scene::new(device.clone(), queue.clone());
+        let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Camera Buffer"),
+            size: std::mem::size_of::<helio::DebugCameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Stats Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let debug_state = Arc::new(std::sync::Mutex::new(helio::DebugDrawState::default()));
+
+        // Create a voxel volume with some initial structure
+        let voxel_desc = VoxelVolumeDescriptor {
+            voxel_size: VOXEL_SIZE,
+            root_extent: ROOT_EXTENT,
+            local_to_world: glam::Mat4::IDENTITY,
+            movability: Some(libhelio::Movability::Stationary),
+            mode: Some(VoxelMode::Dynamic),
+            material_palette: vec![
+                GpuVoxelMaterial { color: [0.0, 0.0, 0.0], roughness: 1.0, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // air (unused)
+                GpuVoxelMaterial { color: [0.3, 0.7, 0.25], roughness: 0.8, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // grass
+                GpuVoxelMaterial { color: [0.45, 0.3, 0.15], roughness: 0.9, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // dirt
+                GpuVoxelMaterial { color: [0.5, 0.5, 0.52], roughness: 0.85, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // stone
+                GpuVoxelMaterial { color: [0.9, 0.75, 0.2], roughness: 0.4, metalness: 0.8, emissive: 0.0, _pad: [0; 2] }, // ore
+            ],
+        };
+        let vol_id = scene.insert_voxel_volume(voxel_desc).expect("Failed to create voxel volume");
+
+        // Procedurally generate the world on the CPU and bake it straight to the
+        // shared GPU voxel pools (see voxel_world.rs for why this bypasses
+        // Scene::edit_voxel_volume).
+        let world_seed = 1;
+        let mut world = VoxelWorld::empty();
+        world.generate(world_seed);
+        world.upload_all(&queue, &scene.gpu_scene().voxel_brick_pool, &scene.gpu_scene().voxel_data_pool);
+
+        // Build a custom graph with VoxelRayMarchPass.
+        // VoxelRayMarchPass only writes the intermediate "pre_aa" resource, so a
+        // terminal pass is required to blit it onto the actual swapchain target —
+        // without one, the surface texture is never written and shows uninitialized
+        // GPU memory (flickering magenta/garbage).
+        let mut graph = RenderGraph::new(&device, &queue);
+        let voxel_rm_pass = VoxelRayMarchPass::new(&device, surface_format);
+        graph.add_pass(Box::new(voxel_rm_pass));
+        graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
+            &device, &queue, size.width, size.height, surface_format, None,
+        )));
+        graph.lock(size.width, size.height);
+
+        let renderer = Renderer::new(
+            device.clone(), queue.clone(),
+            config.surface_format, config.width, config.height, config.render_scale,
+            config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+        );
+
+        self.state = Some(AppState {
+            window,
+            surface,
+            device,
+            queue,
+            surface_format,
+            renderer,
+            last_frame: Instant::now(),
+            cam_pos: Vec3::new(0.0, 4.0, 20.0),
+            yaw: 0.0,
+            pitch: -0.2,
+            velocity: Vec3::ZERO,
+            keys: HashSet::new(),
+            cursor_grabbed: false,
+            mouse_delta: (0.0, 0.0),
+            current_material: 1,
+            vol_id,
+            world,
+            world_seed,
+        });
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        let Some(state) = &mut self.state else { return };
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::Escape),
+                    ..
+                },
+                ..
+            } => {
+                if state.cursor_grabbed {
+                    state.cursor_grabbed = false;
+                    state.window.set_cursor_visible(true);
+                    let _ = state.window.set_cursor_grab(CursorGrabMode::None);
+                } else {
+                    event_loop.exit();
+                }
+            }
+
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(code),
+                    ..
+                },
+                ..
+            } => {
+                let _ = state.keys.insert(code);
+                match code {
+                    KeyCode::Digit1 => state.current_material = 1,
+                    KeyCode::Digit2 => state.current_material = 2,
+                    KeyCode::Digit3 => state.current_material = 3,
+                    KeyCode::Digit4 => state.current_material = 4,
+                    KeyCode::KeyR => {
+                        state.world_seed = state.world_seed.wrapping_add(1).wrapping_mul(2654435761).wrapping_add(1);
+                        state.world.generate(state.world_seed);
+                        let scene = state.renderer.scene();
+                        state.world.upload_all(
+                            &state.queue,
+                            &scene.gpu_scene().voxel_brick_pool,
+                            &scene.gpu_scene().voxel_data_pool,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    state: ElementState::Released,
+                    physical_key: PhysicalKey::Code(code),
+                    ..
+                },
+                ..
+            } => {
+                state.keys.remove(&code);
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } if !state.cursor_grabbed => {
+                let ok = state.window
+                    .set_cursor_grab(CursorGrabMode::Confined)
+                    .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
+                    .is_ok();
+                if ok {
+                    state.cursor_grabbed = true;
+                    state.window.set_cursor_visible(false);
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } if state.cursor_grabbed => {
+                let mat = state.current_material;
+                let pos = state.cam_pos;
+                let yaw = state.yaw;
+                let pitch = state.pitch;
+                let scene = state.renderer.scene();
+                let (brick_pool, data_pool) = (
+                    scene.gpu_scene().voxel_brick_pool.clone(),
+                    scene.gpu_scene().voxel_data_pool.clone(),
+                );
+                AppState::place_edit(true, mat, pos, yaw, pitch, &mut state.world, &state.queue, &brick_pool, &data_pool);
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } if state.cursor_grabbed => {
+                let mat = state.current_material;
+                let pos = state.cam_pos;
+                let yaw = state.yaw;
+                let pitch = state.pitch;
+                let scene = state.renderer.scene();
+                let (brick_pool, data_pool) = (
+                    scene.gpu_scene().voxel_brick_pool.clone(),
+                    scene.gpu_scene().voxel_data_pool.clone(),
+                );
+                AppState::place_edit(false, mat, pos, yaw, pitch, &mut state.world, &state.queue, &brick_pool, &data_pool);
+            }
+
+            WindowEvent::CursorMoved {
+                position: pos,
+                ..
+            } if state.cursor_grabbed => {
+                let center = (
+                    state.window.inner_size().width as f64 / 2.0,
+                    state.window.inner_size().height as f64 / 2.0,
+                );
+                state.mouse_delta.0 += (pos.x - center.0) as f32;
+                state.mouse_delta.1 += (pos.y - center.1) as f32;
+                let _ = state.window.set_cursor_position(PhysicalPosition::new(center.0 as i32, center.1 as i32));
+            }
+
+            WindowEvent::RedrawRequested => {
+                let now = Instant::now();
+                let dt = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
+                state.last_frame = now;
+                state.update(dt);
+
+                let size = state.window.inner_size();
+                let camera = state.camera(size.width, size.height);
+
+                let output = match state.surface.get_current_texture() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::warn!("surface error: {:?}", e);
+                        return;
+                    }
+                };
+                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                if let Err(e) = state.renderer.render(&camera, &view) {
+                    log::error!("render error: {:?}", e);
+                }
+                output.present();
+                state.window.request_redraw();
+            }
+
+            _ => {}
+        }
+    }
+
+    fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
+        let Some(state) = &mut self.state else { return };
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            if state.cursor_grabbed {
+                state.mouse_delta.0 += dx as f32;
+                state.mouse_delta.1 += dy as f32;
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+        if let Some(state) = &self.state {
+            state.window.request_redraw();
+        }
+    }
+}
+
+fn main() {
+    env_logger::init();
+    let event_loop = EventLoop::new().unwrap();
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    let mut app = App { state: None };
+    event_loop.run_app(&mut app).unwrap();
+}

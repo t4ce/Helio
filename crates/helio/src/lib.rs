@@ -25,7 +25,7 @@ pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{
     LightId, MaterialId, MeshId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId,
-    VirtualObjectId, WaterHitboxId, WaterVolumeId,
+    VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
@@ -40,7 +40,8 @@ pub use renderer::{
 };
 pub use scene::{
     Camera, ObjectDescriptor, PickableObject, Result as SceneResult, Scene, SceneActor,
-    SceneActorId, SceneActorTrait, SceneError, WaterHitboxActor, WaterHitboxDescriptor,
+    SceneActorId, SceneActorTrait, SceneError, VoxelMode, VoxelVolumeDescriptor,
+    WaterHitboxActor, WaterHitboxDescriptor,
     WaterVolumeActor, WaterVolumeDescriptor,
 };
 pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};

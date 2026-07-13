@@ -84,6 +84,7 @@ mod resources;
 mod stats;
 mod types;
 mod virtual_geometry;
+mod voxel;
 mod water;
 
 pub use actor::{
@@ -93,5 +94,6 @@ pub use actor::{
 pub use camera::Camera;
 pub use core::Scene;
 pub use errors::*;
-pub use types::{ObjectDescriptor, PickableObject};
+pub use types::{ObjectDescriptor, PickableObject, VoxelVolumeDescriptor};
+pub use voxel::VoxelMode;
 
