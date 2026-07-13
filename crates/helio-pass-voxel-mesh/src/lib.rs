@@ -6,6 +6,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
+    graph::{ResourceBuilder, ResourceSize},
     PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use helio_voxel_core::{
@@ -33,6 +34,15 @@ struct DirtyBrick {
     origin_size: [f32; 4], // xyz = world origin, w = voxel size
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MeshletParams {
+    light_count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
 // ── Pass ──────────────────────────────────────────────────────────────────────
 
 pub struct VoxelMeshPass {
@@ -44,7 +54,8 @@ pub struct VoxelMeshPass {
     render_pipeline: wgpu::RenderPipeline,
     render_bgl: wgpu::BindGroupLayout,
     render_bind_group: Option<wgpu::BindGroup>,
-    render_bind_group_key: Option<usize>,
+    render_bind_group_key: Option<(usize, usize)>,
+    meshlet_params_buf: wgpu::Buffer,
 
     // GPU buffers
     brick_meta_buf: wgpu::Buffer,
@@ -55,9 +66,6 @@ pub struct VoxelMeshPass {
     indirect_buf: wgpu::Buffer,
     dirty_brick_buf: wgpu::Buffer,
 
-    // Owned color attachment
-    color_tex: wgpu::Texture,
-    color_view: wgpu::TextureView,
 
     // CPU-side dirty list (uploaded each frame, cleared after compute dispatch)
     dirty_bricks: Vec<DirtyBrick>,
@@ -134,19 +142,6 @@ impl VoxelMeshPass {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
-        // ── Color attachment (initial 1×1; resized in on_resize) ────────────
-        let color_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("VoxelMesh Color"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let color_view = color_tex.create_view(&Default::default());
 
         // ── Shaders ──────────────────────────────────────────────────────────
         let extract_src = include_str!("../shaders/voxel_surface_extract.wgsl");
@@ -281,16 +276,45 @@ impl VoxelMeshPass {
         // ── Render bind group layout ─────────────────────────────────────────
         let render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("VoxelMesh Render BGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let meshlet_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VoxelMesh Meshlet Params"),
+            size: std::mem::size_of::<MeshletParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         // ── Render pipeline ──────────────────────────────────────────────────
@@ -362,6 +386,7 @@ impl VoxelMeshPass {
             extract_bind_group,
             render_pipeline,
             render_bgl,
+            meshlet_params_buf,
             render_bind_group: None,
             render_bind_group_key: None,
             brick_meta_buf,
@@ -371,8 +396,6 @@ impl VoxelMeshPass {
             descriptor_buf,
             indirect_buf,
             dirty_brick_buf,
-            color_tex,
-            color_view,
             dirty_bricks: Vec::new(),
             normal_buf,
             surface_format,
@@ -435,12 +458,32 @@ impl RenderPass for VoxelMeshPass {
         "VoxelMesh"
     }
 
+    fn writes(&self) -> &'static [&'static str] {
+        &["pre_aa"]
+    }
+
+    // Declares (and clears) "pre_aa" — this pass is meant to be the first/only
+    // opaque geometry writer in a graph, same role GBufferPass plays in the
+    // default pipeline. If it's ever combined with GBufferPass or another
+    // earlier depth-clearing pass, this Clear (see render_pass_descriptor)
+    // will need to become a Load instead.
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("pre_aa", self.surface_format, ResourceSize::MatchSurface);
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         if !self.dirty_bricks.is_empty() {
             let bytes = bytemuck::cast_slice(&self.dirty_bricks);
             ctx.write_buffer(&self.dirty_brick_buf, 0, bytes);
             log::debug!("VoxelMeshPass: {} dirty bricks", self.dirty_bricks.len());
         }
+        let params = MeshletParams {
+            light_count: ctx.scene.lights.len() as u32,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        ctx.write_buffer(&self.meshlet_params_buf, 0, bytemuck::bytes_of(&params));
         Ok(())
     }
 
@@ -459,18 +502,30 @@ impl RenderPass for VoxelMeshPass {
         }
 
         // ── Step 2: Render — draw all bricks via indirect multi-draw ─────────
-        // Rebuild camera bind group when the camera buffer pointer changes.
+        // Rebuild the bind group when the camera or lights buffer pointer changes
+        // (the lights buffer can be reallocated by GrowableBuffer as it grows).
         let camera_ptr = ctx.scene.camera as *const _ as usize;
-        if self.render_bind_group_key != Some(camera_ptr) {
+        let lights_ptr = ctx.scene.lights as *const _ as usize;
+        if self.render_bind_group_key != Some((camera_ptr, lights_ptr)) {
             self.render_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("VoxelMesh Render BG"),
                 layout: &self.render_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: ctx.scene.camera.as_entire_binding(),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: ctx.scene.lights.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.meshlet_params_buf.as_entire_binding(),
+                    },
+                ],
             }));
-            self.render_bind_group_key = Some(camera_ptr);
+            self.render_bind_group_key = Some((camera_ptr, lights_ptr));
         }
 
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
@@ -499,11 +554,12 @@ impl RenderPass for VoxelMeshPass {
         &'a self,
         _target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let pre_aa_view = resources.pre_aa.read("VoxelMesh")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
-                view: &self.color_view,
+                view: pre_aa_view,
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
@@ -517,7 +573,7 @@ impl RenderPass for VoxelMeshPass {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -526,23 +582,5 @@ impl RenderPass for VoxelMeshPass {
             occlusion_query_set: None,
             multiview_mask: None,
         })
-    }
-
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.color_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("VoxelMesh Color"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        self.color_view = self.color_tex.create_view(&Default::default());
     }
 }
