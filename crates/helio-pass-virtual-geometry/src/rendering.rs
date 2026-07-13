@@ -783,6 +783,10 @@ impl RenderPass for VirtualGeometryPass {
         builder.read("hiz");
     }
 
+    fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_mode = mode;
+    }
+
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {
         static VIEWS: &[DebugViewDescriptor] = &[
             DebugViewDescriptor { name: "VG Meshlets", debug_mode: 20, description: "One solid colour per meshlet — visualises cluster boundaries" },
