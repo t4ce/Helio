@@ -2,7 +2,7 @@ use std::num::NonZeroU32;
 
 use crate::{
     CullUniforms, InstanceCullData, LodQuality, VgGlobals, INITIAL_INSTANCES,
-    INITIAL_MESHLETS, INITIAL_OBJECTS, MAX_TEXTURES,
+    INITIAL_MESHLETS, INITIAL_OBJECTS, MAX_TEXTURES, VirtualGeometryBudget,
 };
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
@@ -40,6 +40,7 @@ pub struct VirtualGeometryPass {
     pub(crate) indirect_buf: wgpu::Buffer,
     pub(crate) draw_metadata_buf: wgpu::Buffer,
     pub(crate) draw_count_buf: wgpu::Buffer,
+    pub(crate) publication_limit: u32,
     pub(crate) use_count_indirect: bool,
     pub debug_mode: u32,
     pub lod_quality: LodQuality,
@@ -55,6 +56,14 @@ pub struct VirtualGeometryPass {
 
 impl VirtualGeometryPass {
     pub fn new(device: &wgpu::Device, camera_buf: &wgpu::Buffer) -> Self {
+        Self::new_with_budget(device, camera_buf, VirtualGeometryBudget::default())
+    }
+
+    pub fn new_with_budget(
+        device: &wgpu::Device,
+        camera_buf: &wgpu::Buffer,
+        budget: VirtualGeometryBudget,
+    ) -> Self {
         let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("VG Cull Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/vg_cull.wgsl").into()),
@@ -90,8 +99,11 @@ impl VirtualGeometryPass {
         let instance_buf = Self::make_instance_buf(device, INITIAL_INSTANCES);
         let instance_cull_buf = Self::make_instance_cull_buf(device, INITIAL_INSTANCES);
         let work_item_buf = Self::make_work_item_buf(device, INITIAL_OBJECTS);
-        let indirect_buf = Self::make_indirect_buf(device, INITIAL_MESHLETS);
-        let draw_metadata_buf = Self::make_draw_metadata_buf(device, INITIAL_MESHLETS);
+        let initial_publication_capacity =
+            INITIAL_MESHLETS.min(u64::from(budget.max_published_meshlets()));
+        let indirect_buf = Self::make_indirect_buf(device, initial_publication_capacity);
+        let draw_metadata_buf =
+            Self::make_draw_metadata_buf(device, initial_publication_capacity);
         let draw_count_buf = Self::make_draw_count_buf(device);
         let use_count_indirect = device
             .features()
@@ -448,6 +460,7 @@ impl VirtualGeometryPass {
             indirect_buf,
             draw_metadata_buf,
             draw_count_buf,
+            publication_limit: budget.max_published_meshlets(),
             use_count_indirect,
             debug_mode: 0,
             lod_quality: LodQuality::default(),
@@ -460,6 +473,10 @@ impl VirtualGeometryPass {
             object_dispatch_width: 1,
             work_dispatch_width: 1,
         }
+    }
+
+    pub const fn publication_limit(&self) -> u32 {
+        self.publication_limit
     }
 
     fn make_meshlet_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
@@ -572,6 +589,16 @@ impl RenderPass for VirtualGeometryPass {
         if vg.buffer_version != self.last_version {
             let camera_buf = ctx.scene.camera.buffer();
             let mut grew = false;
+            let bounded_max_draw_count = VirtualGeometryBudget::new(self.publication_limit)
+                .clamp_draw_count(vg.max_draw_count);
+
+            if vg.max_draw_count > self.publication_limit {
+                log::warn!(
+                    "virtual geometry worst-case draw count {} exceeds the publication budget {}; excess visible meshlets will be counted and rejected",
+                    vg.max_draw_count,
+                    self.publication_limit,
+                );
+            }
 
             let meshlet_capacity = self.meshlet_buf.size() / 64;
             if (vg.meshlet_count as u64) > meshlet_capacity {
@@ -597,8 +624,9 @@ impl RenderPass for VirtualGeometryPass {
                 grew = true;
             }
             let indirect_capacity = self.indirect_buf.size() / 20;
-            if (vg.max_draw_count as u64) > indirect_capacity {
-                let new_capacity = vg.max_draw_count as u64 * 2;
+            if u64::from(bounded_max_draw_count) > indirect_capacity {
+                let new_capacity = (u64::from(bounded_max_draw_count) * 2)
+                    .min(u64::from(self.publication_limit));
                 self.indirect_buf = Self::make_indirect_buf(ctx.device, new_capacity);
                 self.draw_metadata_buf =
                     Self::make_draw_metadata_buf(ctx.device, new_capacity);
@@ -630,7 +658,7 @@ impl RenderPass for VirtualGeometryPass {
             self.last_meshlet_count = vg.meshlet_count;
             self.last_object_count = vg.object_count;
             self.last_work_item_count = vg.work_item_count;
-            self.last_max_draw_count = vg.max_draw_count;
+            self.last_max_draw_count = bounded_max_draw_count;
         } else if vg.instance_version != self.last_instance_version {
             let start = vg.instance_dirty_start as usize;
             let count = vg.instance_dirty_count as usize;

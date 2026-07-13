@@ -22,6 +22,52 @@ pub(crate) const INITIAL_MESHLETS: u64 = 1024;
 pub(crate) const INITIAL_OBJECTS: u64 = 256;
 pub(crate) const INITIAL_INSTANCES: u64 = 256;
 
+/// Default ceiling for visible meshlets published as indexed indirect draws.
+///
+/// At 36 bytes per slot (20-byte indirect command plus 16-byte draw metadata),
+/// this bounds the publication buffers to 9 MiB plus the two counters. Callers
+/// with a measured platform-specific budget can override it explicitly.
+pub const DEFAULT_MAX_PUBLISHED_MESHLETS: u32 = 262_144;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VirtualGeometryBudget {
+    max_published_meshlets: u32,
+}
+
+impl VirtualGeometryBudget {
+    pub const fn new(max_published_meshlets: u32) -> Self {
+        assert!(
+            max_published_meshlets > 0,
+            "virtual geometry publication budget must be non-zero"
+        );
+        Self {
+            max_published_meshlets,
+        }
+    }
+
+    pub const fn publication_bytes(self) -> u64 {
+        self.max_published_meshlets as u64 * 36 + 8
+    }
+
+    pub const fn max_published_meshlets(self) -> u32 {
+        self.max_published_meshlets
+    }
+
+    pub const fn clamp_draw_count(self, worst_case_draw_count: u32) -> u32 {
+        if worst_case_draw_count < self.max_published_meshlets {
+            worst_case_draw_count
+        } else {
+            self.max_published_meshlets
+        }
+    }
+}
+
+impl Default for VirtualGeometryBudget {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_PUBLISHED_MESHLETS)
+    }
+}
+
 /// Per-instance values used by meshlet culling. Kept separate from
 /// `GpuInstanceData` so the cull shader does not recompute matrix norms for
 /// every meshlet in an instance.
@@ -179,7 +225,10 @@ pub(crate) struct CullUniforms {
 
 #[cfg(test)]
 mod tests {
-    use super::{select_object_lod, CullUniforms, InstanceCullData, LodQuality};
+    use super::{
+        select_object_lod, CullUniforms, InstanceCullData, LodQuality,
+        VirtualGeometryBudget, DEFAULT_MAX_PUBLISHED_MESHLETS,
+    };
     use helio_core::GpuInstanceData;
 
     fn instance_with_model(model: [f32; 16]) -> GpuInstanceData {
@@ -198,6 +247,21 @@ mod tests {
     fn instance_cull_data_is_gpu_aligned() {
         assert_eq!(std::mem::size_of::<InstanceCullData>(), 16);
         assert_eq!(std::mem::size_of::<CullUniforms>(), 48);
+    }
+
+    #[test]
+    fn default_publication_budget_is_nine_mib_plus_counters() {
+        let budget = VirtualGeometryBudget::default();
+        assert_eq!(budget.max_published_meshlets(), DEFAULT_MAX_PUBLISHED_MESHLETS);
+        assert_eq!(budget.publication_bytes(), 9 * 1024 * 1024 + 8);
+        assert_eq!(budget.clamp_draw_count(65_536), 65_536);
+        assert_eq!(budget.clamp_draw_count(u32::MAX), DEFAULT_MAX_PUBLISHED_MESHLETS);
+    }
+
+    #[test]
+    #[should_panic(expected = "publication budget must be non-zero")]
+    fn publication_budget_rejects_zero() {
+        let _ = VirtualGeometryBudget::new(0);
     }
 
     #[test]
