@@ -3,6 +3,7 @@ use std::num::NonZeroU32;
 use crate::{
     CullUniforms, InstanceCullData, LodQuality, VgGlobals, INITIAL_INSTANCES,
     INITIAL_MESHLETS, INITIAL_OBJECTS, MAX_TEXTURES, VirtualGeometryBudget,
+    VirtualGeometryDebugStats, DRAW_COUNTER_BYTES,
 };
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
@@ -14,6 +15,12 @@ use libhelio::VG_CULL_MESHLETS_PER_WORK_ITEM;
 // ═══════════════════════════════════════════════════════════════════════════════
 // VirtualGeometryPass
 // ═══════════════════════════════════════════════════════════════════════════════
+
+enum DebugReadbackState {
+    Idle,
+    CopySubmitted,
+    Mapping(std::sync::Arc<std::sync::Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>),
+}
 
 pub struct VirtualGeometryPass {
     pub(crate) select_pipeline: wgpu::ComputePipeline,
@@ -40,6 +47,9 @@ pub struct VirtualGeometryPass {
     pub(crate) indirect_buf: wgpu::Buffer,
     pub(crate) draw_metadata_buf: wgpu::Buffer,
     pub(crate) draw_count_buf: wgpu::Buffer,
+    pub(crate) debug_readback_buf: wgpu::Buffer,
+    debug_readback_state: DebugReadbackState,
+    debug_stats: VirtualGeometryDebugStats,
     pub(crate) publication_limit: u32,
     pub(crate) use_count_indirect: bool,
     pub debug_mode: u32,
@@ -105,6 +115,7 @@ impl VirtualGeometryPass {
         let draw_metadata_buf =
             Self::make_draw_metadata_buf(device, initial_publication_capacity);
         let draw_count_buf = Self::make_draw_count_buf(device);
+        let debug_readback_buf = Self::make_debug_readback_buf(device);
         let use_count_indirect = device
             .features()
             .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
@@ -460,6 +471,9 @@ impl VirtualGeometryPass {
             indirect_buf,
             draw_metadata_buf,
             draw_count_buf,
+            debug_readback_buf,
+            debug_readback_state: DebugReadbackState::Idle,
+            debug_stats: VirtualGeometryDebugStats::default(),
             publication_limit: budget.max_published_meshlets(),
             use_count_indirect,
             debug_mode: 0,
@@ -477,6 +491,47 @@ impl VirtualGeometryPass {
 
     pub const fn publication_limit(&self) -> u32 {
         self.publication_limit
+    }
+
+    pub const fn debug_stats(&self) -> VirtualGeometryDebugStats {
+        self.debug_stats
+    }
+
+    fn poll_debug_readback(&mut self, device: &wgpu::Device) {
+        if matches!(self.debug_readback_state, DebugReadbackState::CopySubmitted) {
+            let completion = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let callback_completion = std::sync::Arc::clone(&completion);
+            self.debug_readback_buf
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    *callback_completion.lock().unwrap() = Some(result);
+                });
+            self.debug_readback_state = DebugReadbackState::Mapping(completion);
+        }
+
+        let DebugReadbackState::Mapping(completion) = &self.debug_readback_state else {
+            return;
+        };
+
+        let _ = device.poll(wgpu::PollType::Poll);
+        let result = completion.lock().unwrap().take();
+        match result {
+            Some(Ok(())) => {
+                let mapped = self.debug_readback_buf.slice(..).get_mapped_range();
+                let counters: &[u32] = bytemuck::cast_slice(&mapped);
+                if let Some(stats) = VirtualGeometryDebugStats::from_counters(counters) {
+                    self.debug_stats = stats;
+                }
+                drop(mapped);
+                self.debug_readback_buf.unmap();
+                self.debug_readback_state = DebugReadbackState::Idle;
+            }
+            Some(Err(error)) => {
+                log::warn!("virtual geometry debug readback failed: {error}");
+                self.debug_readback_state = DebugReadbackState::Idle;
+            }
+            None => {}
+        }
     }
 
     fn make_meshlet_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
@@ -548,11 +603,22 @@ impl VirtualGeometryPass {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Draw And Overflow Counters"),
             // draw_count at byte 0 remains directly consumable by
-            // multi_draw_indexed_indirect_count; overflow_count is at byte 4.
-            size: 8,
+            // multi_draw_indexed_indirect_count; the remaining counters are
+            // optional debug telemetry and do not affect indirect execution.
+            size: DRAW_COUNTER_BYTES,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn make_debug_readback_buf(device: &wgpu::Device) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Debug Counter Readback"),
+            size: DRAW_COUNTER_BYTES,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         })
     }
@@ -582,6 +648,8 @@ impl RenderPass for VirtualGeometryPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        self.poll_debug_readback(ctx.device);
+
         let Some(vg) = ctx.frame_resources.vg.get() else {
             return Ok(());
         };
@@ -896,6 +964,19 @@ impl RenderPass for VirtualGeometryPass {
                 self.last_work_item_count.div_ceil(self.work_dispatch_width),
                 1,
             );
+        }
+
+        if self.debug_mode == 21
+            && matches!(self.debug_readback_state, DebugReadbackState::Idle)
+        {
+            unsafe { &mut *ctx.compute_encoder_ptr }.copy_buffer_to_buffer(
+                &self.draw_count_buf,
+                0,
+                &self.debug_readback_buf,
+                0,
+                DRAW_COUNTER_BYTES,
+            );
+            self.debug_readback_state = DebugReadbackState::CopySubmitted;
         }
 
         {

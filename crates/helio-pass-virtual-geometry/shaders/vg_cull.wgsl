@@ -336,6 +336,15 @@ fn cs_select_objects(
                     }
                 }
                 selected_lod_plus_one = selected_lod + 1u;
+                // The first two counters remain the indirect draw count and
+                // publication-overflow count. Larger production buffers also
+                // expose a selected-object histogram and the deepest LOD that
+                // the visible assets actually contain. The length guard keeps
+                // the same shader compatible with minimal benchmark buffers.
+                if arrayLength(&draw_counters) >= 11u {
+                    atomicAdd(&draw_counters[2u + selected_lod], 1u);
+                    atomicMax(&draw_counters[10], lod_count - 1u);
+                }
             }
         }
     }

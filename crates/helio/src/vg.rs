@@ -88,11 +88,13 @@ fn optimize_mesh(vertices: &[PackedVertex], indices: &[u32]) -> (Vec<PackedVerte
 
 // ─── LOD generation ───────────────────────────────────────────────────────
 
-/// Generate exactly 8 LOD levels using meshoptimizer's simplifier.
+/// Generate up to 8 distinct LOD levels using meshoptimizer's simplifier.
 ///
 /// LOD 0 is the fully optimized original mesh. Each successive level targets
-/// ~50% of the previous level's triangle count. The full meshopt pipeline
-/// (cache, overdraw, fetch optimization) is applied to every level.
+/// a smaller fraction of the original triangle count. The chain stops rather
+/// than padding with mislabeled clones when an asset cannot be simplified any
+/// further. The full meshopt pipeline (cache, overdraw, fetch optimization) is
+/// applied to every retained level.
 pub(crate) fn generate_lod_meshes(
     vertices: &[PackedVertex],
     indices: &[u32],
@@ -135,7 +137,6 @@ pub(crate) fn generate_lod_meshes(
         let previous = levels.last().expect("base LOD exists");
 
         if previous.indices.len() <= target_indices {
-            levels.push(previous.clone());
             continue;
         }
 
@@ -158,9 +159,7 @@ pub(crate) fn generate_lod_meshes(
             Some(&mut relative_error),
         );
 
-        if simplified_indices.is_empty() {
-            levels.push(previous.clone());
-        } else {
+        if !simplified_indices.is_empty() && simplified_indices.len() < previous.indices.len() {
             let absolute_error = previous.error
                 + relative_error * meshopt::simplify_scale_decoder(&previous.vertices);
 
@@ -168,6 +167,10 @@ pub(crate) fn generate_lod_meshes(
             let (compact_verts, compact_indices) =
                 compact_mesh(&previous.vertices, &simplified_indices);
             let (final_verts, final_indices) = optimize_mesh(&compact_verts, &compact_indices);
+
+            if final_indices.len() >= previous.indices.len() {
+                continue;
+            }
 
             eprintln!(
                 "[vg] LOD {}: {}/{} tris (target {}, error {:.6})",
@@ -183,11 +186,6 @@ pub(crate) fn generate_lod_meshes(
                 error: absolute_error,
             });
         }
-    }
-
-    while levels.len() < 8 {
-        let last = levels.last().unwrap().clone();
-        levels.push(last);
     }
 
     levels
@@ -459,12 +457,25 @@ mod tests {
         }
 
         let lods = generate_lod_meshes(&vertices, &indices);
-        assert_eq!(lods.len(), 8);
+        assert!((2..=8).contains(&lods.len()));
         assert_eq!(lods[0].error, 0.0);
         for pair in lods.windows(2) {
             assert!(pair[1].error.is_finite());
             assert!(pair[1].error >= pair[0].error);
-            assert!(pair[1].indices.len() <= pair[0].indices.len());
+            assert!(pair[1].indices.len() < pair[0].indices.len());
         }
+    }
+
+    #[test]
+    fn irreducible_triangle_is_not_padded_with_fake_lods() {
+        let vertices = vec![
+            vertex([0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0, 1.0]),
+            vertex([1.0, 0.0, 0.0], [1.0, 0.0], [0.0, 0.0, 1.0]),
+            vertex([0.0, 1.0, 0.0], [0.0, 1.0], [0.0, 0.0, 1.0]),
+        ];
+
+        let lods = generate_lod_meshes(&vertices, &[0, 1, 2]);
+        assert_eq!(lods.len(), 1);
+        assert_eq!(lods[0].indices.len(), 3);
     }
 }

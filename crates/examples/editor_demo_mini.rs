@@ -33,6 +33,7 @@ use helio::{
 };
 use helio_default_graphs::{build_default_graph, build_fxaa_graph};
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
+use helio_pass_virtual_geometry::{VirtualGeometryDebugStats, VirtualGeometryPass};
 use v3_demo_common::{
     box_mesh, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh,
 };
@@ -93,6 +94,7 @@ struct AppState {
     active_debug_mode: u32,
     debug_overlay_enabled: bool,
     debug_overlay: Arc<std::sync::Mutex<helio_pass_debug_overlay::DebugOverlayState>>,
+    lod_debug_stats: Arc<std::sync::Mutex<VirtualGeometryDebugStats>>,
 }
 
 impl ApplicationHandler for App {
@@ -514,6 +516,35 @@ impl ApplicationHandler for App {
             }
         }
 
+        // ── Radar dome — dense single-material VG LOD validation asset ──
+        // The container is intentionally split by material and many sections
+        // are too small to have eight distinct simplification levels. This
+        // dense dome gives the debug heatmap a truthful deep LOD chain.
+        {
+            let radius = 6.0;
+            let position = glam::Vec3::new(-55.0, 8.0, -42.0);
+            let upload = sphere_mesh([0.0; 3], radius);
+            let virtual_mesh = renderer
+                .scene_mut()
+                .insert_actor(SceneActor::virtual_mesh(VirtualMeshUpload {
+                    vertices: upload.vertices,
+                    indices: upload.indices,
+                }))
+                .as_virtual_mesh()
+                .unwrap();
+            let _ = renderer.scene_mut().insert_actor(SceneActor::virtual_object(
+                VirtualObjectDescriptor {
+                    virtual_mesh,
+                    material_id: mat_steel.slot(),
+                    transform: glam::Mat4::from_translation(position),
+                    bounds: [position.x, position.y, position.z, radius],
+                    flags: 0,
+                    groups: helio::GroupMask::NONE,
+                    movability: Some(helio::Movability::Static),
+                },
+            ));
+        }
+
         // ── Shipping containers — 10 total, using Virtual Geometry ─────
         // Load with merge_meshes so sections share one vertex buffer (correct
         // spatial relationships). Upload the FBX textures+materials, then
@@ -746,6 +777,9 @@ impl ApplicationHandler for App {
         let fxaa_config = RendererConfig::new(sz.width, sz.height, format)
             .with_render_scale(1.0);
         let debug_overlay = helio_pass_debug_overlay::DebugOverlayState::new();
+        let lod_debug_stats = Arc::new(std::sync::Mutex::new(
+            VirtualGeometryDebugStats::default(),
+        ));
         let fxaa_graph = build_fxaa_graph(
             &device,
             &queue,
@@ -782,6 +816,7 @@ impl ApplicationHandler for App {
             active_debug_mode: 0,
             debug_overlay_enabled: false,
             debug_overlay,
+            lod_debug_stats,
         });
     }
 
@@ -1053,15 +1088,41 @@ impl AppState {
         let show_lod_legend = mode == 21;
         {
             let mut overlay = self.debug_overlay.lock().unwrap();
-            overlay.populate = show_lod_legend.then(|| {
-                Box::new(|overlay: &mut helio_pass_debug_overlay::DebugOverlayState| {
+            let shared_stats = Arc::clone(&self.lod_debug_stats);
+            overlay.populate = show_lod_legend.then(move || {
+                Box::new(move |overlay: &mut helio_pass_debug_overlay::DebugOverlayState| {
+                    let stats = *shared_stats.lock().unwrap();
                     overlay.write_text(0, 2, "VG LOD HEATMAP");
+                    if let Some((first, last)) = stats.selected_lod_range() {
+                        overlay.write_text(
+                            0,
+                            3,
+                            &format!(
+                                "GPU objects: {}  selected: LOD{}..LOD{}  asset max: LOD{}",
+                                stats.visible_objects(), first, last, stats.max_available_lod,
+                            ),
+                        );
+                        overlay.write_text(
+                            0,
+                            4,
+                            &format!(
+                                "Meshlets: {} visible  {} rejected",
+                                stats.visible_meshlets, stats.rejected_meshlets,
+                            ),
+                        );
+                    } else {
+                        overlay.write_text(0, 3, "GPU LOD sample pending / no VG objects visible");
+                    }
                     for (lod, color) in LOD_COLORS.iter().enumerate() {
                         let x = 8.0 + lod as f32 * 68.0;
-                        overlay.add_bar(x, 76.0, 20.0, 14.0, color[0], color[1], color[2], 1.0);
-                        overlay.write_small((x / 8.0) as u32 + 3, 6, &format!("LOD{lod}"));
+                        overlay.add_bar(x, 128.0, 20.0, 14.0, color[0], color[1], color[2], 1.0);
+                        overlay.write_small(
+                            (x / 8.0) as u32 + 3,
+                            11,
+                            &format!("L{lod}:{}", stats.lod_object_counts[lod]),
+                        );
                     }
-                    overlay.write_text(0, 5, "LOD0 = full detail                     LOD7 = coarsest");
+                    overlay.write_text(0, 6, "LOD0 = full detail; asset max can be below LOD7");
                 }) as Box<dyn Fn(&mut helio_pass_debug_overlay::DebugOverlayState) + Send + Sync>
             });
         }
@@ -1176,6 +1237,12 @@ impl AppState {
             0.1,
             800.0,
         );
+
+        if self.active_debug_mode == 21 {
+            if let Some(pass) = self.renderer.find_pass::<VirtualGeometryPass>() {
+                *self.lod_debug_stats.lock().unwrap() = pass.debug_stats();
+            }
+        }
 
         self.renderer.debug_clear();
         self.renderer.set_gizmo_camera(&camera, self.renderer.output_height() as f32);

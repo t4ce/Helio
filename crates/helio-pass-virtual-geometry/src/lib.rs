@@ -18,6 +18,54 @@ pub(crate) const MAX_TEXTURES: usize = 16;
 
 pub const LOD_LEVEL_COUNT: u32 = 8;
 
+/// Draw publication counters written by the GPU cull stages.
+///
+/// Slot 0 is the attempted visible-meshlet count used for indirect drawing,
+/// slot 1 is the capacity-rejection count, slots 2..10 form the selected-LOD
+/// object histogram, and slot 10 stores the largest LOD available among
+/// visible objects.
+pub(crate) const DRAW_COUNTER_COUNT: u64 = 11;
+pub(crate) const DRAW_COUNTER_BYTES: u64 = DRAW_COUNTER_COUNT * 4;
+
+/// Latest non-blocking GPU readback from the virtual-geometry cull pass.
+///
+/// Debug readback is only scheduled while the LOD heatmap is active. Values
+/// can trail the rendered frame by a few frames rather than stalling the GPU.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VirtualGeometryDebugStats {
+    pub visible_meshlets: u32,
+    pub rejected_meshlets: u32,
+    pub lod_object_counts: [u32; LOD_LEVEL_COUNT as usize],
+    pub max_available_lod: u32,
+}
+
+impl VirtualGeometryDebugStats {
+    pub fn visible_objects(self) -> u32 {
+        self.lod_object_counts.iter().copied().sum()
+    }
+
+    pub fn selected_lod_range(self) -> Option<(u32, u32)> {
+        let first = self.lod_object_counts.iter().position(|&count| count != 0)? as u32;
+        let last = self.lod_object_counts.iter().rposition(|&count| count != 0)? as u32;
+        Some((first, last))
+    }
+
+    fn from_counters(counters: &[u32]) -> Option<Self> {
+        if counters.len() < DRAW_COUNTER_COUNT as usize {
+            return None;
+        }
+
+        let mut lod_object_counts = [0; LOD_LEVEL_COUNT as usize];
+        lod_object_counts.copy_from_slice(&counters[2..10]);
+        Some(Self {
+            visible_meshlets: counters[0],
+            rejected_meshlets: counters[1],
+            lod_object_counts,
+            max_available_lod: counters[10].min(LOD_LEVEL_COUNT - 1),
+        })
+    }
+}
+
 pub(crate) const INITIAL_MESHLETS: u64 = 1024;
 pub(crate) const INITIAL_OBJECTS: u64 = 256;
 pub(crate) const INITIAL_INSTANCES: u64 = 256;
@@ -46,7 +94,7 @@ impl VirtualGeometryBudget {
     }
 
     pub const fn publication_bytes(self) -> u64 {
-        self.max_published_meshlets as u64 * 36 + 8
+        self.max_published_meshlets as u64 * 36 + DRAW_COUNTER_BYTES
     }
 
     pub const fn max_published_meshlets(self) -> u32 {
@@ -227,7 +275,7 @@ pub(crate) struct CullUniforms {
 mod tests {
     use super::{
         select_object_lod, CullUniforms, InstanceCullData, LodQuality,
-        VirtualGeometryBudget, DEFAULT_MAX_PUBLISHED_MESHLETS,
+        VirtualGeometryBudget, VirtualGeometryDebugStats, DEFAULT_MAX_PUBLISHED_MESHLETS,
     };
     use helio_core::GpuInstanceData;
 
@@ -253,7 +301,7 @@ mod tests {
     fn default_publication_budget_is_nine_mib_plus_counters() {
         let budget = VirtualGeometryBudget::default();
         assert_eq!(budget.max_published_meshlets(), DEFAULT_MAX_PUBLISHED_MESHLETS);
-        assert_eq!(budget.publication_bytes(), 9 * 1024 * 1024 + 8);
+        assert_eq!(budget.publication_bytes(), 9 * 1024 * 1024 + 44);
         assert_eq!(budget.clamp_draw_count(65_536), 65_536);
         assert_eq!(budget.clamp_draw_count(u32::MAX), DEFAULT_MAX_PUBLISHED_MESHLETS);
     }
@@ -337,5 +385,20 @@ mod tests {
         assert!(LodQuality::Low.max_error_pixels() > LodQuality::Medium.max_error_pixels());
         assert!(LodQuality::Medium.max_error_pixels() > LodQuality::High.max_error_pixels());
         assert!(LodQuality::High.max_error_pixels() > LodQuality::Ultra.max_error_pixels());
+    }
+
+    #[test]
+    fn debug_stats_decode_the_gpu_counter_layout() {
+        let stats = VirtualGeometryDebugStats::from_counters(&[
+            123, 4, 0, 2, 5, 0, 0, 1, 0, 0, 6,
+        ])
+        .expect("complete counter layout");
+
+        assert_eq!(stats.visible_meshlets, 123);
+        assert_eq!(stats.rejected_meshlets, 4);
+        assert_eq!(stats.visible_objects(), 8);
+        assert_eq!(stats.selected_lod_range(), Some((1, 5)));
+        assert_eq!(stats.max_available_lod, 6);
+        assert!(VirtualGeometryDebugStats::from_counters(&[0; 10]).is_none());
     }
 }

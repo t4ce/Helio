@@ -327,7 +327,7 @@ async fn run() {
             * std::mem::size_of::<GpuVgWorkItem>() as u64;
         let publication = u64::from(TOTAL_MESHLETS)
             * (20 + std::mem::size_of::<GpuVgDraw>() as u64)
-            + 8;
+            + 44;
         let vg_total = meshlet_descriptors
             + object_metadata
             + instance_and_cull
@@ -629,6 +629,7 @@ fn create_case_buffers(
             wgpu::BindGroupEntry { binding: 1, resource: cull_buffer.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 3, resource: object_buffer.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 4, resource: instance_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 7, resource: draw_count.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 10, resource: instance_cull_buffer.as_entire_binding() },
         ],
     });
