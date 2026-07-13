@@ -9,12 +9,14 @@ use helio_core::{
     DebugViewDescriptor, GpuInstanceData, PassContext, PrepareContext, RenderPass,
     Result as HelioResult,
 };
+use libhelio::VG_CULL_MESHLETS_PER_WORK_ITEM;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VirtualGeometryPass
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub struct VirtualGeometryPass {
+    pub(crate) select_pipeline: wgpu::ComputePipeline,
     pub(crate) cull_pipeline: wgpu::ComputePipeline,
     pub(crate) cull_bgl: wgpu::BindGroupLayout,
     pub(crate) cull_bind_group: Option<wgpu::BindGroup>,
@@ -33,6 +35,7 @@ pub struct VirtualGeometryPass {
     pub(crate) object_buf: wgpu::Buffer,
     pub(crate) instance_buf: wgpu::Buffer,
     pub(crate) instance_cull_buf: wgpu::Buffer,
+    pub(crate) work_item_buf: wgpu::Buffer,
     pub(crate) indirect_buf: wgpu::Buffer,
     pub(crate) draw_metadata_buf: wgpu::Buffer,
     pub(crate) draw_count_buf: wgpu::Buffer,
@@ -42,8 +45,10 @@ pub struct VirtualGeometryPass {
     pub(crate) last_version: u64,
     pub(crate) last_meshlet_count: u32,
     pub(crate) last_object_count: u32,
+    pub(crate) last_work_item_count: u32,
     pub(crate) last_max_draw_count: u32,
-    pub(crate) last_dispatch_width: u32,
+    pub(crate) object_dispatch_width: u32,
+    pub(crate) work_dispatch_width: u32,
 }
 
 impl VirtualGeometryPass {
@@ -82,6 +87,7 @@ impl VirtualGeometryPass {
         let object_buf = Self::make_object_buf(device, INITIAL_OBJECTS);
         let instance_buf = Self::make_instance_buf(device, INITIAL_INSTANCES);
         let instance_cull_buf = Self::make_instance_cull_buf(device, INITIAL_INSTANCES);
+        let work_item_buf = Self::make_work_item_buf(device, INITIAL_OBJECTS);
         let indirect_buf = Self::make_indirect_buf(device, INITIAL_MESHLETS);
         let draw_metadata_buf = Self::make_draw_metadata_buf(device, INITIAL_MESHLETS);
         let draw_count_buf = Self::make_draw_count_buf(device);
@@ -138,12 +144,12 @@ impl VirtualGeometryPass {
                     },
                     count: None,
                 },
-                // Immutable per-object LOD ranges and bounds.
+                // Per-object LOD ranges/bounds plus per-frame selected-LOD scratch.
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -217,6 +223,16 @@ impl VirtualGeometryPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -225,11 +241,19 @@ impl VirtualGeometryPass {
             bind_group_layouts: &[Some(&cull_bgl)],
             immediate_size: 0,
         });
-        let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("VG Cull Pipeline"),
+        let select_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("VG Object Select Pipeline"),
             layout: Some(&cull_pipeline_layout),
             module: &cull_shader,
-            entry_point: Some("cs_cull"),
+            entry_point: Some("cs_select_objects"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("VG Meshlet Cull Pipeline"),
+            layout: Some(&cull_pipeline_layout),
+            module: &cull_shader,
+            entry_point: Some("cs_cull_meshlets"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -398,6 +422,7 @@ impl VirtualGeometryPass {
             });
 
         Self {
+            select_pipeline,
             cull_pipeline,
             cull_bgl,
             cull_bind_group: None,
@@ -416,6 +441,7 @@ impl VirtualGeometryPass {
             object_buf,
             instance_buf,
             instance_cull_buf,
+            work_item_buf,
             indirect_buf,
             draw_metadata_buf,
             draw_count_buf,
@@ -425,8 +451,10 @@ impl VirtualGeometryPass {
             last_version: u64::MAX,
             last_meshlet_count: 0,
             last_object_count: 0,
+            last_work_item_count: 0,
             last_max_draw_count: 0,
-            last_dispatch_width: 1,
+            object_dispatch_width: 1,
+            work_dispatch_width: 1,
         }
     }
 
@@ -461,6 +489,15 @@ impl VirtualGeometryPass {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Instance Cull Buffer"),
             size: capacity * std::mem::size_of::<InstanceCullData>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn make_work_item_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Work Item Buffer"),
+            size: capacity * std::mem::size_of::<libhelio::GpuVgWorkItem>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -546,6 +583,13 @@ impl RenderPass for VirtualGeometryPass {
                 self.instance_cull_buf = Self::make_instance_cull_buf(ctx.device, vg.object_count as u64 * 2);
                 grew = true;
             }
+            let work_item_capacity = self.work_item_buf.size()
+                / std::mem::size_of::<libhelio::GpuVgWorkItem>() as u64;
+            if (vg.work_item_count as u64) > work_item_capacity {
+                self.work_item_buf =
+                    Self::make_work_item_buf(ctx.device, vg.work_item_count as u64 * 2);
+                grew = true;
+            }
             let indirect_capacity = self.indirect_buf.size() / 20;
             if (vg.max_draw_count as u64) > indirect_capacity {
                 let new_capacity = vg.max_draw_count as u64 * 2;
@@ -562,6 +606,7 @@ impl RenderPass for VirtualGeometryPass {
             ctx.write_buffer(&self.meshlet_buf, 0, vg.meshlets);
             ctx.write_buffer(&self.object_buf, 0, vg.objects);
             ctx.write_buffer(&self.instance_buf, 0, vg.instances);
+            ctx.write_buffer(&self.work_item_buf, 0, vg.work_items);
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
             let cull_data: Vec<InstanceCullData> = instances
@@ -573,21 +618,36 @@ impl RenderPass for VirtualGeometryPass {
             self.last_version = vg.buffer_version;
             self.last_meshlet_count = vg.meshlet_count;
             self.last_object_count = vg.object_count;
+            self.last_work_item_count = vg.work_item_count;
             self.last_max_draw_count = vg.max_draw_count;
         }
 
-        if self.last_object_count == 0 || self.last_max_draw_count == 0 {
+        if self.last_object_count == 0
+            || self.last_work_item_count == 0
+            || self.last_max_draw_count == 0
+        {
             return Ok(());
         }
 
         let max_dim = ctx.width.max(ctx.height);
         let hiz_mip_count = (u32::BITS - max_dim.leading_zeros()).max(1);
         let max_dispatch = ctx.device.limits().max_compute_workgroups_per_dimension;
-        self.last_dispatch_width = self.last_object_count.min(max_dispatch).max(1);
-        let dispatch_height = self.last_object_count.div_ceil(self.last_dispatch_width);
+        let object_workgroups = self
+            .last_object_count
+            .div_ceil(VG_CULL_MESHLETS_PER_WORK_ITEM);
+        self.object_dispatch_width = object_workgroups.min(max_dispatch).max(1);
+        let object_dispatch_height = object_workgroups.div_ceil(self.object_dispatch_width);
         assert!(
-            dispatch_height <= max_dispatch,
+            object_dispatch_height <= max_dispatch,
             "virtual geometry object dispatch exceeds the device's 2D workgroup grid"
+        );
+        self.work_dispatch_width = self.last_work_item_count.min(max_dispatch).max(1);
+        let work_dispatch_height = self
+            .last_work_item_count
+            .div_ceil(self.work_dispatch_width);
+        assert!(
+            work_dispatch_height <= max_dispatch,
+            "virtual geometry meshlet-work dispatch exceeds the device's 2D workgroup grid"
         );
         let cull_uni = CullUniforms {
             object_count: self.last_object_count,
@@ -596,8 +656,12 @@ impl RenderPass for VirtualGeometryPass {
             hiz_mip_count,
             draw_capacity: self.last_max_draw_count,
             lod_error_threshold_px: self.lod_quality.max_error_pixels(),
-            dispatch_width: self.last_dispatch_width,
+            object_dispatch_width: self.object_dispatch_width,
+            work_item_count: self.last_work_item_count,
+            work_dispatch_width: self.work_dispatch_width,
             _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
@@ -682,6 +746,7 @@ impl RenderPass for VirtualGeometryPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if self.last_object_count == 0
+            || self.last_work_item_count == 0
             || self.last_max_draw_count == 0
             || ctx.resources.vg.is_none()
         {
@@ -709,6 +774,7 @@ impl RenderPass for VirtualGeometryPass {
                     wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(hiz_view) },
                     wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(hiz_sampler) },
                     wgpu::BindGroupEntry { binding: 10, resource: self.instance_cull_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 11, resource: self.work_item_buf.as_entire_binding() },
                 ],
             }));
             self.cull_bind_group_hiz_key = Some(hiz_key);
@@ -719,7 +785,6 @@ impl RenderPass for VirtualGeometryPass {
         let Some(draw_bg1) = self.draw_bg_1.as_ref() else { return Ok(()); };
         let Some(main_scene) = ctx.resources.main_scene.read("VirtualGeometry") else { return Ok(()); };
 
-        let object_count = self.last_object_count;
         let max_draw_count = self.last_max_draw_count;
 
         unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&self.draw_count_buf, 0, None);
@@ -730,14 +795,32 @@ impl RenderPass for VirtualGeometryPass {
         {
             let mut cpass = unsafe { &mut *ctx.compute_encoder_ptr }
                 .begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("VG Cull"),
+                    label: Some("VG Object Select"),
+                    timestamp_writes: None,
+                });
+            cpass.set_pipeline(&self.select_pipeline);
+            cpass.set_bind_group(0, cull_bg, &[]);
+            let object_workgroups = self
+                .last_object_count
+                .div_ceil(VG_CULL_MESHLETS_PER_WORK_ITEM);
+            cpass.dispatch_workgroups(
+                self.object_dispatch_width,
+                object_workgroups.div_ceil(self.object_dispatch_width),
+                1,
+            );
+        }
+
+        {
+            let mut cpass = unsafe { &mut *ctx.compute_encoder_ptr }
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("VG Meshlet Cull"),
                     timestamp_writes: None,
                 });
             cpass.set_pipeline(&self.cull_pipeline);
             cpass.set_bind_group(0, cull_bg, &[]);
             cpass.dispatch_workgroups(
-                self.last_dispatch_width,
-                object_count.div_ceil(self.last_dispatch_width),
+                self.work_dispatch_width,
+                self.last_work_item_count.div_ceil(self.work_dispatch_width),
                 1,
             );
         }

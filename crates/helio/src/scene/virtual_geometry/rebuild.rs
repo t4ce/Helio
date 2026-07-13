@@ -6,7 +6,10 @@
 
 use std::collections::HashMap;
 
-use libhelio::{GpuMeshletEntry, GpuVgObject, VgFrameData, VG_LOD_LEVELS};
+use libhelio::{
+    GpuMeshletEntry, GpuVgObject, GpuVgWorkItem, VgFrameData,
+    VG_CULL_MESHLETS_PER_WORK_ITEM, VG_LOD_LEVELS,
+};
 
 use crate::vg::VirtualMeshId;
 
@@ -39,6 +42,21 @@ fn append_unique_meshlets(
     bases
 }
 
+fn append_work_items(
+    object_index: u32,
+    max_meshlet_count: u32,
+    output: &mut Vec<GpuVgWorkItem>,
+) {
+    for local_meshlet_base in
+        (0..max_meshlet_count).step_by(VG_CULL_MESHLETS_PER_WORK_ITEM as usize)
+    {
+        output.push(GpuVgWorkItem {
+            object_index,
+            local_meshlet_base,
+        });
+    }
+}
+
 impl super::super::Scene {
     /// Returns the immutable mesh descriptors, object-level LOD metadata, and
     /// instance data consumed by the virtual-geometry pass.
@@ -50,10 +68,13 @@ impl super::super::Scene {
             meshlets: bytemuck::cast_slice(&self.vg_cpu_meshlets),
             objects: bytemuck::cast_slice(&self.vg_cpu_objects),
             instances: bytemuck::cast_slice(&self.vg_cpu_instances),
+            work_items: bytemuck::cast_slice(&self.vg_cpu_work_items),
             meshlet_count: u32::try_from(self.vg_cpu_meshlets.len())
                 .expect("virtual geometry exceeds the u32 descriptor address space"),
             object_count: u32::try_from(self.vg_cpu_objects.len())
                 .expect("virtual geometry exceeds the u32 object address space"),
+            work_item_count: u32::try_from(self.vg_cpu_work_items.len())
+                .expect("virtual geometry exceeds the u32 work-item address space"),
             max_draw_count: self.vg_max_draw_count,
             buffer_version: self.vg_buffer_version,
         })
@@ -70,6 +91,7 @@ impl super::super::Scene {
         self.vg_cpu_meshlets.clear();
         self.vg_cpu_objects.clear();
         self.vg_cpu_instances.clear();
+        self.vg_cpu_work_items.clear();
         self.vg_max_draw_count = 0;
         self.vg_cpu_objects.reserve(dense_object_count);
         self.vg_cpu_instances.reserve(dense_object_count);
@@ -97,6 +119,8 @@ impl super::super::Scene {
 
             let instance_index = u32::try_from(self.vg_cpu_instances.len())
                 .expect("virtual geometry exceeds the u32 instance address space");
+            let object_index = u32::try_from(self.vg_cpu_objects.len())
+                .expect("virtual geometry exceeds the u32 object address space");
             let mut lod_first_meshlets = [0; VG_LOD_LEVELS];
             for (level, first) in lod_first_meshlets.iter_mut().enumerate() {
                 *first = mesh_base
@@ -115,6 +139,11 @@ impl super::super::Scene {
                 lod_first_meshlets,
                 lod_meshlet_counts: mesh.lod_meshlet_counts,
             });
+            append_work_items(
+                object_index,
+                mesh.max_meshlet_count,
+                &mut self.vg_cpu_work_items,
+            );
             self.vg_max_draw_count = self
                 .vg_max_draw_count
                 .checked_add(mesh.max_meshlet_count)
@@ -123,9 +152,10 @@ impl super::super::Scene {
 
         self.vg_buffer_version = self.vg_buffer_version.wrapping_add(1);
         eprintln!(
-            "[vg] rebuild: {} objects, {} unique meshlets, {} max draws",
+            "[vg] rebuild: {} objects, {} unique meshlets, {} work spans, {} max draws",
             self.vg_cpu_objects.len(),
             self.vg_cpu_meshlets.len(),
+            self.vg_cpu_work_items.len(),
             self.vg_max_draw_count,
         );
     }
@@ -137,7 +167,7 @@ mod tests {
 
     use libhelio::{GpuMeshletEntry, VG_LOD_LEVELS};
 
-    use super::{append_unique_meshlets, VirtualMeshId, VirtualMeshRecord};
+    use super::{append_unique_meshlets, append_work_items, VirtualMeshId, VirtualMeshRecord};
 
     fn meshlet(first_index: u32) -> GpuMeshletEntry {
         GpuMeshletEntry {
@@ -188,5 +218,32 @@ mod tests {
         assert_eq!(bases[&first], 0);
         assert_eq!(bases[&second], 2);
         assert_eq!(output.iter().map(|entry| entry.first_index).collect::<Vec<_>>(), [11, 12, 20]);
+    }
+
+    #[test]
+    fn work_items_cover_exact_fixed_meshlet_spans() {
+        let mut output = Vec::new();
+
+        append_work_items(3, 0, &mut output);
+        append_work_items(5, 1, &mut output);
+        append_work_items(7, 64, &mut output);
+        append_work_items(11, 65, &mut output);
+        append_work_items(13, 130, &mut output);
+
+        assert_eq!(
+            output
+                .iter()
+                .map(|item| (item.object_index, item.local_meshlet_base))
+                .collect::<Vec<_>>(),
+            [
+                (5, 0),
+                (7, 0),
+                (11, 0),
+                (11, 64),
+                (13, 0),
+                (13, 64),
+                (13, 128),
+            ]
+        );
     }
 }

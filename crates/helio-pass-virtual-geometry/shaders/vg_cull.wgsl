@@ -1,9 +1,9 @@
 // Virtual geometry culling compute shader.
 //
-// One workgroup owns one virtual object. Lane zero conservatively culls the
-// object's transformed local-space sphere and selects exactly one LOD from the
-// measured meshoptimizer error. The 64 lanes then cooperatively cull only that
-// LOD's immutable meshlet range and append bounded indirect draw commands.
+// Stage one assigns one lane per object for conservative object culling and a
+// whole-object LOD decision. Stage two assigns one 64-lane workgroup to each
+// immutable meshlet span, so very large objects scale across the GPU instead of
+// serialising all their meshlets through one workgroup.
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -35,7 +35,7 @@ struct VgObjectData {
     instance_index:       u32,
     lod_count:            u32,
     max_meshlet_count:    u32,
-    reserved:             u32,
+    selected_lod_plus_one: u32,
     local_bounds:         vec4<f32>,
     lod_errors:           array<f32, 8>,
     lod_first_meshlets:   array<u32, 8>,
@@ -79,7 +79,12 @@ struct VgDrawMetadata {
     reserved:       u32,
 }
 
-/// Mirrors CullUniforms (Rust, 32 bytes).
+struct VgWorkItem {
+    object_index:       u32,
+    local_meshlet_base: u32,
+}
+
+/// Mirrors CullUniforms (Rust, 48 bytes).
 struct CullUniforms {
     object_count:          u32,
     screen_width:          u32,
@@ -87,14 +92,18 @@ struct CullUniforms {
     hiz_mip_count:         u32,
     draw_capacity:         u32,
     lod_error_threshold_px: f32,
-    dispatch_width:        u32,
+    object_dispatch_width: u32,
+    work_item_count:       u32,
+    work_dispatch_width:   u32,
     _pad0:                 u32,
+    _pad1:                 u32,
+    _pad2:                 u32,
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> cull_uni: CullUniforms;
 @group(0) @binding(2) var<storage, read> meshlets: array<MeshletEntry>;
-@group(0) @binding(3) var<storage, read> objects: array<VgObjectData>;
+@group(0) @binding(3) var<storage, read_write> objects: array<VgObjectData>;
 @group(0) @binding(4) var<storage, read> instances: array<InstanceData>;
 @group(0) @binding(5) var<storage, read_write> indirect: array<DrawIndexedIndirect>;
 @group(0) @binding(6) var<storage, read_write> draw_metadata: array<VgDrawMetadata>;
@@ -102,6 +111,7 @@ struct CullUniforms {
 @group(0) @binding(8) var hiz_tex: texture_2d<f32>;
 @group(0) @binding(9) var hiz_samp: sampler;
 @group(0) @binding(10) var<storage, read> instance_cull: array<InstanceCullData>;
+@group(0) @binding(11) var<storage, read> work_items: array<VgWorkItem>;
 
 var<workgroup> wg_planes: array<vec4<f32>, 6>;
 var<workgroup> wg_first_meshlet: u32;
@@ -109,6 +119,7 @@ var<workgroup> wg_meshlet_count: u32;
 var<workgroup> wg_instance_index: u32;
 var<workgroup> wg_selected_lod: u32;
 var<workgroup> wg_object_visible: u32;
+var<workgroup> wg_local_meshlet_base: u32;
 
 fn sphere_visible(center: vec3<f32>, radius: f32) -> bool {
     return (dot(wg_planes[0].xyz, center) + wg_planes[0].w >= -radius)
@@ -248,78 +259,117 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
     }
 }
 
+fn publish_frustum_planes() {
+    let vp = camera.view_proj;
+    let p0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
+    let p1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
+    let p2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
+    let p3 = vec4<f32>(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]);
+    let p4 = vec4<f32>(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);
+    let p5 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
+    wg_planes[0] = p0 / length(p0.xyz);
+    wg_planes[1] = p1 / length(p1.xyz);
+    wg_planes[2] = p2 / length(p2.xyz);
+    wg_planes[3] = p3 / length(p3.xyz);
+    wg_planes[4] = p4 / length(p4.xyz);
+    wg_planes[5] = p5 / length(p5.xyz);
+}
+
 @compute @workgroup_size(64)
-fn cs_cull(
+fn cs_select_objects(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_index) lane: u32,
 ) {
-    let object_index = workgroup_id.x + workgroup_id.y * cull_uni.dispatch_width;
-
-    // Every lane must reach the barrier, so lane zero publishes validity and
-    // range state instead of returning early.
     if lane == 0u {
-        let vp = camera.view_proj;
-        let p0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
-        let p1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
-        let p2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
-        let p3 = vec4<f32>(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]);
-        let p4 = vec4<f32>(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);
-        let p5 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
-        wg_planes[0] = p0 / length(p0.xyz);
-        wg_planes[1] = p1 / length(p1.xyz);
-        wg_planes[2] = p2 / length(p2.xyz);
-        wg_planes[3] = p3 / length(p3.xyz);
-        wg_planes[4] = p4 / length(p4.xyz);
-        wg_planes[5] = p5 / length(p5.xyz);
+        publish_frustum_planes();
+    }
+    workgroupBarrier();
 
+    let group_index = workgroup_id.x
+        + workgroup_id.y * cull_uni.object_dispatch_width;
+    let object_index = group_index * 64u + lane;
+    if object_index >= cull_uni.object_count
+        || object_index >= arrayLength(&objects)
+    {
+        return;
+    }
+
+    var selected_lod_plus_one = 0u;
+    let object = objects[object_index];
+    let lod_count = min(object.lod_count, 8u);
+    if lod_count > 0u
+        && object.instance_index < arrayLength(&instances)
+        && object.instance_index < arrayLength(&instance_cull)
+    {
+        let inst = instances[object.instance_index];
+        let derived = instance_cull[object.instance_index];
+        if derived.valid_transform != 0u {
+            let center_ws = (
+                inst.transform * vec4<f32>(object.local_bounds.xyz, 1.0)
+            ).xyz;
+            let world_radius = max(object.local_bounds.w * derived.max_scale, 0.0);
+            if sphere_visible(center_ws, world_radius) {
+                let camera_distance = length(center_ws - camera.position_near.xyz);
+                let closest_distance = max(
+                    camera_distance - world_radius,
+                    max(camera.position_near.w, 1.0e-4),
+                );
+                let focal_pixels = abs(camera.proj[1][1])
+                    * f32(cull_uni.screen_height) * 0.5;
+                var selected_lod = 0u;
+                var level = 1u;
+                loop {
+                    if level >= lod_count {
+                        break;
+                    }
+                    let error_px = object.lod_errors[level]
+                        * derived.max_scale * focal_pixels / closest_distance;
+                    if error_px <= cull_uni.lod_error_threshold_px {
+                        selected_lod = level;
+                        level += 1u;
+                    } else {
+                        break;
+                    }
+                }
+                selected_lod_plus_one = selected_lod + 1u;
+            }
+        }
+    }
+    objects[object_index].selected_lod_plus_one = selected_lod_plus_one;
+}
+
+@compute @workgroup_size(64)
+fn cs_cull_meshlets(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(local_invocation_index) lane: u32,
+) {
+    let work_index = workgroup_id.x
+        + workgroup_id.y * cull_uni.work_dispatch_width;
+
+    if lane == 0u {
+        publish_frustum_planes();
         wg_first_meshlet = 0u;
         wg_meshlet_count = 0u;
         wg_instance_index = 0u;
         wg_selected_lod = 0u;
         wg_object_visible = 0u;
+        wg_local_meshlet_base = 0u;
 
-        if object_index < cull_uni.object_count && object_index < arrayLength(&objects) {
-            let object = objects[object_index];
-            let lod_count = min(object.lod_count, 8u);
-            if lod_count > 0u
-                && object.instance_index < arrayLength(&instances)
-                && object.instance_index < arrayLength(&instance_cull)
-            {
-                let inst = instances[object.instance_index];
-                let derived = instance_cull[object.instance_index];
-                if derived.valid_transform != 0u {
-                    let center_ws = (
-                        inst.transform * vec4<f32>(object.local_bounds.xyz, 1.0)
-                    ).xyz;
-                    let world_radius = max(object.local_bounds.w * derived.max_scale, 0.0);
-                    if sphere_visible(center_ws, world_radius) {
-                        let camera_distance = length(center_ws - camera.position_near.xyz);
-                        let closest_distance = max(
-                            camera_distance - world_radius,
-                            max(camera.position_near.w, 1.0e-4),
-                        );
-                        let focal_pixels = abs(camera.proj[1][1])
-                            * f32(cull_uni.screen_height) * 0.5;
-                        var selected_lod = 0u;
-                        var level = 1u;
-                        loop {
-                            if level >= lod_count {
-                                break;
-                            }
-                            let error_px = object.lod_errors[level]
-                                * derived.max_scale * focal_pixels / closest_distance;
-                            if error_px <= cull_uni.lod_error_threshold_px {
-                                selected_lod = level;
-                                level += 1u;
-                            } else {
-                                break;
-                            }
-                        }
-
+        if work_index < cull_uni.work_item_count
+            && work_index < arrayLength(&work_items)
+        {
+            let item = work_items[work_index];
+            if item.object_index < arrayLength(&objects) {
+                let object = objects[item.object_index];
+                if object.selected_lod_plus_one != 0u {
+                    let selected_lod = object.selected_lod_plus_one - 1u;
+                    let selected_count = object.lod_meshlet_counts[selected_lod];
+                    if item.local_meshlet_base < selected_count {
                         wg_first_meshlet = object.lod_first_meshlets[selected_lod];
-                        wg_meshlet_count = object.lod_meshlet_counts[selected_lod];
+                        wg_meshlet_count = selected_count;
                         wg_instance_index = object.instance_index;
                         wg_selected_lod = selected_lod;
+                        wg_local_meshlet_base = item.local_meshlet_base;
                         wg_object_visible = 1u;
                     }
                 }
@@ -331,17 +381,12 @@ fn cs_cull(
     if wg_object_visible == 0u {
         return;
     }
-
-    var local_meshlet = lane;
-    loop {
-        if local_meshlet >= wg_meshlet_count {
-            break;
-        }
+    let local_meshlet = wg_local_meshlet_base + lane;
+    if local_meshlet < wg_meshlet_count {
         cull_meshlet(
             wg_first_meshlet + local_meshlet,
             wg_instance_index,
             wg_selected_lod,
         );
-        local_meshlet += 64u;
     }
 }

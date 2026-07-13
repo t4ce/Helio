@@ -494,10 +494,14 @@ pub struct VgFrameData<'a> {
     pub objects: &'a [u8],
     /// Raw bytes of a `GpuInstanceData` array (one entry per VG object).
     pub instances: &'a [u8],
+    /// Raw bytes of immutable `GpuVgWorkItem` expansion records.
+    pub work_items: &'a [u8],
     /// Number of unique meshlet descriptors across all referenced virtual meshes.
     pub meshlet_count: u32,
     /// Number of VG objects (and corresponding instance entries).
     pub object_count: u32,
+    /// Number of second-stage 64-meshlet work spans.
+    pub work_item_count: u32,
     /// Exact worst-case number of indirect draws after selecting one LOD per object.
     pub max_draw_count: u32,
     /// Version counter incremented each time meshlet or instance data changes.

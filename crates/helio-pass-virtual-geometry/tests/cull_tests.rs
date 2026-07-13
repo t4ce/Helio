@@ -7,7 +7,7 @@ use std::mem;
 
 // ── Mirror private types ──────────────────────────────────────────────────────
 
-/// Mirrors private CullUniforms (32 bytes).
+/// Mirrors private CullUniforms (48 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CullUniforms {
@@ -17,8 +17,12 @@ struct CullUniforms {
     hiz_mip_count: u32,
     draw_capacity: u32,
     lod_error_threshold_px: f32,
-    dispatch_width: u32,
+    object_dispatch_width: u32,
+    work_item_count: u32,
+    work_dispatch_width: u32,
     _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 /// Mirrors private VgGlobals (96 bytes).
@@ -73,8 +77,8 @@ fn gbuffer_shader_parses_and_validates() {
 // ── CullUniforms layout tests ─────────────────────────────────────────────────
 
 #[test]
-fn cull_uniforms_size_is_32() {
-    assert_eq!(mem::size_of::<CullUniforms>(), 32);
+fn cull_uniforms_size_is_48() {
+    assert_eq!(mem::size_of::<CullUniforms>(), 48);
 }
 
 #[test]
@@ -119,17 +123,17 @@ fn workgroup_size_is_64() {
 }
 
 #[test]
-fn dispatch_uses_one_workgroup_per_object_across_a_2d_grid() {
-    fn grid(object_count: u32, limit: u32) -> (u32, u32) {
-        if object_count == 0 {
+fn dispatch_uses_parallel_object_lanes_and_meshlet_spans() {
+    fn grid(workgroup_count: u32, limit: u32) -> (u32, u32) {
+        if workgroup_count == 0 {
             return (0, 0);
         }
-        let width = object_count.min(limit);
-        (width, object_count.div_ceil(width))
+        let width = workgroup_count.min(limit);
+        (width, workgroup_count.div_ceil(width))
     }
 
-    assert_eq!(grid(1, 65_535), (1, 1));
-    assert_eq!(grid(65_535, 65_535), (65_535, 1));
+    assert_eq!(grid(1_u32.div_ceil(WORKGROUP_SIZE), 65_535), (1, 1));
+    assert_eq!(grid(65_536_u32.div_ceil(WORKGROUP_SIZE), 65_535), (1024, 1));
     assert_eq!(grid(65_536, 65_535), (65_535, 2));
     assert_eq!(grid(0, 65_535), (0, 0));
 }

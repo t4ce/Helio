@@ -135,6 +135,9 @@ pub struct Scene {
     /// Instance data for all VG objects (one entry per VG object, in order).
     pub(in crate::scene) vg_cpu_instances: Vec<helio_core::GpuInstanceData>,
 
+    /// Immutable 64-meshlet expansion spans for the second GPU cull stage.
+    pub(in crate::scene) vg_cpu_work_items: Vec<libhelio::GpuVgWorkItem>,
+
     /// Exact worst-case number of draws after choosing one LOD per object.
     pub(in crate::scene) vg_max_draw_count: u32,
 
@@ -285,6 +288,7 @@ impl Scene {
             vg_cpu_meshlets: Vec::new(),
             vg_cpu_objects: Vec::new(),
             vg_cpu_instances: Vec::new(),
+            vg_cpu_work_items: Vec::new(),
             vg_max_draw_count: 0,
             water_volumes: DenseArena::new(),
             water_volumes_dirty: false,

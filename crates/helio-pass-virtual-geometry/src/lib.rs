@@ -169,8 +169,12 @@ pub(crate) struct CullUniforms {
     pub hiz_mip_count: u32,
     pub draw_capacity: u32,
     pub lod_error_threshold_px: f32,
-    pub dispatch_width: u32,
+    pub object_dispatch_width: u32,
+    pub work_item_count: u32,
+    pub work_dispatch_width: u32,
     _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 #[cfg(test)]
@@ -193,7 +197,7 @@ mod tests {
     #[test]
     fn instance_cull_data_is_gpu_aligned() {
         assert_eq!(std::mem::size_of::<InstanceCullData>(), 16);
-        assert_eq!(std::mem::size_of::<CullUniforms>(), 32);
+        assert_eq!(std::mem::size_of::<CullUniforms>(), 48);
     }
 
     #[test]

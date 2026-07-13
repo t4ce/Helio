@@ -11,6 +11,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use libhelio::{
     GpuCameraUniforms, GpuInstanceData, GpuMeshletEntry, GpuVgDraw, GpuVgObject,
+    GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM,
 };
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;
@@ -29,8 +30,12 @@ struct CullUniforms {
     hiz_mip_count: u32,
     draw_capacity: u32,
     lod_error_threshold_px: f32,
-    dispatch_width: u32,
+    object_dispatch_width: u32,
+    work_item_count: u32,
+    work_dispatch_width: u32,
     _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 #[repr(C)]
@@ -50,11 +55,14 @@ struct Case {
 }
 
 struct CaseBuffers {
-    bind_group: wgpu::BindGroup,
+    select_bind_group: wgpu::BindGroup,
+    cull_bind_group: wgpu::BindGroup,
     draw_count: wgpu::Buffer,
     draw_count_readback: wgpu::Buffer,
-    dispatch_width: u32,
-    dispatch_height: u32,
+    object_dispatch_width: u32,
+    object_dispatch_height: u32,
+    work_dispatch_width: u32,
+    work_dispatch_height: u32,
     expected_draws: u32,
 }
 
@@ -109,15 +117,24 @@ async fn run() {
         label: Some("VG Cull Benchmark Shader"),
         source: wgpu::ShaderSource::Wgsl(CULL_SHADER.into()),
     });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("VG Cull Benchmark Pipeline"),
+    let select_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("VG Object Select Benchmark Pipeline"),
         layout: None,
         module: &shader,
-        entry_point: Some("cs_cull"),
+        entry_point: Some("cs_select_objects"),
         compilation_options: Default::default(),
         cache: None,
     });
-    let bind_group_layout = pipeline.get_bind_group_layout(0);
+    let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("VG Meshlet Cull Benchmark Pipeline"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("cs_cull_meshlets"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let select_bind_group_layout = select_pipeline.get_bind_group_layout(0);
+    let cull_bind_group_layout = cull_pipeline.get_bind_group_layout(0);
     let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
         label: Some("VG Cull Benchmark Timestamps"),
         ty: wgpu::QueryType::Timestamp,
@@ -148,13 +165,21 @@ async fn run() {
             println!("{},SKIPPED,storage_binding_limit", case.name);
             continue;
         }
-        let buffers = create_case_buffers(&device, &queue, &bind_group_layout, case, &limits);
+        let buffers = create_case_buffers(
+            &device,
+            &queue,
+            &select_bind_group_layout,
+            &cull_bind_group_layout,
+            case,
+            &limits,
+        );
 
         for _ in 0..warmup {
             let _ = dispatch_and_time(
                 &device,
                 &queue,
-                &pipeline,
+                &select_pipeline,
+                &cull_pipeline,
                 &buffers,
                 &query_set,
                 &query_resolve,
@@ -167,7 +192,8 @@ async fn run() {
             timings_ms.push(dispatch_and_time(
                 &device,
                 &queue,
-                &pipeline,
+                &select_pipeline,
+                &cull_pipeline,
                 &buffers,
                 &query_set,
                 &query_resolve,
@@ -206,18 +232,23 @@ fn case_fits_limits(case: Case, limits: &wgpu::Limits) -> bool {
     let indirect_bytes = u64::from(TOTAL_MESHLETS) * 20;
     let metadata_bytes =
         u64::from(TOTAL_MESHLETS) * std::mem::size_of::<GpuVgDraw>() as u64;
+    let work_item_count = u64::from(case.object_count)
+        * u64::from(case.meshlets_per_object.div_ceil(VG_CULL_MESHLETS_PER_WORK_ITEM));
+    let work_item_bytes = work_item_count * std::mem::size_of::<GpuVgWorkItem>() as u64;
     let largest = meshlet_bytes
         .max(object_bytes)
         .max(instance_bytes)
         .max(indirect_bytes)
-        .max(metadata_bytes);
+        .max(metadata_bytes)
+        .max(work_item_bytes);
     largest <= u64::from(limits.max_storage_buffer_binding_size)
 }
 
 fn create_case_buffers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    layout: &wgpu::BindGroupLayout,
+    select_layout: &wgpu::BindGroupLayout,
+    cull_layout: &wgpu::BindGroupLayout,
     case: Case,
     limits: &wgpu::Limits,
 ) -> CaseBuffers {
@@ -280,11 +311,26 @@ fn create_case_buffers(
         })
         .collect();
 
-    let dispatch_width = case
-        .object_count
+    let object_workgroups = case.object_count.div_ceil(VG_CULL_MESHLETS_PER_WORK_ITEM);
+    let object_dispatch_width = object_workgroups
         .min(limits.max_compute_workgroups_per_dimension)
         .max(1);
-    let dispatch_height = case.object_count.div_ceil(dispatch_width);
+    let object_dispatch_height = object_workgroups.div_ceil(object_dispatch_width);
+    let work_items: Vec<_> = (0..case.object_count)
+        .flat_map(|object_index| {
+            (0..case.meshlets_per_object)
+                .step_by(VG_CULL_MESHLETS_PER_WORK_ITEM as usize)
+                .map(move |local_meshlet_base| GpuVgWorkItem {
+                    object_index,
+                    local_meshlet_base,
+                })
+        })
+        .collect();
+    let work_item_count = u32::try_from(work_items.len()).expect("benchmark work items exceed u32");
+    let work_dispatch_width = work_item_count
+        .min(limits.max_compute_workgroups_per_dimension)
+        .max(1);
+    let work_dispatch_height = work_item_count.div_ceil(work_dispatch_width);
     let cull_uniforms = CullUniforms {
         object_count: case.object_count,
         screen_width: 1920,
@@ -292,8 +338,12 @@ fn create_case_buffers(
         hiz_mip_count: 1,
         draw_capacity: TOTAL_MESHLETS,
         lod_error_threshold_px: 2.0,
-        dispatch_width,
+        object_dispatch_width,
+        work_item_count,
+        work_dispatch_width,
         _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
     };
 
     let camera_buffer = init_buffer(device, "Benchmark Camera", bytemuck::bytes_of(&camera), wgpu::BufferUsages::UNIFORM);
@@ -302,6 +352,7 @@ fn create_case_buffers(
     let object_buffer = init_buffer(device, "Benchmark Objects", bytemuck::cast_slice(&objects), wgpu::BufferUsages::STORAGE);
     let instance_buffer = init_buffer(device, "Benchmark Instances", bytemuck::cast_slice(&instances), wgpu::BufferUsages::STORAGE);
     let instance_cull_buffer = init_buffer(device, "Benchmark Instance Cull", bytemuck::cast_slice(&instance_cull), wgpu::BufferUsages::STORAGE);
+    let work_item_buffer = init_buffer(device, "Benchmark Work Items", bytemuck::cast_slice(&work_items), wgpu::BufferUsages::STORAGE);
     let indirect_buffer = output_buffer(device, "Benchmark Indirect", u64::from(TOTAL_MESHLETS) * 20);
     let metadata_buffer = output_buffer(device, "Benchmark Draw Metadata", u64::from(TOTAL_MESHLETS) * std::mem::size_of::<GpuVgDraw>() as u64);
     let draw_count = output_buffer(device, "Benchmark Draw Count", 4);
@@ -342,9 +393,20 @@ fn create_case_buffers(
         ..Default::default()
     });
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let select_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("VG Object Select Benchmark Bind Group"),
+        layout: select_layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: cull_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: object_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: instance_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 10, resource: instance_cull_buffer.as_entire_binding() },
+        ],
+    });
+    let cull_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("VG Cull Benchmark Bind Group"),
-        layout,
+        layout: cull_layout,
         entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: cull_buffer.as_entire_binding() },
@@ -357,15 +419,19 @@ fn create_case_buffers(
             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&hiz_view) },
             wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&hiz_sampler) },
             wgpu::BindGroupEntry { binding: 10, resource: instance_cull_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 11, resource: work_item_buffer.as_entire_binding() },
         ],
     });
 
     CaseBuffers {
-        bind_group,
+        select_bind_group,
+        cull_bind_group,
         draw_count,
         draw_count_readback,
-        dispatch_width,
-        dispatch_height,
+        object_dispatch_width,
+        object_dispatch_height,
+        work_dispatch_width,
+        work_dispatch_height,
         expected_draws: TOTAL_MESHLETS,
     }
 }
@@ -373,7 +439,8 @@ fn create_case_buffers(
 fn dispatch_and_time(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    pipeline: &wgpu::ComputePipeline,
+    select_pipeline: &wgpu::ComputePipeline,
+    cull_pipeline: &wgpu::ComputePipeline,
     buffers: &CaseBuffers,
     query_set: &wgpu::QuerySet,
     query_resolve: &wgpu::Buffer,
@@ -389,9 +456,26 @@ fn dispatch_and_time(
             label: Some("VG Cull Benchmark Dispatch"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &buffers.bind_group, &[]);
-        pass.dispatch_workgroups(buffers.dispatch_width, buffers.dispatch_height, 1);
+        pass.set_pipeline(select_pipeline);
+        pass.set_bind_group(0, &buffers.select_bind_group, &[]);
+        pass.dispatch_workgroups(
+            buffers.object_dispatch_width,
+            buffers.object_dispatch_height,
+            1,
+        );
+    }
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("VG Meshlet Cull Benchmark Dispatch"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(cull_pipeline);
+        pass.set_bind_group(0, &buffers.cull_bind_group, &[]);
+        pass.dispatch_workgroups(
+            buffers.work_dispatch_width,
+            buffers.work_dispatch_height,
+            1,
+        );
     }
     encoder.write_timestamp(query_set, 1);
     encoder.resolve_query_set(query_set, 0..2, query_resolve, 0);

@@ -16,6 +16,9 @@ pub const MESHLET_MAX_TRIANGLES: u32 = 64;
 /// Number of progressive LOD levels stored for every virtual mesh.
 pub const VG_LOD_LEVELS: usize = 8;
 
+/// Number of meshlets processed cooperatively by one VG cull workgroup.
+pub const VG_CULL_MESHLETS_PER_WORK_ITEM: u32 = 64;
+
 /// GPU-side descriptor for a single meshlet (a small cluster of triangles). Exactly 64 bytes.
 ///
 /// Stored once per virtual mesh in a tightly-packed storage buffer. Virtual
@@ -70,9 +73,9 @@ pub struct GpuMeshletEntry {
 
 /// GPU-side descriptor for one virtual-geometry object. Exactly 128 bytes.
 ///
-/// One compute workgroup owns one object. Lane zero performs conservative
-/// object culling and selects a single LOD from the measured simplification
-/// errors; all lanes then cull only that LOD's immutable meshlet range.
+/// The first compute stage assigns one lane to each object for conservative
+/// object culling and a single measured-error LOD decision. The second stage
+/// expands that selected LOD across immutable [`GpuVgWorkItem`] spans.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuVgObject {
@@ -83,7 +86,9 @@ pub struct GpuVgObject {
     /// Largest meshlet count among the object's LODs. This object's exact
     /// contribution to the worst-case indirect draw capacity.
     pub max_meshlet_count: u32,
-    /// Reserved for future object flags.
+    /// Per-frame GPU scratch containing selected LOD + 1; zero means culled.
+    /// CPU publishers must initialize this to zero. The object-selection stage
+    /// overwrites it before any meshlet span reads it.
     pub reserved: u32,
 
     /// Conservative mesh-local bounding sphere `[center.xyz, radius]`.
@@ -110,6 +115,19 @@ pub struct GpuVgDraw {
     pub reserved: u32,
 }
 
+/// Immutable expansion record for the second-stage meshlet cull. Exactly 8 bytes.
+///
+/// Records are built once with the object layout. Each record covers up to 64
+/// meshlets from whichever whole-object LOD the first GPU stage selects. Using
+/// fixed spans keeps work bounded while allowing a very large object to occupy
+/// many GPU workgroups instead of serialising through one workgroup.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuVgWorkItem {
+    pub object_index: u32,
+    pub local_meshlet_base: u32,
+}
+
 const _: () = {
     assert!(
         std::mem::size_of::<GpuMeshletEntry>() == 64,
@@ -123,11 +141,18 @@ const _: () = {
         std::mem::size_of::<GpuVgDraw>() == 16,
         "GpuVgDraw must be exactly 16 bytes"
     );
+    assert!(
+        std::mem::size_of::<GpuVgWorkItem>() == 8,
+        "GpuVgWorkItem must be exactly 8 bytes"
+    );
 };
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuMeshletEntry, GpuVgDraw, GpuVgObject, VG_LOD_LEVELS};
+    use super::{
+        GpuMeshletEntry, GpuVgDraw, GpuVgObject, GpuVgWorkItem,
+        VG_CULL_MESHLETS_PER_WORK_ITEM, VG_LOD_LEVELS,
+    };
 
     #[test]
     fn gpu_virtual_geometry_layouts_are_stable() {
@@ -135,7 +160,9 @@ mod tests {
         assert_eq!(std::mem::size_of::<GpuMeshletEntry>(), 64);
         assert_eq!(std::mem::size_of::<GpuVgObject>(), 128);
         assert_eq!(std::mem::size_of::<GpuVgDraw>(), 16);
+        assert_eq!(std::mem::size_of::<GpuVgWorkItem>(), 8);
         assert_eq!(std::mem::align_of::<GpuVgObject>(), 4);
+        assert_eq!(VG_CULL_MESHLETS_PER_WORK_ITEM, 64);
     }
 }
 
