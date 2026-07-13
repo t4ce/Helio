@@ -46,7 +46,10 @@
       "Bash(then echo \"$f\")",
       "Bash(fi)",
       "Bash(do if grep -q \"update_light\" \"$f\")",
-      "Bash(do sed -i 's/libhelio::Movability/helio::Movability/g' \"$f\")"
+      "Bash(do sed -i 's/libhelio::Movability/helio::Movability/g' \"$f\")",
+      "Bash(cat)",
+      "Bash(python3 /tmp/gen_tables.py)",
+      "Read(//tmp/**)"
     ]
   }
 }

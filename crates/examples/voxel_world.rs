@@ -1,16 +1,14 @@
 //! CPU-side procedural voxel world + brick baker for `voxel_demo`.
 //!
-//! `VoxelRayMarchPass` (dynamic mode) reads a dense per-volume brick grid from
-//! `GpuScene::voxel_brick_pool` / `voxel_data_pool`, but nothing in the engine
-//! currently bakes `Scene::edit_voxel_volume` edits into that grid — the edit
-//! ring and CPU octree exist but no compute pass consumes them yet. So this
-//! module owns the voxel data on the CPU, generates it procedurally, and
-//! uploads baked bricks straight to the shared GPU pool via `queue.write_buffer`.
+//! Rendering goes through `VoxelMeshPass` (mesh mode): this module owns the
+//! voxel material data on the CPU, generates it procedurally, bakes each
+//! brick into `VoxelMeshPass`'s `brick_meta_buf`/`voxel_data_buf` layout, and
+//! the caller calls `VoxelMeshPass::mark_dirty()` per touched brick so its
+//! marching-cubes compute pass re-extracts a real triangle mesh — rendered
+//! through the normal rasterization pipeline instead of a per-frame raymarch.
 //!
-//! The volume's GPU-side size is fixed by the engine at `BRICK_SIZE` (8) bricks
-//! per axis of `BRICK_SIZE` voxels each — i.e. always a dense 64^3 voxel grid,
-//! regardless of `VoxelVolumeDescriptor::root_extent` (see
-//! `VoxelOctree::new`/`VoxelVolumeRecord::upload_to_gpu`).
+//! The grid is always a dense 64^3 voxel volume (8 bricks per axis of 8
+//! voxels each, matching `VOXEL_MESH_BRICK_VOXEL_WORDS`/`BRICK_SIZE`).
 
 use std::sync::Arc;
 
@@ -262,61 +260,80 @@ impl VoxelWorld {
         occupied
     }
 
-    /// Full bake: `(brick_meta, voxel_data)` ready to upload to `voxel_brick_pool` / `voxel_data_pool`.
-    pub fn bake_all(&self) -> (Vec<u32>, Vec<u32>) {
-        let mut meta = vec![0u32; BRICK_COUNT * 2];
-        let mut data = vec![0u32; BRICK_COUNT * WORDS_PER_BRICK];
-
-        for bz in 0..BRICKS_PER_AXIS {
-            for by in 0..BRICKS_PER_AXIS {
-                for bx in 0..BRICKS_PER_AXIS {
-                    let brick_idx = (bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS + by * BRICKS_PER_AXIS + bx) as usize;
-                    let mut brick_words = [0u32; WORDS_PER_BRICK];
-                    let occupied = self.bake_brick(bx, by, bz, &mut brick_words);
-
-                    let data_offset = (brick_idx * WORDS_PER_BRICK) as u32;
-                    meta[brick_idx * 2] = if occupied { (1u32 << 24) | data_offset } else { 0 };
-                    data[brick_idx * WORDS_PER_BRICK..(brick_idx + 1) * WORDS_PER_BRICK]
-                        .copy_from_slice(&brick_words);
-                }
-            }
-        }
-
-        (meta, data)
+    /// World-space origin of a brick's local (0,0,0) voxel corner — the value
+    /// `VoxelMeshPass::mark_dirty` needs so its extract shader can place
+    /// generated vertices in world space (see `voxel_surface_extract.wgsl`).
+    fn brick_origin(bx: u32, by: u32, bz: u32, voxel_size: f32) -> [f32; 3] {
+        let half = GRID_DIM as f32 / 2.0;
+        let gx = (bx * BRICK_DIM) as f32 - half;
+        let gy = (by * BRICK_DIM) as f32 - half;
+        let gz = (bz * BRICK_DIM) as f32 - half;
+        [gx * voxel_size, gy * voxel_size, gz * voxel_size]
     }
 
-    /// Re-bakes and uploads only the bricks touched by a `BrickRange`.
-    pub fn upload_range(&self, queue: &Arc<wgpu::Queue>, brick_pool: &wgpu::Buffer, data_pool: &wgpu::Buffer, range: BrickRange) {
+    /// Re-bakes and uploads the bricks touched by a `BrickRange` into
+    /// `VoxelMeshPass`'s buffers. Returns `(brick_idx, origin)` for every
+    /// touched brick (occupied or not) — the caller must `mark_dirty()` each
+    /// one so the extract pass re-runs (an emptied brick needs to re-extract
+    /// to zero triangles too, not just a newly-filled one).
+    pub fn upload_range_mesh(
+        &self,
+        queue: &Arc<wgpu::Queue>,
+        brick_meta_buf: &wgpu::Buffer,
+        voxel_data_buf: &wgpu::Buffer,
+        voxel_size: f32,
+        range: BrickRange,
+    ) -> Vec<(u32, [f32; 3])> {
+        let mut touched = Vec::new();
         for bz in range.min[2]..=range.max[2] {
             for by in range.min[1]..=range.max[1] {
                 for bx in range.min[0]..=range.max[0] {
-                    let brick_idx = (bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS + by * BRICKS_PER_AXIS + bx) as usize;
+                    let brick_idx = bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS + by * BRICKS_PER_AXIS + bx;
                     let mut brick_words = [0u32; WORDS_PER_BRICK];
                     let occupied = self.bake_brick(bx, by, bz, &mut brick_words);
 
-                    let data_offset = (brick_idx * WORDS_PER_BRICK) as u32;
-                    let meta_word = if occupied { (1u32 << 24) | data_offset } else { 0 };
+                    let data_offset = brick_idx * WORDS_PER_BRICK as u32;
+                    // VoxelMeshPass's GpuBrickMeta is two plain u32 fields
+                    // (data_offset, occupancy) — unlike VoxelRayMarchPass's
+                    // packed single word, see voxel_surface_extract.wgsl.
+                    let meta = [data_offset, occupied as u32];
 
                     queue.write_buffer(
-                        brick_pool,
-                        (brick_idx * 2 * 4) as u64,
-                        bytemuck::bytes_of(&meta_word),
+                        brick_meta_buf,
+                        (brick_idx as u64) * 8,
+                        bytemuck::cast_slice(&meta),
                     );
                     queue.write_buffer(
-                        data_pool,
+                        voxel_data_buf,
                         (data_offset as u64) * 4,
                         bytemuck::cast_slice(&brick_words),
                     );
+
+                    touched.push((brick_idx, Self::brick_origin(bx, by, bz, voxel_size)));
                 }
             }
         }
+        touched
     }
 
-    /// Uploads a full bake to the shared GPU voxel pools.
-    pub fn upload_all(&self, queue: &Arc<wgpu::Queue>, brick_pool: &wgpu::Buffer, data_pool: &wgpu::Buffer) {
-        let (meta, data) = self.bake_all();
-        queue.write_buffer(brick_pool, 0, bytemuck::cast_slice(&meta));
-        queue.write_buffer(data_pool, 0, bytemuck::cast_slice(&data));
+    /// Bakes and uploads every brick in the volume. See `upload_range_mesh`.
+    pub fn upload_all_mesh(
+        &self,
+        queue: &Arc<wgpu::Queue>,
+        brick_meta_buf: &wgpu::Buffer,
+        voxel_data_buf: &wgpu::Buffer,
+        voxel_size: f32,
+    ) -> Vec<(u32, [f32; 3])> {
+        self.upload_range_mesh(
+            queue,
+            brick_meta_buf,
+            voxel_data_buf,
+            voxel_size,
+            BrickRange {
+                min: [0, 0, 0],
+                max: [BRICKS_PER_AXIS - 1, BRICKS_PER_AXIS - 1, BRICKS_PER_AXIS - 1],
+            },
+        )
     }
 }
 

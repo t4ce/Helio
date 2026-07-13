@@ -1,4 +1,4 @@
-//! Voxel Demo — procedurally generated voxel world with DDA ray marching.
+//! Voxel Demo — procedurally generated voxel world, mesh-rendered.
 //!
 //! Controls:
 //!   Mouse click        – grab cursor / look around
@@ -17,11 +17,11 @@ use std::time::Instant;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, GpuLight, LightType, Renderer,
-    RendererConfig, Scene, SceneActor, RenderGraph, RenderPass, VoxelVolumeDescriptor, VoxelMode,
+    RendererConfig, Scene, SceneActor, RenderGraph, VoxelVolumeDescriptor, VoxelMode,
     VoxelVolumeId,
 };
 use helio_pass_fxaa::FxaaPass;
-use helio_pass_voxel_raymarch::VoxelRayMarchPass;
+use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_voxel_core::GpuVoxelMaterial;
 use winit::{
     application::ApplicationHandler,
@@ -131,8 +131,7 @@ impl AppState {
         pitch: f32,
         world: &mut VoxelWorld,
         queue: &Arc<wgpu::Queue>,
-        brick_pool: &wgpu::Buffer,
-        data_pool: &wgpu::Buffer,
+        mesh_pass: &mut VoxelMeshPass,
     ) {
         let orientation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
         let forward = orientation * -Vec3::Z;
@@ -141,7 +140,11 @@ impl AppState {
         let radius_grid = 2.0 / VOXEL_SIZE;
 
         if let Some(range) = world.paint_sphere(center_grid, radius_grid, material, add) {
-            world.upload_range(queue, brick_pool, data_pool, range);
+            let (meta_buf, data_buf) = (mesh_pass.brick_meta_buf().clone(), mesh_pass.voxel_data_buf().clone());
+            let touched = world.upload_range_mesh(queue, &meta_buf, &data_buf, VOXEL_SIZE, range);
+            for (brick_idx, origin) in touched {
+                mesh_pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE);
+            }
         }
     }
 }
@@ -203,7 +206,11 @@ impl ApplicationHandler for App {
         );
 
         // ── Renderer + custom graph with voxel pass ──────────────────────────
-        let config = RendererConfig::new(size.width, size.height, surface_format);
+        // render_scale defaults to 0.75 (Renderer's shared depth texture is sized
+        // from it), but our graph has no TAA upscale step and locks pre_aa at
+        // full window resolution — a scaled depth buffer here would mismatch the
+        // full-res color attachment, so pin it to 1.0.
+        let config = RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
         let mut scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -225,7 +232,10 @@ impl ApplicationHandler for App {
             root_extent: ROOT_EXTENT,
             local_to_world: glam::Mat4::IDENTITY,
             movability: Some(libhelio::Movability::Stationary),
-            mode: Some(VoxelMode::Dynamic),
+            // Auto (mesh) mode: real triangles through the normal rasterization
+            // pipeline. Dynamic (VoxelRayMarchPass) is meant for volumes under
+            // heavy per-frame editing — not the case here.
+            mode: Some(VoxelMode::Auto),
             material_palette: vec![
                 GpuVoxelMaterial { color: [0.0, 0.0, 0.0], roughness: 1.0, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // air (unused)
                 GpuVoxelMaterial { color: [0.3, 0.7, 0.25], roughness: 0.8, metalness: 0.0, emissive: 0.0, _pad: [0; 2] }, // grass
@@ -258,43 +268,37 @@ impl ApplicationHandler for App {
             _pad: 0,
         }));
 
-        // Procedurally generate the world on the CPU and bake it straight to the
-        // shared GPU voxel pools (see voxel_world.rs for why this bypasses
-        // Scene::edit_voxel_volume).
+        // Procedurally generate the world on the CPU; baked into VoxelMeshPass's
+        // buffers and mark_dirty()'d below, once the pass exists.
         let world_seed = 1;
         let mut world = VoxelWorld::empty();
         world.generate(world_seed);
-        world.upload_all(&queue, &scene.gpu_scene().voxel_brick_pool, &scene.gpu_scene().voxel_data_pool);
 
-        // Build a custom graph with VoxelRayMarchPass.
-        // VoxelRayMarchPass only writes the intermediate "pre_aa" resource, so a
-        // terminal pass is required to blit it onto the actual swapchain target —
-        // without one, the surface texture is never written and shows uninitialized
-        // GPU memory (flickering magenta/garbage).
-        //
-        // We use FxaaPass rather than PostProcessPass for that terminal blit:
-        // PostProcessPass clears+rewrites the target straight from "pre_aa" on
-        // its own, so if it ran after an FxaaPass it would just discard the
-        // antialiased result (see how build_fxaa_graph_internal in
-        // helio-default-graphs composes them). FxaaPass reads "pre_aa" and
-        // writes directly to the swapchain target itself, so it can do both
-        // jobs — anti-aliasing and the terminal blit — in one pass.
+        // Build a custom graph: VoxelMeshPass (real triangles, writes "pre_aa")
+        // then FxaaPass (reads "pre_aa", writes directly to the swapchain
+        // target — doing double duty as anti-aliasing and the terminal blit;
+        // PostProcessPass would instead clear+rewrite the target straight from
+        // "pre_aa" and discard FXAA's result if chained after it, see how
+        // build_fxaa_graph_internal in helio-default-graphs composes them).
         let mut graph = RenderGraph::new(&device, &queue);
-        let mut voxel_rm_pass = VoxelRayMarchPass::new(&device, surface_format);
-        // VoxelRayMarchPass allocates its output textures at a placeholder 1x1 and
-        // only resizes them in on_resize(), which the engine normally calls from a
-        // window-resize event. Since RenderGraph::lock() never calls it, we have to
-        // size the pass explicitly here or it ray marches into a 1x1 texture forever.
-        voxel_rm_pass.on_resize(&device, size.width, size.height);
-        graph.add_pass(Box::new(voxel_rm_pass));
+        graph.add_pass(Box::new(VoxelMeshPass::new(&device, surface_format)));
         graph.add_pass(Box::new(FxaaPass::new(&device, surface_format)));
         graph.lock(size.width, size.height);
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             device.clone(), queue.clone(),
             config.surface_format, config.width, config.height, config.render_scale,
             config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
+
+        {
+            let pass = renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");
+            let (meta_buf, data_buf) = (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
+            let touched = world.upload_all_mesh(&queue, &meta_buf, &data_buf, VOXEL_SIZE);
+            for (brick_idx, origin) in touched {
+                pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE);
+            }
+        }
 
         self.state = Some(AppState {
             window,
@@ -360,12 +364,12 @@ impl ApplicationHandler for App {
                     KeyCode::KeyR => {
                         state.world_seed = state.world_seed.wrapping_add(1).wrapping_mul(2654435761).wrapping_add(1);
                         state.world.generate(state.world_seed);
-                        let scene = state.renderer.scene();
-                        state.world.upload_all(
-                            &state.queue,
-                            &scene.gpu_scene().voxel_brick_pool,
-                            &scene.gpu_scene().voxel_data_pool,
-                        );
+                        let pass = state.renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");
+                        let (meta_buf, data_buf) = (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
+                        let touched = state.world.upload_all_mesh(&state.queue, &meta_buf, &data_buf, VOXEL_SIZE);
+                        for (brick_idx, origin) in touched {
+                            pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE);
+                        }
                     }
                     _ => {}
                 }
@@ -406,12 +410,9 @@ impl ApplicationHandler for App {
                 let pos = state.cam_pos;
                 let yaw = state.yaw;
                 let pitch = state.pitch;
-                let scene = state.renderer.scene();
-                let (brick_pool, data_pool) = (
-                    scene.gpu_scene().voxel_brick_pool.clone(),
-                    scene.gpu_scene().voxel_data_pool.clone(),
-                );
-                AppState::place_edit(true, mat, pos, yaw, pitch, &mut state.world, &state.queue, &brick_pool, &data_pool);
+                let queue = state.queue.clone();
+                let pass = state.renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");
+                AppState::place_edit(true, mat, pos, yaw, pitch, &mut state.world, &queue, pass);
             }
 
             WindowEvent::MouseInput {
@@ -423,12 +424,9 @@ impl ApplicationHandler for App {
                 let pos = state.cam_pos;
                 let yaw = state.yaw;
                 let pitch = state.pitch;
-                let scene = state.renderer.scene();
-                let (brick_pool, data_pool) = (
-                    scene.gpu_scene().voxel_brick_pool.clone(),
-                    scene.gpu_scene().voxel_data_pool.clone(),
-                );
-                AppState::place_edit(false, mat, pos, yaw, pitch, &mut state.world, &state.queue, &brick_pool, &data_pool);
+                let queue = state.queue.clone();
+                let pass = state.renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");
+                AppState::place_edit(false, mat, pos, yaw, pitch, &mut state.world, &queue, pass);
             }
 
             WindowEvent::CursorMoved {

@@ -177,6 +177,7 @@ helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
 helio-pass-postprocess = { path = "../helio-pass-postprocess" }
 helio-pass-voxel-raymarch = { path = "../helio-pass-voxel-raymarch" }
+helio-pass-voxel-mesh = { path = "../helio-pass-voxel-mesh" }
 helio-voxel-core = { path = "../helio-voxel-core" }
 helio-default-graphs = { path = "../helio-default-graphs" }
 rapier3d = "0.24"

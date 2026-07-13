@@ -2106,6 +2106,7 @@ dependencies = [
  "helio-pass-sdf",
  "helio-pass-taa",
  "helio-pass-terra-forge",
+ "helio-pass-voxel-mesh",
  "helio-pass-voxel-raymarch",
  "helio-voxel-core",
  "image",
