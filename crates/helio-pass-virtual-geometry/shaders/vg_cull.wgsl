@@ -86,11 +86,15 @@ struct CullUniforms {
 
 @group(0) @binding(6) var hiz_tex:  texture_2d<f32>;
 @group(0) @binding(7) var hiz_samp: sampler;
-/// One entry per instance: max(|col0|, |col1|, |col2|) of its transform.
-/// Precomputed CPU-side once per instance (see instance_scale_buf in lib.rs) —
-/// identical for every meshlet of a given instance, so there's no reason for
-/// every meshlet thread to redo the 3 sqrt()s that produced it.
-@group(0) @binding(8) var<storage, read> instance_scale: array<f32>;
+struct InstanceCullData {
+    max_scale:          f32,
+    min_scale:          f32,
+    cone_cull_enabled:  u32,
+    valid_transform:    u32,
+}
+
+/// Values derived from the model matrix once when instance data changes.
+@group(0) @binding(8) var<storage, read> instance_cull: array<InstanceCullData>;
 
 // ─── LOD selection ───────────────────────────────────────────────────────────
 
@@ -145,11 +149,15 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
 
     let m    = meshlets[idx];
     let inst = instances[m.instance_index];
+    let inst_cull = instance_cull[m.instance_index];
+    if inst_cull.valid_transform == 0u {
+        return;
+    }
 
     let model     = inst.transform;
     let center_ws = (model * vec4<f32>(m.center, 1.0)).xyz;
 
-    let world_radius = m.radius * instance_scale[m.instance_index];
+    let world_radius = max(m.radius * inst_cull.max_scale, 0.0);
 
     // ── LOD selection — Nanite-style projected screen coverage ──────────────
     // Done first and cheaply (distance + radius only) so the ~7/8 of meshlets
@@ -194,11 +202,22 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
     // to avoid false culls on nearby geometry.
     let cam_dist_sq = dot(cam_to_center, cam_to_center);
     let guard_radius = world_radius * 1.5;
-    if cam_dist_sq > guard_radius * guard_radius && m.cone_cutoff <= 1.0 {
-        let model_mat3 = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
-        let cone_axis_ws = normalize(model_mat3 * m.cone_axis);
-        let view_dir = normalize(cam_to_center);
-        if dot(view_dir, cone_axis_ws) >= m.cone_cutoff {
+    if cam_dist_sq > guard_radius * guard_radius
+        && m.cone_cutoff <= 1.0
+        && inst_cull.cone_cull_enabled != 0u
+    {
+        let normal_mat = mat3x3<f32>(
+            inst.normal_mat_0.xyz,
+            inst.normal_mat_1.xyz,
+            inst.normal_mat_2.xyz,
+        );
+        let cone_axis_ws = normalize(normal_mat * m.cone_axis);
+        let cone_apex_ws = (model * vec4<f32>(m.cone_apex, 1.0)).xyz;
+        let camera_to_apex = cone_apex_ws - camera.position_near.xyz;
+        let apex_distance_sq = dot(camera_to_apex, camera_to_apex);
+        if apex_distance_sq > 1.0e-12
+            && dot(camera_to_apex / sqrt(apex_distance_sq), cone_axis_ws) >= m.cone_cutoff
+        {
             return;
         }
     }
@@ -211,13 +230,23 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
         let cull_uv_y = cull_ndc.y * -0.5 + 0.5;
         let cull_uv = vec2<f32>(cull_uv_x, cull_uv_y);
 
-        let ndc_r = max(
-            abs(world_radius * camera.proj[0][0] / cull_clip.w),
-            abs(world_radius * camera.proj[1][1] / cull_clip.w),
-        );
+        // Dividing by the sphere center depth underestimates its projected
+        // footprint. Use the nearest possible depth for a conservative bound.
+        let nearest_view_depth = cull_clip.w - world_radius;
+        if nearest_view_depth > camera.position_near.w {
+            let ndc_r = max(
+            abs(world_radius * camera.proj[0][0] / nearest_view_depth),
+            abs(world_radius * camera.proj[1][1] / nearest_view_depth),
+            );
 
-        if cull_uv.x + ndc_r > -1.0 && cull_uv.x - ndc_r < 1.0 &&
-           cull_uv.y + ndc_r > -1.0 && cull_uv.y - ndc_r < 1.0 {
+        let uv_radius = ndc_r * 0.5;
+        let uv_min = cull_uv - vec2<f32>(uv_radius);
+        let uv_max = cull_uv + vec2<f32>(uv_radius);
+
+        // Only reject when the complete projected bound is on screen. Clamped
+        // edge samples can otherwise claim occlusion for geometry entering the
+        // viewport.
+        if all(uv_min >= vec2<f32>(0.0)) && all(uv_max <= vec2<f32>(1.0)) {
             let cam_pos = camera.position_near.xyz;
             let to_meshlet = center_ws - cam_pos;
             let dist_sq = dot(to_meshlet, to_meshlet);
@@ -226,21 +255,40 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocat
                 let dir = to_meshlet * (1.0 / sqrt(dist_sq));
                 let near_ws = center_ws - dir * world_radius;
                 let near_clip = camera.view_proj * vec4<f32>(near_ws, 1.0);
-                near_z = clamp(near_clip.z / near_clip.w, 0.0, 1.0);
+                if near_clip.w > 0.0 {
+                    near_z = clamp(near_clip.z / near_clip.w, 0.0, 1.0);
+                }
             }
 
             let half_h = f32(cull_uni.screen_height) * 0.5;
-            let r_px = abs(world_radius / cull_clip.w * camera.proj[1][1] * half_h);
+            let r_px = ndc_r * half_h;
             let diameter = max(r_px * 2.0, 1.0);
             let mip = clamp(u32(ceil(log2(diameter))), 0u, cull_uni.hiz_mip_count - 1u);
 
-            let sample_uv = clamp(cull_uv, vec2<f32>(0.0), vec2<f32>(1.0));
-            let hiz_depth = textureSampleLevel(hiz_tex, hiz_samp, sample_uv, f32(mip)).r;
+            // A single center texel is not conservative when the projected
+            // sphere crosses multiple texels at the chosen mip. Sample all
+            // four corners and keep the farthest depth in the max-depth Hi-Z.
+            let hiz_00 = textureSampleLevel(hiz_tex, hiz_samp, uv_min, f32(mip)).r;
+            let hiz_01 = textureSampleLevel(
+                hiz_tex,
+                hiz_samp,
+                vec2<f32>(uv_max.x, uv_min.y),
+                f32(mip),
+            ).r;
+            let hiz_10 = textureSampleLevel(
+                hiz_tex,
+                hiz_samp,
+                vec2<f32>(uv_min.x, uv_max.y),
+                f32(mip),
+            ).r;
+            let hiz_11 = textureSampleLevel(hiz_tex, hiz_samp, uv_max, f32(mip)).r;
+            let hiz_depth = max(max(hiz_00, hiz_01), max(hiz_10, hiz_11));
 
             let depth_bias = 1.0 / 65536.0;
             if near_z > hiz_depth + depth_bias {
                 return;
             }
+        }
         }
     }
 

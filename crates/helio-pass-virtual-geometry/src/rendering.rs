@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use crate::{CullUniforms, LodQuality, VgGlobals, INITIAL_INSTANCES, INITIAL_MESHLETS, MAX_TEXTURES};
+use crate::{CullUniforms, InstanceCullData, LodQuality, VgGlobals, INITIAL_INSTANCES, INITIAL_MESHLETS, MAX_TEXTURES};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
     DebugViewDescriptor, GpuInstanceData, PassContext, PrepareContext, RenderPass,
@@ -28,7 +28,7 @@ pub struct VirtualGeometryPass {
     pub(crate) globals_buf: wgpu::Buffer,
     pub(crate) meshlet_buf: wgpu::Buffer,
     pub(crate) instance_buf: wgpu::Buffer,
-    pub(crate) instance_scale_buf: wgpu::Buffer,
+    pub(crate) instance_cull_buf: wgpu::Buffer,
     pub(crate) indirect_buf: wgpu::Buffer,
     pub(crate) draw_count_buf: wgpu::Buffer,
     pub(crate) use_count_indirect: bool,
@@ -77,7 +77,7 @@ impl VirtualGeometryPass {
 
         let meshlet_buf = Self::make_meshlet_buf(device, INITIAL_MESHLETS);
         let instance_buf = Self::make_instance_buf(device, INITIAL_INSTANCES);
-        let instance_scale_buf = Self::make_instance_scale_buf(device, INITIAL_INSTANCES);
+        let instance_cull_buf = Self::make_instance_cull_buf(device, INITIAL_INSTANCES);
         let indirect_buf = Self::make_indirect_buf(device, INITIAL_MESHLETS);
         let draw_count_buf = Self::make_draw_count_buf(device);
         let use_count_indirect = device
@@ -379,7 +379,7 @@ impl VirtualGeometryPass {
             globals_buf,
             meshlet_buf,
             instance_buf,
-            instance_scale_buf,
+            instance_cull_buf,
             indirect_buf,
             draw_count_buf,
             use_count_indirect,
@@ -408,10 +408,10 @@ impl VirtualGeometryPass {
         })
     }
 
-    fn make_instance_scale_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    fn make_instance_cull_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("VG Instance Scale Buffer"),
-            size: capacity * 4,
+            label: Some("VG Instance Cull Buffer"),
+            size: capacity * std::mem::size_of::<InstanceCullData>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -480,7 +480,7 @@ impl RenderPass for VirtualGeometryPass {
             let instance_capacity = self.instance_buf.size() / 144;
             if (vg.instance_count as u64) > instance_capacity {
                 self.instance_buf = Self::make_instance_buf(ctx.device, vg.instance_count as u64 * 2);
-                self.instance_scale_buf = Self::make_instance_scale_buf(ctx.device, vg.instance_count as u64 * 2);
+                self.instance_cull_buf = Self::make_instance_cull_buf(ctx.device, vg.instance_count as u64 * 2);
                 grew = true;
             }
 
@@ -492,13 +492,11 @@ impl RenderPass for VirtualGeometryPass {
             ctx.write_buffer(&self.instance_buf, 0, vg.instances);
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
-            let scales: Vec<f32> = instances.iter().map(|inst| {
-                let scale_x = (inst.model[0] * inst.model[0] + inst.model[1] * inst.model[1] + inst.model[2] * inst.model[2]).sqrt();
-                let scale_y = (inst.model[4] * inst.model[4] + inst.model[5] * inst.model[5] + inst.model[6] * inst.model[6]).sqrt();
-                let scale_z = (inst.model[8] * inst.model[8] + inst.model[9] * inst.model[9] + inst.model[10] * inst.model[10]).sqrt();
-                scale_x.max(scale_y).max(scale_z)
-            }).collect();
-            ctx.write_buffer(&self.instance_scale_buf, 0, bytemuck::cast_slice(&scales));
+            let cull_data: Vec<InstanceCullData> = instances
+                .iter()
+                .map(InstanceCullData::from_instance)
+                .collect();
+            ctx.write_buffer(&self.instance_cull_buf, 0, bytemuck::cast_slice(&cull_data));
 
             self.last_version = vg.buffer_version;
             self.last_meshlet_count = vg.meshlet_count;
@@ -623,7 +621,7 @@ impl RenderPass for VirtualGeometryPass {
                     wgpu::BindGroupEntry { binding: 5, resource: self.draw_count_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(hiz_view) },
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(hiz_sampler) },
-                    wgpu::BindGroupEntry { binding: 8, resource: self.instance_scale_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: self.instance_cull_buf.as_entire_binding() },
                 ],
             }));
             self.cull_bind_group_hiz_key = Some(hiz_key);
