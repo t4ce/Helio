@@ -26,8 +26,10 @@
 //! buffer (slot 0) and index buffer before this pass executes.
 
 use bytemuck::{Pod, Zeroable};
+use helio::radiant::{RadiantShaderCache, RadiantShaderKey, RadiantTemplateRegistry};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 /// Bindless texture array size per shader stage.
@@ -60,7 +62,10 @@ pub struct GBufferGlobals {
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct GBufferPass {
-    pipeline: wgpu::RenderPipeline,
+    pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
+    shader_cache: RadiantShaderCache,
+    template_registry: RadiantTemplateRegistry,
+    pipeline_layout: wgpu::PipelineLayout,
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
     /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
@@ -84,39 +89,6 @@ pub struct GBufferPass {
 impl GBufferPass {
     /// Create the GBuffer pass.
     pub fn new(device: &wgpu::Device) -> Self {
-        // ── Shader ────────────────────────────────────────────────────────────
-        let shader_src = include_str!("../shaders/gbuffer.wgsl")
-            .replace(
-                "binding_array<texture_2d<f32>, 256>",
-                &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
-            )
-            .replace(
-                "binding_array<sampler, 256>",
-                &format!("binding_array<sampler, {MAX_TEXTURES}>"),
-            );
-        // WebGPU does not support binding arrays; collapse to single texture/sampler.
-        #[cfg(target_arch = "wasm32")]
-        let shader_src = shader_src
-            .replace(
-                &format!("binding_array<sampler, {MAX_TEXTURES}>"),
-                "sampler",
-            )
-            .replace("scene_samplers[slot.texture_index]", "scene_samplers")
-            .replace(
-                &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
-                "texture_2d<f32>",
-            )
-            .replace("scene_textures[slot.texture_index]", "scene_textures")
-            // textureSample requires uniform control flow on WebGPU; use textureSampleLevel (LOD 0) instead.
-            .replace(
-                "return textureSample(scene_textures, scene_samplers, uv);",
-                "return textureSampleLevel(scene_textures, scene_samplers, uv, 0.0);",
-            );
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("GBuffer Shader"),
-            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
-        });
-
         // ── Globals buffer ────────────────────────────────────────────────────
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("GBufferGlobals"),
@@ -180,118 +152,11 @@ impl GBufferPass {
         // ── Bind Group Layout 1: material + textures ──────────────────────────
         let bind_group_layout_1 = create_gbuffer_material_bgl(device);
 
-        // ── Pipeline ──────────────────────────────────────────────────────────
+        // ── Pipeline layout (shared by all pipeline variants) ─────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("GBuffer PL"),
             bind_group_layouts: &[Some(&bind_group_layout_0), Some(&bind_group_layout_1)],
             immediate_size: 0,
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("GBuffer Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                // Full vertex layout (stride = 40 bytes, matching shared mesh buffer).
-                //   offset  0 — position       Float32x3  location 0
-                //   offset 12 — bitangent_sign Float32    location 1
-                //   offset 16 — tex_coords0   Float32x2  location 2  (UV0: material/albedo)
-                //   offset 24 — tex_coords1   Float32x2  location 5  (UV1: lightmap)
-                //   offset 32 — normal        Uint32     location 3
-                //   offset 36 — tangent       Uint32     location 4
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 40,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 16,
-                            shader_location: 2,
-                        },
-                        // UV1 — dedicated lightmap UV channel (non-overlapping, [0,1] per mesh).
-                        // Previously marked "unused, skipped"; now wired to shader location 5.
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 24,
-                            shader_location: 5,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
-                            offset: 32,
-                            shader_location: 3,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
-                            offset: 36,
-                            shader_location: 4,
-                        },
-                    ],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rg16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                // Depth prepass already wrote the closest depth with `Less`.
-                // Use `LessEqual` for early-Z culling while being robust to precision issues.
-                // This maintains early-Z benefits (GPU can discard fragments before shading)
-                // while avoiding re-shading due to minor floating-point differences.
-                // GBuffer owns the depth write (DepthPrepass no longer runs).
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
         });
 
         // Create empty lightmap atlas regions buffer (populated when bake data is loaded).
@@ -304,7 +169,10 @@ impl GBufferPass {
         });
 
         Self {
-            pipeline,
+            pipelines: HashMap::new(),
+            shader_cache: RadiantShaderCache::new(),
+            template_registry: RadiantTemplateRegistry::new(),
+            pipeline_layout,
             bind_group_layout_0,
             bind_group_layout_1,
             bind_group_0: None,
@@ -544,7 +412,6 @@ impl RenderPass for GBufferPass {
         let indirect = ctx.scene.indirect;
 
         let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
@@ -552,11 +419,50 @@ impl RenderPass for GBufferPass {
             main_scene.mesh_buffers.indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
-        #[cfg(not(target_arch = "wasm32"))]
-        pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
-        #[cfg(target_arch = "wasm32")]
-        for i in 0..draw_count {
-            pass.draw_indexed_indirect(indirect, i as u64 * 20);
+
+        let ranges = ctx.scene.material_class_ranges;
+        if ranges.is_empty() {
+            // Fallback: no ranges (e.g. legacy mode without material_class data).
+            // Use the default PBR pipeline and draw everything in one batch.
+            let key = RadiantShaderKey {
+                template_id: 0,
+                graph_hash: 0,
+                feature_flags: 0,
+            };
+            let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
+            pass.set_pipeline(pipeline);
+            #[cfg(not(target_arch = "wasm32"))]
+            pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
+            #[cfg(target_arch = "wasm32")]
+            for i in 0..draw_count {
+                pass.draw_indexed_indirect(indirect, i as u64 * 20);
+            }
+        } else {
+            for &(class, graph_hash, start, count) in ranges {
+                if count == 0 {
+                    continue;
+                }
+                let key = RadiantShaderKey {
+                    template_id: class,
+                    graph_hash,
+                    feature_flags: 0,
+                };
+                let graph_wgsl = ctx
+                    .scene
+                    .graph_wgsl_snippets
+                    .get(&graph_hash)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let pipeline = self.get_or_create_pipeline(&ctx.device, key, graph_wgsl);
+                pass.set_pipeline(pipeline);
+                // DrawIndexedIndirectArgs = 5 × u32 = 20 bytes per entry
+                #[cfg(not(target_arch = "wasm32"))]
+                pass.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);
+                #[cfg(target_arch = "wasm32")]
+                for i in start..start + count {
+                    pass.draw_indexed_indirect(indirect, i as u64 * 20);
+                }
+            }
         }
         Ok(())
     }
@@ -640,6 +546,125 @@ impl GBufferPass {
             regions.len(),
             buf_size
         );
+    }
+
+    /// Get or create a render pipeline for the given key.
+    /// Compiles the shader lazily on first access, injecting `graph_wgsl` when
+    /// `graph_hash != 0`.
+    fn get_or_create_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        key: RadiantShaderKey,
+        graph_wgsl: &str,
+    ) -> &wgpu::RenderPipeline {
+        if !self.pipelines.contains_key(&key) {
+            let template = self.template_registry.get(key.template_id)
+                .expect("Unknown material template class");
+            let module = self.shader_cache.get_or_compile(
+                device, key, template, graph_wgsl, MAX_TEXTURES, "GBuffer Shader",
+            );
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("GBuffer Pipeline"),
+                layout: Some(&self.pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    // Full vertex layout (stride = 40 bytes, matching shared mesh buffer).
+                    //   offset  0 — position       Float32x3  location 0
+                    //   offset 12 — bitangent_sign Float32    location 1
+                    //   offset 16 — tex_coords0   Float32x2  location 2  (UV0: material/albedo)
+                    //   offset 24 — tex_coords1   Float32x2  location 5  (UV1: lightmap)
+                    //   offset 32 — normal        Uint32     location 3
+                    //   offset 36 — tangent       Uint32     location 4
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: 40,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: 12,
+                                shader_location: 1,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 16,
+                                shader_location: 2,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 24,
+                                shader_location: 5,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 32,
+                                shader_location: 3,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Uint32,
+                                offset: 36,
+                                shader_location: 4,
+                            },
+                        ],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rg16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            self.pipelines.insert(key, pipeline);
+        }
+        self.pipelines.get(&key).unwrap()
     }
 }
 

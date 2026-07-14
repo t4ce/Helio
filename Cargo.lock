@@ -2770,6 +2770,7 @@ name = "helio-pass-gbuffer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "helio",
  "helio-core",
  "libhelio",
  "log",

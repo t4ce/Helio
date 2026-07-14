@@ -361,7 +361,8 @@ pub fn upload_sectioned_scene(
                         tex_occlusion: helio::GpuMaterial::NO_TEXTURE,
                         workflow: 0,
                         flags: 0,
-                        _pad: 0,
+                        material_class: 0,
+                        class_params: [0.0; 4],
                     })
                 })
         })

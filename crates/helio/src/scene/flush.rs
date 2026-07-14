@@ -279,6 +279,42 @@ impl Scene {
             }
         }
 
+        // ── Material graph hashes ─────────────────────────────────────────────
+        // Build a slot-indexed Vec from the SparsePool so the GBuffer pass can
+        // look up graph_hash by material_id (slot index) for PSO selection.
+        {
+            let slot_count = self.materials.slot_len();
+            let mut hashes = vec![0u64; slot_count];
+            for slot in 0..slot_count {
+                if let Some(record) = self.materials.get_by_slot(slot) {
+                    hashes[slot] = record.graph_hash;
+                }
+            }
+            self.gpu_scene.material_graph_hashes = hashes;
+        }
+
+        // ── Graph WGSL snippets ────────────────────────────────────────────────
+        // Sync the global snippet registry into GpuScene so passes (GBuffer) can
+        // look up WGSL source by hash when building PSOs.
+        {
+            let registry = &self.radiant_graphs;
+            // Collect all unique hashes referenced by any material.
+            // This is a fast-path: copy the whole registry rather than
+            // diffing, because the registry is small (typically << 100 entries).
+            let mut snippets = std::collections::HashMap::new();
+            for slot in 0..self.materials.slot_len() {
+                if let Some(record) = self.materials.get_by_slot(slot) {
+                    let hash = record.graph_hash;
+                    if hash != 0 && !snippets.contains_key(&hash) {
+                        if let Some(wgsl) = registry.get(hash) {
+                            snippets.insert(hash, wgsl.to_owned());
+                        }
+                    }
+                }
+            }
+            self.gpu_scene.graph_wgsl_snippets = snippets;
+        }
+
         self.gpu_scene.flush();
     }
 }

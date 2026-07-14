@@ -113,6 +113,7 @@ impl super::super::Scene {
             gpu: material.gpu,
             textures: material.textures,
             ref_count: 0,
+            graph_hash: 0,
         });
         // Use the GrowableBuffer length as the source of truth for push-vs-update.
         // After a pool reset the GPU buffer is empty (len=0) even though the SparsePool

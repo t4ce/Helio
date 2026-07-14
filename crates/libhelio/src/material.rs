@@ -10,7 +10,27 @@ pub enum MaterialWorkflow {
     Specular = 1,
 }
 
-/// GPU material data. 96 bytes (matches helio-render-v2).
+/// Feature flags for [`GpuMaterial::flags`].
+///
+/// Each flag toggles a warp-uniform branch in the generated WGSL; disabled
+/// features cost zero instructions via constant-condition elimination.
+pub const FLAG_DOUBLE_SIDED: u32 = 1 << 0;
+pub const FLAG_ALPHA_BLEND: u32 = 1 << 1;
+pub const FLAG_ALPHA_TEST: u32 = 1 << 2;
+pub const FLAG_HAS_NORMAL_MAP: u32 = 1 << 3;
+pub const FLAG_HAS_CLEAR_COAT: u32 = 1 << 4;
+pub const FLAG_HAS_SUBSURFACE: u32 = 1 << 5;
+pub const FLAG_HAS_ANISOTROPY: u32 = 1 << 6;
+pub const FLAG_HAS_CUSTOM_SHADER: u32 = 1 << 7;
+
+/// Material class shader archetypes.
+pub const MATERIAL_CLASS_DEFAULT: u32 = 0;
+pub const MATERIAL_CLASS_CLEAR_COAT: u32 = 1;
+pub const MATERIAL_CLASS_SUBSURFACE: u32 = 2;
+pub const MATERIAL_CLASS_ANISOTROPIC: u32 = 3;
+pub const MATERIAL_CLASS_CUSTOM: u32 = 0xFFFF;
+
+/// GPU material data. 112 bytes.
 ///
 /// All texture indices reference the global bindless texture array.
 /// If a texture is not present, the index is u32::MAX.
@@ -28,7 +48,8 @@ pub enum MaterialWorkflow {
 ///     tex_occlusion:        u32,
 ///     workflow:             u32,
 ///     flags:                u32,
-///     _pad:                 u32,
+///     material_class:       u32,
+///     class_params:         vec4<f32>,
 /// }
 /// ```
 #[repr(C)]
@@ -48,9 +69,14 @@ pub struct GpuMaterial {
     pub tex_occlusion: u32,
     /// MaterialWorkflow discriminant
     pub workflow: u32,
-    /// Flags (bit 0 = double-sided, bit 1 = alpha-blend, bit 2 = alpha-test)
+    /// Feature flags (see `FLAG_*` constants)
     pub flags: u32,
-    pub _pad: u32,
+    /// Material class selector (see `MATERIAL_CLASS_*` constants)
+    pub material_class: u32,
+    /// Class-specific parameters interpreted by the active Radiant template.
+    /// The default PBR template ignores these; custom templates can use them
+    /// for any purpose (e.g. clear-coat strength, subsurface colour, anisotropy direction).
+    pub class_params: [f32; 4],
 }
 
 impl GpuMaterial {

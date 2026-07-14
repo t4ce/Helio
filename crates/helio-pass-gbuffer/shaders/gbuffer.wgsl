@@ -37,7 +37,7 @@ struct Globals {
     _pad2: u32,
 }
 
-/// GPU material (96 bytes, matches libhelio::GpuMaterial)
+/// GPU material (112 bytes, matches libhelio::GpuMaterial)
 struct GpuMaterial {
     base_color:         vec4<f32>,
     emissive:           vec4<f32>,
@@ -49,8 +49,13 @@ struct GpuMaterial {
     tex_occlusion:      u32,
     workflow:           u32,
     flags:              u32,
-    _pad:               u32,
+    material_class:     u32,
+    class_params:       vec4<f32>,
 }
+
+const FLAG_HAS_NORMAL_MAP: u32 = 1u << 3u;
+const FLAG_HAS_CLEAR_COAT: u32 = 1u << 4u;
+const FLAG_HAS_ANISOTROPY: u32 = 1u << 6u;
 
 /// Per-material texture metadata (224 bytes, matches helio::GpuMaterialTextures)
 struct MaterialTextureSlot {
@@ -209,6 +214,19 @@ struct GBufferOutput {
     @location(4) lightmap_uv: vec2<f32>,
 }
 
+// ── Surface data passed to GBuffer packing ──────────────────────────────────
+
+struct SurfaceData {
+    albedo:      vec4<f32>,
+    normal:      vec3<f32>,
+    ao:          f32,
+    roughness:   f32,
+    metallic:    f32,
+    specular_f0: vec3<f32>,
+    emissive:    vec3<f32>,
+    alpha:       f32,
+}
+
 const NO_TEXTURE: u32 = 0xffffffffu;
 const MATERIAL_WORKFLOW_METALLIC: u32 = 0u;
 const MATERIAL_WORKFLOW_SPECULAR: u32 = 1u;
@@ -258,14 +276,59 @@ fn resolve_specular_f0(
     );
 }
 
+// ── Default PBR material evaluation (uber-template) ──────────────────────────
+
+fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData, input: VertexOutput) -> SurfaceData {
+    let uv = input.tex_coords;
+    let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
+    let albedo = material.base_color * base_sample;
+    let alpha = albedo.a;
+
+    let N_geom = normalize(input.world_normal);
+
+    // Warp-uniform feature branch: normal mapping (gated by flag + texture)
+    var N: vec3<f32>;
+    if (material.flags & FLAG_HAS_NORMAL_MAP) != 0u && material_tex.normal.texture_index != NO_TEXTURE {
+        let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
+        let B = cross(N_geom, T) * input.bitangent_sign;
+        var norm_ts = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
+        norm_ts = vec3<f32>(norm_ts.x * material_tex.params.x, norm_ts.y * material_tex.params.x, norm_ts.z);
+        N = normalize(T * norm_ts.x + B * norm_ts.y + N_geom * norm_ts.z);
+    } else {
+        N = N_geom;
+    }
+
+    let orm_sample = sample_texture(material_tex.roughness_metallic, uv, vec4<f32>(1.0));
+    let occlusion_sample = sample_texture(material_tex.occlusion, uv, vec4<f32>(1.0));
+    let emissive_sample = sample_texture(material_tex.emissive, uv, vec4<f32>(1.0));
+
+    let ao = 1.0 + (occlusion_sample.r - 1.0) * material_tex.params.y;
+    let roughness = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
+    let metallic = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
+    let specular_f0 = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
+    let emissive = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
+
+    // class_params are material-class-specific parameters set by external tools.
+    // The default PBR template ignores them; graph overrides and custom templates
+    // can interpret them freely (e.g. clear coat strength in .x, clear coat roughness in .y).
+
+    // Radiant override point: graph-generated WGSL replaces this section to
+    // override any SurfaceData field. When no graph is present the passthrough
+    // below is used (the default PBR result).
+    // RADIANT_OVERRIDE_SURFACE
+    // RADIANT_OVERRIDE_END
+
+    return SurfaceData(albedo, N, ao, roughness, metallic, specular_f0, emissive, alpha);
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
     let material = materials[input.material_id];
     let material_tex = material_textures[input.material_id];
-    let uv = input.tex_coords;
 
-    // DEBUG MODE 1: Show UVs as colors (R=U, G=V, helps verify UV layout)
+    // DEBUG MODE 1: Show UVs as colors
     if globals.debug_mode == 1u {
+        let uv = input.tex_coords;
         return GBufferOutput(
             vec4<f32>(uv.x, uv.y, 0.0, 1.0),
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
@@ -275,13 +338,9 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         );
     }
 
-    // Sampled once and reused below — this used to be sampled a second time via
-    // an identical call further down, so every non-debug pixel paid for the
-    // same texture fetch twice for zero extra benefit.
-    let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
-
-    // DEBUG MODE 2: Show texture sample directly (bypass material multiply AND lighting)
+    // DEBUG MODE 2: Show texture sample directly
     if globals.debug_mode == 2u {
+        let base_sample = sample_texture(material_tex.base_color, input.tex_coords, vec4<f32>(1.0));
         return GBufferOutput(
             vec4<f32>(base_sample.rgb, 1.0),
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
@@ -291,57 +350,35 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         );
     }
 
-    // Common for modes 0 and 3
-    let albedo = material.base_color * base_sample;
-    let alpha = albedo.a;
-
-    if alpha <= 0.001 { discard; }
-    if alpha < material_tex.params.z { discard; }  // alpha_cutoff in params.z
-
-    let N_geom = normalize(input.world_normal);
-
-    // DEBUG MODE 3: Use geometry normal only (skip normal mapping)
-    var N: vec3<f32>;
+    // DEBUG MODE 3: Geometry normals only (skip normal mapping)
     if globals.debug_mode == 3u {
-        N = N_geom;
-    } else {
-        // NORMAL RENDERING (mode 0): vertex TBN normal mapping (MikkTSpace-compatible).
-        //
-        // Use the per-vertex tangent and bitangent sign that were computed by the
-        // DCC tool (Maya / Blender / etc.) and stored in the FBX/glTF file.
-        // Gram-Schmidt re-orthogonalization keeps T strictly perpendicular to N
-        // after interpolation across the triangle, then B = cross(N, T) * sign.
-        //
-        // This replaces the previous screen-space derivative approach which
-        // produced checkerboard artifacts at every UV island boundary because
-        // dpdx/dpdy are undefined at triangle edges and discontinuous across seams.
-        if material_tex.normal.texture_index != NO_TEXTURE {
-            let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
-            let B = cross(N_geom, T) * input.bitangent_sign;
-            var norm_ts = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
-            norm_ts = vec3<f32>(norm_ts.x * material_tex.params.x, norm_ts.y * material_tex.params.x, norm_ts.z);  // normal_scale in params.x
-            N = normalize(T * norm_ts.x + B * norm_ts.y + N_geom * norm_ts.z);
-        } else {
-            N = N_geom;
-        }
+        let uv = input.tex_coords;
+        let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
+        let albedo = material.base_color * base_sample;
+        let N_geom = normalize(input.world_normal);
+        let orm_sample = sample_texture(material_tex.roughness_metallic, uv, vec4<f32>(1.0));
+        let roughness = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
+        let metallic = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
+        return GBufferOutput(
+            vec4<f32>(albedo.rgb, albedo.a),
+            vec4<f32>(N_geom, 0.0),
+            vec4<f32>(1.0, roughness, metallic, 0.0),
+            vec4<f32>(0.0),
+            vec2<f32>(0.0)
+        );
     }
 
-    let orm_sample = sample_texture(material_tex.roughness_metallic, uv, vec4<f32>(1.0));
-    let occlusion_sample = sample_texture(material_tex.occlusion, uv, vec4<f32>(1.0));
-    let emissive_sample = sample_texture(material_tex.emissive, uv, vec4<f32>(1.0));
+    let surface = radiant_eval_surface(material, material_tex, input);
 
-    let ao = 1.0 + (occlusion_sample.r - 1.0) * material_tex.params.y;  // occlusion_strength in params.y
-    let roughness = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
-    let metallic = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
-    let specular_f0 = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
-
-    let emissive = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
+    // Alpha test
+    if surface.alpha <= 0.001 { discard; }
+    if surface.alpha < material_tex.params.z { discard; }
 
     var out: GBufferOutput;
-    out.albedo = vec4<f32>(albedo.rgb, alpha);
-    out.normal = vec4<f32>(N, specular_f0.r);
-    out.orm = vec4<f32>(ao, roughness, metallic, specular_f0.g);
-    out.emissive = vec4<f32>(emissive, specular_f0.b);
+    out.albedo = vec4<f32>(surface.albedo.rgb, surface.alpha);
+    out.normal = vec4<f32>(surface.normal, surface.specular_f0.r);
+    out.orm = vec4<f32>(surface.ao, surface.roughness, surface.metallic, surface.specular_f0.g);
+    out.emissive = vec4<f32>(surface.emissive, surface.specular_f0.b);
     out.lightmap_uv = input.lightmap_uv;
     return out;
 }

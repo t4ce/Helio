@@ -17,6 +17,7 @@ mod material;
 mod mesh;
 mod picking;
 mod quark_commands;
+pub mod radiant;
 mod renderer;
 mod scene;
 mod terrain;

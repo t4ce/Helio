@@ -44,7 +44,8 @@ struct GpuMaterial {
     tex_occlusion:      u32,
     workflow:           u32,
     flags:              u32,
-    _pad:               u32,
+    material_class:     u32,
+    class_params:       vec4<f32>,
 }
 
 struct MaterialTextureSlot {
