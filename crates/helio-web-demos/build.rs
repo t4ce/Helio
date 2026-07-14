@@ -118,10 +118,9 @@ fn demo_html(demo: &Demo) -> String {
       throw e;
     }}
 
-    // Hide loading overlay once the WASM module has initialised
-    const overlay = document.getElementById('loading');
-    overlay.classList.add('hidden');
-    setTimeout(() => overlay.remove(), 500);
+    // The WASM entry point starts WebGPU asynchronously. helio-wasm hides this
+    // overlay only after the adapter, device, renderer, and demo are ready; on
+    // failure it replaces the overlay with a useful startup diagnostic.
 
     // Fade controls hint after 5 s
     const ctrl = document.getElementById('controls');

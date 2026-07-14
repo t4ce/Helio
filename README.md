@@ -92,6 +92,10 @@ Open `http://localhost:3000/render_v2_basic/` in a WebGPU-capable browser. The p
 be served from a secure context (`localhost` is accepted); opening it directly as a file
 will not work.
 
+If a development server prints `Serving HTTP on 0.0.0.0`, that is its network bind address,
+not the URL to open. Use `http://localhost:<port>/` or `http://127.0.0.1:<port>/`; browsers do
+not expose WebGPU to an `http://0.0.0.0` origin. Production deployments must use HTTPS.
+
 To build every retained demo:
 
 ```sh
