@@ -32,12 +32,13 @@ impl HelioWasmApp for Demo {
     fn init(
         renderer: &mut Renderer,
         device: Arc<wgpu::Device>,
-        _queue: Arc<wgpu::Queue>,
+        queue: Arc<wgpu::Queue>,
         w: u32,
         h: u32,
     ) -> Self {
         let _ = (w, h);
-        let mut sdf = { SdfPass::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb, None) };
+        let config = renderer.renderer_config();
+        let mut sdf = SdfPass::new(&device, config.surface_format, None);
 
         sdf.set_terrain(Some(TerrainConfig::rolling()));
 
@@ -63,7 +64,10 @@ impl HelioWasmApp for Demo {
             blend_radius: 1.5,
         });
 
-        renderer.add_pass(Box::new(sdf));
+        let mut graph = helio_core::RenderGraph::new(&device, &queue);
+        graph.add_pass(Box::new(sdf));
+        graph.lock(config.internal_width(), config.internal_height());
+        renderer.set_graph(graph);
 
         renderer.set_ambient([0.15, 0.18, 0.28], 0.04);
         renderer.set_clear_color([0.4, 0.55, 0.85, 1.0]);

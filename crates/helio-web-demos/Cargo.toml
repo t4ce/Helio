@@ -39,6 +39,8 @@ editor_demo         = []
 [dependencies]
 helio-wasm          = { path = "../helio-wasm" }
 helio               = { workspace = true }
+helio-core          = { workspace = true }
+helio-default-graphs = { workspace = true }
 helio-asset-compat  = { workspace = true }
 helio-pass-sdf      = { workspace = true, optional = true }
 wgpu                = { workspace = true }

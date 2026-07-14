@@ -62,13 +62,13 @@ fn add_common_early_passes(
 
     let shadow_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Dirty Flags"),
-        size: 64,
+        size: 42 * 4,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     }));
     let shadow_hashes_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Hashes"),
-        size: 64,
+        size: 42 * 4,
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
@@ -83,7 +83,7 @@ fn add_common_early_passes(
         config.shadow_atlas_size,
     )));
 
-    let shadow_dirty_pass = ShadowDirtyPass::new(device);
+    let shadow_dirty_pass = ShadowDirtyPass::new(device, Arc::clone(&shadow_dirty_buf));
     let face_dirty_buf = Arc::clone(&shadow_dirty_pass.face_dirty_buf);
     let face_geom_count_buf = Arc::clone(&shadow_dirty_pass.face_geom_count_buf);
     graph.add_pass(Box::new(shadow_dirty_pass));
@@ -642,4 +642,3 @@ pub fn build_simple_graph(
 
     graph
 }
-

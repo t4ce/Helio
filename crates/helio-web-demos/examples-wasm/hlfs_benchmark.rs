@@ -35,8 +35,8 @@ impl HelioWasmApp for Demo {
 
     fn init(
         renderer: &mut Renderer,
-        _device: Arc<wgpu::Device>,
-        _queue: Arc<wgpu::Queue>,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
         _w: u32,
         _h: u32,
     ) -> Self {
@@ -111,7 +111,17 @@ impl HelioWasmApp for Demo {
         let light_ids = [ids.remove(0), ids.remove(0), ids.remove(0)];
 
         renderer.set_ambient([0.02, 0.02, 0.03], 1.0);
-        renderer.use_hlfs_graph();
+        let graph = helio_default_graphs::build_hlfs_graph(
+            &device,
+            &queue,
+            renderer.scene(),
+            renderer.renderer_config(),
+            renderer.debug_state(),
+            renderer.debug_camera_buf(),
+            renderer.cull_stats_buf(),
+            None,
+        );
+        renderer.set_graph(graph);
 
         Self {
             light_ids,

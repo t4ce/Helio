@@ -1,6 +1,5 @@
-use crate::edit_list::{GpuSdfEdit, SdfEdit, SdfEditList};
+use crate::edit_list::{GpuSdfEdit, SdfEditList};
 use crate::gpu_bvh::{build_flat_bvh, GpuBvhNode};
-use crate::primitives::SdfShapeType;
 use crate::terrain::{GpuTerrainParams, TerrainConfig};
 use crate::uniforms::SdfGridParams;
 use crate::{SdfPass, INITIAL_BVH_CAPACITY, INITIAL_EDIT_CAPACITY, MAX_BRICKS_PER_LEVEL};

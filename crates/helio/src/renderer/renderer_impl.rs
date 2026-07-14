@@ -8,7 +8,7 @@ use std::time::Instant;
 use bytemuck::{Pod, Zeroable};
 use helio_core::{RenderGraph, RenderPass};
 
-use super::config::RendererConfig;
+use super::config::{PerfOverlayMode, RendererConfig};
 
 /// Closure that rebuilds the render graph on resize.
 pub type GraphRebuilder = Arc<dyn Fn(
@@ -416,5 +416,20 @@ impl Renderer {
 
     pub fn output_height(&self) -> u32 {
         self.output_height
+    }
+
+    /// Snapshot the renderer settings needed to build a replacement graph.
+    pub fn renderer_config(&self) -> RendererConfig {
+        RendererConfig {
+            width: self.output_width,
+            height: self.output_height,
+            surface_format: self.surface_format,
+            gi_config: self.gi_config,
+            shadow_quality: self.shadow_quality,
+            debug_mode: self.debug_mode,
+            render_scale: self.render_scale,
+            perf_overlay_mode: PerfOverlayMode::Disabled,
+            shadow_atlas_size: self.shadow_atlas_size,
+        }
     }
 }

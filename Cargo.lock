@@ -935,6 +935,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-sdf"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.0",
+ "helio-core",
+ "libhelio",
+ "log",
+ "wgpu",
+]
+
+[[package]]
 name = "helio-pass-shadow"
 version = "0.1.0"
 dependencies = [
@@ -1158,6 +1170,9 @@ dependencies = [
  "glam 0.33.0",
  "helio",
  "helio-asset-compat",
+ "helio-core",
+ "helio-default-graphs",
+ "helio-pass-sdf",
  "helio-wasm",
  "log",
  "wasm-bindgen",

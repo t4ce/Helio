@@ -63,7 +63,7 @@ struct ShadowMatrixParams {
 @group(0) @binding(1) var<storage, read_write> shadow_mats:    array<GpuShadowMatrix>;
 @group(0) @binding(2) var<uniform>             camera:         CameraUniforms;
 @group(0) @binding(3) var<uniform>             params:         ShadowMatrixParams;
-@group(0) @binding(4) var<storage, read_write> shadow_dirty:   array<atomic<u32>>;  // Atomic dirty flags per light
+@group(0) @binding(4) var<storage, read_write> shadow_dirty:   array<atomic<u32>>;  // Atomic dirty flags per caster slot
 @group(0) @binding(5) var<storage, read_write> shadow_hashes:  array<u32>;  // FNV hashes to detect changes
 
 // ── Matrix math helpers ───────────────────────────────────────────────────────
@@ -302,13 +302,14 @@ fn compute_shadow_matrices(@builtin(global_invocation_id) gid: vec3u) {
     // Hash the computed matrices to detect changes
     // This enables shadow atlas caching for static geometry
     let base_idx = light.shadow_index;
+    let caster_slot = base_idx / FACES_PER_LIGHT;
     let new_hash = fnv_hash_mats_6(base_idx);
-    let old_hash = shadow_hashes[light_idx];
+    let old_hash = shadow_hashes[caster_slot];
 
     // Update hash and mark dirty if changed
     if new_hash != old_hash {
-        shadow_hashes[light_idx] = new_hash;
+        shadow_hashes[caster_slot] = new_hash;
         // Atomically set dirty flag for this light
-        atomicStore(&shadow_dirty[light_idx], 1u);
+        atomicStore(&shadow_dirty[caster_slot], 1u);
     }
 }

@@ -79,6 +79,8 @@ struct ShadowDirtyUniforms {
 /// 0 = clean face (no draws), movable_draw_count = dirty face (draw all movable casters).
 @group(0) @binding(5) var<storage, read_write>    face_geom_count: array<u32>;
 @group(0) @binding(6) var<uniform>                uniforms:       ShadowDirtyUniforms;
+/// Per-caster flags written by ShadowMatrixPass when a light matrix changes.
+@group(0) @binding(7) var<storage, read_write>     light_dirty:    array<atomic<u32>>;
 
 // ── Frustum helpers (Gribb-Hartmann) ─────────────────────────────────────────
 
@@ -127,6 +129,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let movable_count = uniforms.movable_draw_count;
     let face_count    = min(uniforms.face_count, MAX_FACES);
     let force_all     = uniforms.force_dirty_all;
+
+    // A moving light changes every face frustum for that caster. Consume the
+    // matrix pass's per-caster flag and dirty all six allocated face slots so
+    // ShadowCullPass rebuilds its compacted indirect lists before rendering.
+    if tid == 0u {
+        let caster_count = (face_count + 5u) / 6u;
+        for (var caster = 0u; caster < caster_count; caster++) {
+            if atomicExchange(&light_dirty[caster], 0u) != 0u {
+                let first_face = caster * 6u;
+                let last_face = min(first_face + 6u, face_count);
+                for (var face = first_face; face < last_face; face++) {
+                    atomicStore(&face_dirty[face], 1u);
+                    face_geom_count[face] = movable_count;
+                }
+            }
+        }
+    }
 
     // force_dirty_all: topology changed (movable count changed) — dirty every face.
     if force_all != 0u {
