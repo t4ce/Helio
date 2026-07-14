@@ -19,9 +19,9 @@
 //! | Property     | Value                                         |
 //! |--------------|-----------------------------------------------|
 //! | Format       | `Depth32Float`                                |
-//! | Resolution   | `SHADOW_RES × SHADOW_RES` per face            |
+//! | Resolution   | Configurable per-face size (256 px default)   |
 //! | Array layers | `MAX_SHADOW_FACES` (256)                      |
-//! | VRAM         | ~256 MB at 1024 px (constant, pre-allocated)  |
+//! | VRAM         | ~128 MiB at 256 px across both cached atlases |
 //!
 //! Light movement is detected per caster. Object movement uses a scene generation
 //! counter, avoiding GPU readback while keeping the browser path deterministic.
@@ -296,7 +296,9 @@ impl RenderPass for ShadowPass {
         &["shadow_atlas", "shadow_sampler", "static_shadow_atlas"]
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+        frame.shadow_sampler.write(&self.compare_sampler, "Shadow");
+    }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         Ok(())

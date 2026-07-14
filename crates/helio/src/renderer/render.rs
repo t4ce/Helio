@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use web_time::Instant;
 
 use arrayvec::ArrayVec;
@@ -165,18 +163,6 @@ impl Renderer {
         if let Ok(mut state) = self.debug_state.lock() {
             state.camera_position = camera.position;
         }
-        let rc_radius = self.gi_config.rc_radius;
-        let rc_min = [
-            camera.position.x - rc_radius,
-            camera.position.y - rc_radius,
-            camera.position.z - rc_radius,
-        ];
-        let rc_max = [
-            camera.position.x + rc_radius,
-            camera.position.y + rc_radius,
-            camera.position.z + rc_radius,
-        ];
-
         let mut frame_resources = libhelio::FrameResources::empty();
         frame_resources.main_scene.write(
             libhelio::MainSceneResources {
@@ -195,8 +181,6 @@ impl Renderer {
                 clear_color: self.clear_color,
                 ambient_color: self.ambient_color,
                 ambient_intensity: self.ambient_intensity,
-                rc_world_min: rc_min,
-                rc_world_max: rc_max,
             },
             "Renderer",
         );

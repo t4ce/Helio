@@ -46,7 +46,7 @@ pub mod html {
     pub const SPACE_STATION: &str = include_str!(concat!(env!("OUT_DIR"), "/space_station.html"));
     pub const LIGHT_BENCHMARK: &str =
         include_str!(concat!(env!("OUT_DIR"), "/light_benchmark.html"));
-    pub const RC_BENCHMARK: &str = include_str!(concat!(env!("OUT_DIR"), "/rc_benchmark.html"));
+    pub const HLFS_BENCHMARK: &str = include_str!(concat!(env!("OUT_DIR"), "/hlfs_benchmark.html"));
     pub const SDF_DEMO: &str = include_str!(concat!(env!("OUT_DIR"), "/sdf_demo.html"));
     pub const LOAD_FBX: &str = include_str!(concat!(env!("OUT_DIR"), "/load_fbx.html"));
     pub const LOAD_FBX_EMBEDDED: &str =
@@ -74,7 +74,7 @@ pub mod html {
             "outdoor_volcano" => Some(OUTDOOR_VOLCANO),
             "space_station" => Some(SPACE_STATION),
             "light_benchmark" => Some(LIGHT_BENCHMARK),
-            "rc_benchmark" => Some(RC_BENCHMARK),
+            "hlfs_benchmark" => Some(HLFS_BENCHMARK),
             "sdf_demo" => Some(SDF_DEMO),
             "load_fbx" => Some(LOAD_FBX),
             "load_fbx_embedded" => Some(LOAD_FBX_EMBEDDED),
@@ -141,9 +141,9 @@ mod space_station;
 #[path = "../examples-wasm/light_benchmark.rs"]
 mod light_benchmark;
 
-#[cfg(feature = "rc_benchmark")]
-#[path = "../examples-wasm/rc_benchmark.rs"]
-mod rc_benchmark;
+#[cfg(feature = "hlfs_benchmark")]
+#[path = "../examples-wasm/hlfs_benchmark.rs"]
+mod hlfs_benchmark;
 
 #[cfg(feature = "sdf_demo")]
 #[path = "../examples-wasm/sdf_demo.rs"]
@@ -243,9 +243,9 @@ pub fn start() {
         helio_wasm::launch::<light_benchmark::Demo>();
         return;
     }
-    #[cfg(feature = "rc_benchmark")]
+    #[cfg(feature = "hlfs_benchmark")]
     {
-        helio_wasm::launch::<rc_benchmark::Demo>();
+        helio_wasm::launch::<hlfs_benchmark::Demo>();
         return;
     }
     #[cfg(feature = "sdf_demo")]

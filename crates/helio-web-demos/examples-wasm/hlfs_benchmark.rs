@@ -1,6 +1,7 @@
-//! WASM twin of `rc_benchmark` — Cornell box GI benchmark with 3 point lights.
+//! Browser WebGPU benchmark for Helio's hierarchical light-field graph.
 //!
-//! Controls: WASD fly, mouse look. Plus(=) / Minus to adjust light intensity.
+//! A Cornell-box-like room, several occluders, and three coloured point lights
+//! exercise the compute importance/injection/propagation path plus raster output.
 
 use std::sync::Arc;
 
@@ -29,7 +30,7 @@ pub struct Demo {
 
 impl HelioWasmApp for Demo {
     fn title() -> &'static str {
-        "Helio — RC Benchmark"
+        "Helio — HLFS Compute Lighting"
     }
 
     fn init(
@@ -69,7 +70,7 @@ impl HelioWasmApp for Demo {
         ));
 
         let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = renderer
+            let mesh = renderer
                 .scene_mut()
                 .insert_actor(helio::SceneActor::mesh(box_mesh(
                     [cx, cy, cz],
@@ -77,37 +78,40 @@ impl HelioWasmApp for Demo {
                 )));
             let _ = insert_object(
                 renderer,
-                m,
+                mesh,
                 mat,
                 glam::Mat4::IDENTITY,
                 (hx * hx + hy * hy + hz * hz).sqrt(),
             );
         };
-        add_box(0.0, -0.05, 0.0, 5.0, 0.05, 5.0, mat_white); // floor
-        add_box(0.0, 5.05, 0.0, 5.0, 0.05, 5.0, mat_white); // ceiling
-        add_box(0.0, 2.5, -5.05, 5.0, 2.5, 0.05, mat_white); // back wall
-        add_box(0.0, 2.5, 5.05, 5.0, 2.5, 0.05, mat_white); // front wall
-        add_box(5.05, 2.5, 0.0, 0.05, 2.5, 5.0, mat_green); // right (green)
-        add_box(-5.05, 2.5, 0.0, 0.05, 2.5, 5.0, mat_red); // left (red)
+        add_box(0.0, -0.05, 0.0, 5.0, 0.05, 5.0, mat_white);
+        add_box(0.0, 5.05, 0.0, 5.0, 0.05, 5.0, mat_white);
+        add_box(0.0, 2.5, -5.05, 5.0, 2.5, 0.05, mat_white);
+        add_box(0.0, 2.5, 5.05, 5.0, 2.5, 0.05, mat_white);
+        add_box(5.05, 2.5, 0.0, 0.05, 2.5, 5.0, mat_green);
+        add_box(-5.05, 2.5, 0.0, 0.05, 2.5, 5.0, mat_red);
         add_box(-2.0, 0.5, -2.0, 0.5, 0.5, 0.5, mat_cube);
         add_box(2.0, 0.5, 2.0, 0.5, 0.5, 0.5, mat_cube);
         add_box(0.0, 0.7, 0.0, 0.7, 0.7, 0.7, mat_cube);
         add_box(-3.0, 1.0, 1.5, 1.0, 1.0, 1.0, mat_cube);
         add_box(3.0, 0.6, -1.5, 0.6, 0.6, 0.6, mat_cube);
 
-        let mut ids_vec: Vec<LightId> = LIGHT_BASE
+        let mut ids: Vec<LightId> = LIGHT_BASE
             .iter()
-            .map(|&(pos, col, int, rng)| {
+            .map(|&(position, color, intensity, range)| {
                 renderer
                     .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(pos, col, int, rng)))
+                    .insert_actor(helio::SceneActor::light(point_light(
+                        position, color, intensity, range,
+                    )))
                     .as_light()
-                    .unwrap()
+                    .expect("light actor")
             })
             .collect();
-        let light_ids = [ids_vec.remove(0), ids_vec.remove(0), ids_vec.remove(0)];
+        let light_ids = [ids.remove(0), ids.remove(0), ids.remove(0)];
 
         renderer.set_ambient([0.02, 0.02, 0.03], 1.0);
+        renderer.use_hlfs_graph();
 
         Self {
             light_ids,
@@ -130,14 +134,14 @@ impl HelioWasmApp for Demo {
 
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
-        let fwd = Vec3::new(sy * cp, sp, -cy * cp);
+        let forward = Vec3::new(sy * cp, sp, -cy * cp);
         let right = Vec3::new(cy, 0.0, sy);
 
         if input.keys.contains(&helio_wasm::KeyCode::KeyW) {
-            self.cam_pos += fwd * SPEED * dt;
+            self.cam_pos += forward * SPEED * dt;
         }
         if input.keys.contains(&helio_wasm::KeyCode::KeyS) {
-            self.cam_pos -= fwd * SPEED * dt;
+            self.cam_pos -= forward * SPEED * dt;
         }
         if input.keys.contains(&helio_wasm::KeyCode::KeyA) {
             self.cam_pos -= right * SPEED * dt;
@@ -158,15 +162,18 @@ impl HelioWasmApp for Demo {
             self.intensity = (self.intensity - 0.5 * dt).max(0.1);
         }
 
-        for (id, &(pos, col, int, rng)) in self.light_ids.iter().zip(LIGHT_BASE.iter()) {
-            let _ = renderer
-                .scene_mut()
-                .update_light(*id, point_light(pos, col, int * self.intensity, rng));
+        for (id, &(position, color, intensity, range)) in
+            self.light_ids.iter().zip(LIGHT_BASE.iter())
+        {
+            let _ = renderer.scene_mut().update_light(
+                *id,
+                point_light(position, color, intensity * self.intensity, range),
+            );
         }
 
         Camera::perspective_look_at(
             self.cam_pos,
-            self.cam_pos + fwd,
+            self.cam_pos + forward,
             Vec3::Y,
             std::f32::consts::FRAC_PI_4,
             1280.0 / 720.0,

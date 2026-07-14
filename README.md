@@ -41,18 +41,22 @@ Browser WebGPU is the real renderer, not a preview or compatibility rasterizer.
 | GPU-generated indirect draws | Full | Requires `indirect-first-instance` |
 | Virtual geometry | Full rendering | Meshlet culling and LOD remain GPU-side |
 | Dynamic and cached shadows | Full rendering | Browser records individual indirect draws |
-| Radiance Cascades GI | Full | Real-time path replaces baked lighting |
+| HLFS compute lighting | Experimental custom graph | Real WebGPU compute injection, propagation, and raster output; browser-sized 32³ clip levels |
 | SSAO, TAA, FXAA, SMAA | Full | Selected by render graph |
 | Sky, corona, water, caustics | Full | Render and compute pipelines |
 | Materials and mipmapping | Full, bounded table | 16 texture/sampler slots per scene bind group |
 | CPU profiling | Full | Browser clock through `web-time` |
 | GPU timestamps | Optional | Enabled only when the adapter exposes both required timestamp features |
-| Hardware ray tracing | Not available | Not part of the retained WebGPU core path |
+| Hardware ray tracing | Not available | The removed ray-query/Radiance-Cascades source was an unwired placeholder, not a working renderer feature |
 | Offline baking / PVS / snapshots | Removed | Real-time visibility and lighting only |
 
 WebGPU does not expose wgpu's native multi-draw extensions. Helio therefore records one
 `draw_indexed_indirect` command per GPU-generated slot. This preserves pixels and GPU-side
 visibility decisions, but command encoding can cost more CPU time in very draw-heavy scenes.
+
+The browser default uses 256 px shadow-atlas faces: about 128 MiB for the static and movable
+256-layer `Depth32Float` atlases together. The former 1024 px default would reserve about
+2 GiB. The size remains configurable when a scene can justify the memory.
 
 ## Vendored wgpu scope
 
@@ -168,7 +172,7 @@ scene dirty uploads
   -> depth prepass
   -> Hi-Z and occlusion/light culling compute
   -> G-buffer and virtual geometry
-  -> deferred PBR + shadows + Radiance Cascades
+  -> deferred PBR + shadows + ambient/environment indirect light
   -> sky / transparency / water / billboards
   -> TAA and debug/performance overlays
   -> browser WebGPU surface presentation
@@ -208,7 +212,7 @@ Each build selects one feature so unused scenes and optional import code are eli
 | Core | `render_v2_basic`, `render_v2_sky`, `simple_graph` |
 | Indoor | `indoor_room`, `indoor_corridor`, `indoor_cathedral`, `indoor_server_room` |
 | Outdoor | `outdoor_night`, `outdoor_canyon`, `outdoor_city`, `outdoor_volcano`, `outdoor_rocks` |
-| Systems | `debug_shapes`, `light_benchmark`, `rc_benchmark`, `sdf_demo`, `editor_demo` |
+| Systems | `debug_shapes`, `light_benchmark`, `hlfs_benchmark`, `sdf_demo`, `editor_demo` |
 | Assets / flight | `load_fbx`, `load_fbx_embedded`, `ship_flight`, `space_station` |
 
 ## License

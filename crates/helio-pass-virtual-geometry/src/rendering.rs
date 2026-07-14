@@ -599,18 +599,6 @@ impl RenderPass for VirtualGeometryPass {
                 main_scene.ambient_color[2],
                 0.0,
             ],
-            rc_world_min: [
-                main_scene.rc_world_min[0],
-                main_scene.rc_world_min[1],
-                main_scene.rc_world_min[2],
-                0.0,
-            ],
-            rc_world_max: [
-                main_scene.rc_world_max[0],
-                main_scene.rc_world_max[1],
-                main_scene.rc_world_max[2],
-                0.0,
-            ],
             csm_splits: [5.0, 20.0, 60.0, 200.0],
             debug_mode: self.debug_mode,
             _pad0: 0,

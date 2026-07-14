@@ -19,7 +19,7 @@ struct CullUniforms {
     _pad3: f32,
 }
 
-/// Mirrors private VgGlobals (96 bytes).
+/// Mirrors private VgGlobals (64 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct VgGlobals {
@@ -28,8 +28,6 @@ struct VgGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
-    rc_world_min: [f32; 4],
-    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
     debug_mode: u32,
     _pad0: u32,
@@ -61,8 +59,8 @@ fn cull_uniforms_size_divisible_by_16() {
 // ── VgGlobals layout tests ────────────────────────────────────────────────────
 
 #[test]
-fn vg_globals_size_is_96() {
-    assert_eq!(mem::size_of::<VgGlobals>(), 96);
+fn vg_globals_size_is_64() {
+    assert_eq!(mem::size_of::<VgGlobals>(), 64);
 }
 
 // ── Initial buffer capacity tests ────────────────────────────────────────────

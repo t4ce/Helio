@@ -15,7 +15,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use helio::{Camera, Renderer, RendererConfig};
+use helio::{Renderer, RendererConfig};
 
 use crate::{HelioWasmApp, InputState};
 
@@ -52,7 +52,6 @@ struct RunnerState<T: HelioWasmApp> {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
     demo: T,
@@ -328,7 +327,6 @@ async fn init_wgpu<T: HelioWasmApp>(
         window,
         surface,
         device,
-        queue,
         surface_format,
         renderer,
         demo,

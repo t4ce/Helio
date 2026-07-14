@@ -12,19 +12,11 @@ struct DeferredGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
-    rc_world_min: [f32; 4],
-    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
     debug_mode: u32,
-    /// 1 if a real HLFS-produced radiance-cascade texture is bound this frame,
-    /// 0 if it fell back to the dummy placeholder (e.g. FXAA/simple/default
-    /// pipelines, which never run the HLFS inject/propagate passes). Lets the
-    /// shader skip `sample_rc_irradiance()` entirely instead of paying for its
-    /// ~128 texture loads per pixel against data that was never written.
-    has_rc_gi: u32,
     /// Number of tiles in the X dimension for tiled light culling.
     num_tiles_x: u32,
-    _pad2: u32,
+    _pad: [u32; 2],
 }
 
 pub struct DeferredLightPass {
@@ -40,7 +32,7 @@ pub struct DeferredLightPass {
     bind_group_2: Option<wgpu::BindGroup>,
     bind_group_3: Option<wgpu::BindGroup>,
     bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
-    bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize)>,
     bind_group_3_key: Option<(usize, usize)>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
@@ -51,7 +43,6 @@ pub struct DeferredLightPass {
     shadow_depth_sampler: wgpu::Sampler,
     fallback_env_view: wgpu::TextureView,
     fallback_env_sampler: wgpu::Sampler,
-    fallback_rc_view: wgpu::TextureView,
     fallback_caustics_view: wgpu::TextureView,
     caustics_sampler: wgpu::Sampler,
     fallback_water_volumes: wgpu::Buffer,
@@ -203,7 +194,6 @@ impl DeferredLightPass {
                     count: None,
                 },
                 storage_entry(4),
-                texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -327,7 +317,7 @@ impl DeferredLightPass {
             compare: None, // No comparison - returns actual depth values for PCSS blocker search
             ..Default::default()
         });
-        let (fallback_env_texture, fallback_env_view) = black_cube_texture(device, queue);
+        let (_fallback_env_texture, fallback_env_view) = black_cube_texture(device, queue);
         let fallback_env_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Deferred Env Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -338,11 +328,8 @@ impl DeferredLightPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        let (fallback_rc_texture, fallback_rc_view) =
-            black_2d_texture(device, queue, "Deferred Fallback RC");
-
         // Fallback caustics texture (black 1x1 RGBA16Float)
-        let (fallback_caustics_texture, fallback_caustics_view) =
+        let (_fallback_caustics_texture, fallback_caustics_view) =
             black_2d_texture(device, queue, "Deferred Fallback Caustics");
 
         // Caustics sampler
@@ -435,7 +422,6 @@ impl DeferredLightPass {
             shadow_depth_sampler,
             fallback_env_view,
             fallback_env_sampler,
-            fallback_rc_view,
             fallback_caustics_view,
             caustics_sampler,
             fallback_water_volumes,
@@ -480,7 +466,6 @@ impl RenderPass for DeferredLightPass {
             "water_caustics",
             "water_volumes",
             "pre_aa",
-            "rc_view",
         ]
     }
 
@@ -504,34 +489,19 @@ impl RenderPass for DeferredLightPass {
         } else {
             ([0.5, 0.5, 0.6], 1.0) // Brighter fallback ambient: sky-blue tint
         };
-        // Get RC bounds from frame resources (dual-tier GI: RC near, ambient far)
-        let (rc_min, rc_max) = if let Some(main) = main_scene {
-            (main.rc_world_min, main.rc_world_max)
-        } else {
-            ([0.0; 3], [0.0; 3]) // Fallback: RC disabled
-        };
-        // rc_world_min/max are always a non-degenerate camera-centred volume
-        // (set unconditionally by the renderer's GiConfig default), regardless
-        // of whether this pipeline actually runs HLFS. Only the presence of a
-        // real rc_view texture tells us whether there's anything to sample.
-        let has_rc_gi = ctx.frame_resources.rc_view.get().is_some();
-
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
             light_count: ctx.scene.lights.len() as u32,
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
-            rc_world_min: [rc_min[0], rc_min[1], rc_min[2], 0.0],
-            rc_world_max: [rc_max[0], rc_max[1], rc_max[2], 0.0],
             // Must match CSM_SPLITS constant in shadow_matrices.wgsl ([16,80,300,1400]).
             // The shadow matrices are computed for these distances, so cascade selection
             // must use the same values or shadow maps will be sampled outside their valid range.
             csm_splits: libhelio::CSM_SPLITS,
             debug_mode: self.debug_mode,
-            has_rc_gi: has_rc_gi as u32,
             num_tiles_x: ctx.width.div_ceil(16),
-            _pad2: 0,
+            _pad: [0; 2],
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -627,11 +597,6 @@ impl RenderPass for DeferredLightPass {
             .shadow_sampler
             .get()
             .unwrap_or(&self.fallback_shadow_sampler);
-        let rc_view = ctx
-            .resources
-            .rc_view
-            .get()
-            .unwrap_or(&self.fallback_rc_view);
         let env_view = &self.fallback_env_view;
 
         let scene_key = (
@@ -641,7 +606,6 @@ impl RenderPass for DeferredLightPass {
             shadow_sampler as *const _ as usize,
             env_view as *const _ as usize,
             ctx.scene.shadow_matrices as *const _ as usize,
-            rc_view as *const _ as usize,
         );
         if self.bind_group_2_key != Some(scene_key) {
             self.bind_group_2 = Some(
@@ -666,7 +630,6 @@ impl RenderPass for DeferredLightPass {
                             binding: 4,
                             resource: ctx.scene.shadow_matrices.as_entire_binding(),
                         },
-                        texture_view_entry(5, rc_view),
                         wgpu::BindGroupEntry {
                             binding: 6,
                             resource: wgpu::BindingResource::Sampler(&self.fallback_env_sampler),

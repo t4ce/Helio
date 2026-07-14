@@ -38,7 +38,7 @@ pub use picking::{PickHit, ScenePicker};
 pub use renderer::{
     build_default_graph_external, build_fxaa_graph, build_fxaa_graph_external,
     build_fxaa_hlfs_graph, build_fxaa_hlfs_graph_external, build_hlfs_graph, build_simple_graph,
-    required_wgpu_features, required_wgpu_limits, GiConfig, Renderer, RendererConfig,
+    required_wgpu_features, required_wgpu_limits, Renderer, RendererConfig,
 };
 pub use scene::{
     Camera, ObjectDescriptor, PickableObject, Result as SceneResult, Scene, SceneActor,

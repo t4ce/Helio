@@ -71,10 +71,6 @@ pub struct MainSceneResources<'a> {
     pub clear_color: [f32; 4],
     pub ambient_color: [f32; 3],
     pub ambient_intensity: f32,
-    /// Radiance Cascades volume bounds (dual-tier GI: RC near, ambient far).
-    /// RC active within these bounds, simpler ambient fallback outside.
-    pub rc_world_min: [f32; 3],
-    pub rc_world_max: [f32; 3],
 }
 
 /// Debug-tracked resource slot.
@@ -249,9 +245,6 @@ pub struct FrameResources<'a> {
     /// Number of hitboxes in water_hitboxes
     pub water_hitbox_count: u32,
 
-    /// Radiance Cascades cascade atlas texture view
-    pub rc_view: Tracked<&'a wgpu::TextureView>,
-
     /// Main depth texture (for passes that need to copy/sample it)
     pub depth_texture: Tracked<&'a wgpu::Texture>,
 
@@ -289,7 +282,6 @@ impl<'a> FrameResources<'a> {
             water_hitboxes: Tracked::empty(),
             water_hitbox_count: 0,
             depth_texture: Tracked::empty(),
-            rc_view: Tracked::empty(),
             corona_emitters: Tracked::empty(),
         }
     }
@@ -334,7 +326,6 @@ impl<'a> FrameResources<'a> {
             reset_field!(water_sim_sampler);
             reset_field!(water_hitboxes);
             reset_field!(depth_texture);
-            reset_field!(rc_view);
             reset_field!(corona_emitters);
         }
     }

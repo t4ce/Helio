@@ -3,7 +3,7 @@ name = "wgpu-types"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
-description = "Common types and utilities for wgpu, the cross-platform, safe, pure-rust graphics API"
+description = "Common WebGPU types vendored for Helio's browser target"
 homepage.workspace = true
 repository.workspace = true
 keywords.workspace = true
@@ -19,9 +19,6 @@ rust-version = "1.87"
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 targets = [
-    "x86_64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "x86_64-pc-windows-msvc",
     "wasm32-unknown-unknown",
 ]
 

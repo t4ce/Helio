@@ -42,8 +42,6 @@ pub struct GBufferGlobals {
     pub light_count: u32,
     pub ambient_intensity: f32,
     pub ambient_color: [f32; 4],
-    pub rc_world_min: [f32; 4],
-    pub rc_world_max: [f32; 4],
     pub csm_splits: [f32; 4],
     pub debug_mode: u32,
     pub _pad0: u32,
@@ -347,9 +345,7 @@ impl RenderPass for GBufferPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Read per-scene values from frame_resources so the GBuffer globals match
-        // what the renderer configured (ambient light, GI bounds, etc.).
-        let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
+        let (ambient_color, ambient_intensity) =
             if let Some(ref ms) = ctx.frame_resources.main_scene.get().as_ref() {
                 (
                     [
@@ -359,22 +355,10 @@ impl RenderPass for GBufferPass {
                         1.0,
                     ],
                     ms.ambient_intensity,
-                    [
-                        ms.rc_world_min[0],
-                        ms.rc_world_min[1],
-                        ms.rc_world_min[2],
-                        0.0,
-                    ],
-                    [
-                        ms.rc_world_max[0],
-                        ms.rc_world_max[1],
-                        ms.rc_world_max[2],
-                        0.0,
-                    ],
                 )
             } else {
                 // Fallback for headless / test usage without a full renderer.
-                ([0.1, 0.1, 0.15, 1.0], 0.1, [-100.0_f32; 4], [100.0_f32; 4])
+                ([0.1, 0.1, 0.15, 1.0], 0.1)
             };
 
         // Upload per-frame globals (O(1) — fixed-size struct).
@@ -384,8 +368,6 @@ impl RenderPass for GBufferPass {
             light_count: ctx.scene.lights.len() as u32,
             ambient_intensity,
             ambient_color,
-            rc_world_min,
-            rc_world_max,
             csm_splits: self.csm_splits,
             debug_mode: self.debug_mode,
             _pad0: 0,

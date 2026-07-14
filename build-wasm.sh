@@ -50,7 +50,7 @@ declare -a ALL_EXAMPLES=(
     outdoor_volcano
     space_station
     light_benchmark
-    rc_benchmark
+    hlfs_benchmark
     sdf_demo
     load_fbx
     load_fbx_embedded

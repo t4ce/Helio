@@ -158,6 +158,15 @@ impl TaaPass {
         output_height: u32,
         format: wgpu::TextureFormat,
     ) -> Self {
+        // Browser canvases can report a transient 0×0 size while a page is
+        // being attached or moved between lifecycle states. WebGPU forbids
+        // zero-sized textures, so keep allocations legal until the real
+        // resize event replaces them.
+        let internal_width = internal_width.max(1);
+        let internal_height = internal_height.max(1);
+        let output_width = output_width.max(1);
+        let output_height = output_height.max(1);
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("TAA Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/taa.wgsl").into()),
@@ -424,6 +433,8 @@ impl RenderPass for TaaPass {
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
         self.output_width = width;
         self.output_height = height;
         // Internal resolution stays at the last create-time value.

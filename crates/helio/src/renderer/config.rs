@@ -22,54 +22,16 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     }
 }
 
-/// Global Illumination configuration (dual-tier: RC near, ambient far).
-#[derive(Debug, Clone, Copy)]
-pub struct GiConfig {
-    /// Radiance Cascades volume radius around camera (world units).
-    /// GI within this radius uses RC, outside uses cheap ambient fallback.
-    /// Default: 80.0 (near-field quality like Unreal Lumen).
-    pub rc_radius: f32,
-    /// Fade margin for smooth RC→ambient transition (world units).
-    /// Default: 20.0 (soft blend zone).
-    pub rc_fade_margin: f32,
-}
-
-impl Default for GiConfig {
-    fn default() -> Self {
-        Self {
-            rc_radius: 80.0,
-            rc_fade_margin: 20.0,
-        }
-    }
-}
-
-impl GiConfig {
-    pub fn ambient_only() -> Self {
-        Self {
-            rc_radius: 0.0,
-            rc_fade_margin: 0.0,
-        }
-    }
-
-    pub fn large_radius(radius: f32) -> Self {
-        Self {
-            rc_radius: radius,
-            rc_fade_margin: radius * 0.25,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
     pub width: u32,
     pub height: u32,
     pub surface_format: wgpu::TextureFormat,
-    pub gi_config: GiConfig,
     pub shadow_quality: libhelio::ShadowQuality,
     pub debug_mode: u32,
     pub render_scale: f32,
     pub perf_overlay_mode: PerfOverlayMode,
-    /// Resolution of each shadow atlas face (width × height). Default 1024.
+    /// Resolution of each shadow atlas face (width × height). Default 256.
     /// Higher values improve shadow quality at the cost of VRAM (N² scaling).
     pub shadow_atlas_size: u32,
 }
@@ -80,18 +42,12 @@ impl RendererConfig {
             width,
             height,
             surface_format,
-            gi_config: GiConfig::default(),
             shadow_quality: libhelio::ShadowQuality::Medium,
             debug_mode: 0,
             render_scale: 0.75,
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: 256,
         }
-    }
-
-    pub fn with_gi_config(mut self, gi_config: GiConfig) -> Self {
-        self.gi_config = gi_config;
-        self
     }
 
     pub fn with_shadow_quality(mut self, quality: libhelio::ShadowQuality) -> Self {

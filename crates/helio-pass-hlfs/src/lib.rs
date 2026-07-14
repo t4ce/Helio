@@ -2,7 +2,7 @@
 //!
 //! Implements a camera-centric hierarchical radiance field that achieves O(1) shading cost
 //! relative to light count. Combines Unreal's Megalights-style importance sampling with
-//! a persistent radiance cascade structure.
+//! a persistent hierarchical light-field clip stack.
 //!
 //! Architecture:
 //! 1. Light importance sampling (K samples per pixel)
@@ -15,8 +15,9 @@ use helio_v3::graph::{ResourceBuilder, ResourceSize};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const CLIP_STACK_LEVELS: usize = 4;
-const VOXEL_RESOLUTION: u32 = 128; // 128^3 per level
-const SAMPLES_PER_PIXEL: u32 = 8; // K samples for importance sampling
+const VOXEL_RESOLUTION: u32 = 32; // Browser-sized 32^3 field per level.
+const SAMPLES_PER_PIXEL: u32 = 2; // Bounded browser memory and compute cost.
+const LIGHT_SAMPLE_BYTES: u64 = 48; // WGSL: two padded vec3s plus one vec4.
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -46,7 +47,7 @@ pub struct HlfsPass {
     // Resources
     globals_buf: wgpu::Buffer,
 
-    // Clip-stack: 4 levels of 3D textures (128^3 RGBA16F each)
+    // Clip-stack: 4 levels of browser-sized 3D RGBA16F textures.
     clip_stack_views: Vec<wgpu::TextureView>,
     clip_stack_sampler: wgpu::Sampler,
 
@@ -104,7 +105,7 @@ impl HlfsPass {
             mapped_at_creation: false,
         });
 
-        // Create clip-stack textures (4 levels of 128^3 RGBA16F)
+        // Create the four browser-sized clip-stack textures.
         let mut clip_stack_textures = Vec::new();
         let mut clip_stack_views = Vec::new();
 
@@ -129,10 +130,10 @@ impl HlfsPass {
         }
 
         // Sample buffer: stores K samples per pixel (position, direction, radiance)
-        let sample_count = (width * height * SAMPLES_PER_PIXEL) as u64;
+        let sample_count = (width as u64) * (height as u64) * (SAMPLES_PER_PIXEL as u64);
         let sample_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("HLFS Sample Buffer"),
-            size: sample_count * 32, // 32 bytes per sample (vec3 pos, vec3 dir, vec4 radiance)
+            size: sample_count * LIGHT_SAMPLE_BYTES,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -1087,8 +1088,9 @@ impl RenderPass for HlfsPass {
                 });
             pass.set_pipeline(&self.hierarchical_propagate_pipeline);
             pass.set_bind_group(0, self.bind_group_compute_propagate.as_ref().unwrap(), &[]);
-            let workgroups = VOXEL_RESOLUTION.div_ceil(8);
-            pass.dispatch_workgroups(workgroups, workgroups, workgroups);
+            let workgroups_xy = VOXEL_RESOLUTION.div_ceil(8);
+            let workgroups_z = VOXEL_RESOLUTION.div_ceil(4);
+            pass.dispatch_workgroups(workgroups_xy, workgroups_xy, workgroups_z);
         }
 
         // Step 4: Final shading (render pass)

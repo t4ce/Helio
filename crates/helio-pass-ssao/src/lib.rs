@@ -23,7 +23,7 @@ struct SsaoCameraUniform {
     _pad0: f32,
 }
 
-/// Globals matching ssao.wgsl Globals (80 bytes).
+/// Globals matching ssao.wgsl Globals.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuGlobals {
@@ -32,8 +32,6 @@ struct GpuGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
-    rc_world_min: [f32; 4],
-    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
 }
 

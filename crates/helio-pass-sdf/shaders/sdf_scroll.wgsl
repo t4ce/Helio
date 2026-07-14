@@ -84,26 +84,29 @@ fn level_voxel_size(level: u32) -> f32 {
 @compute @workgroup_size(8, 1, 1)
 fn cs_scroll(@builtin(local_invocation_id) lid: vec3<u32>) {
     let level = lid.x;
-    if level >= clip_config.level_count { return; }
-
-    let cam_pos    = camera.position_near.xyz;
-    let vs         = level_voxel_size(level);
-    let brick_step = vs * f32(clip_config.brick_size);
-
-    // Snap camera to integer brick coordinates.
-    let new_snap = vec3<i32>(
-        i32(floor(cam_pos.x / brick_step)),
-        i32(floor(cam_pos.y / brick_step)),
-        i32(floor(cam_pos.z / brick_step)),
-    );
-
-    let old_snap = scroll_state.snap_origins[level].xyz;
-    let cam_moved  = any(new_snap != old_snap);
     let edit_dirty = scroll_state.edit_gen != scroll_state.prev_edit_gen;
 
-    if cam_moved || edit_dirty {
-        dirty_flags[level] = 1u;
-        scroll_state.snap_origins[level] = vec4<i32>(new_snap, 0);
+    // Every invocation must reach the barrier below. Guard per-level work
+    // instead of returning from non-uniform control flow.
+    if level < clip_config.level_count {
+        let cam_pos    = camera.position_near.xyz;
+        let vs         = level_voxel_size(level);
+        let brick_step = vs * f32(clip_config.brick_size);
+
+        // Snap camera to integer brick coordinates.
+        let new_snap = vec3<i32>(
+            i32(floor(cam_pos.x / brick_step)),
+            i32(floor(cam_pos.y / brick_step)),
+            i32(floor(cam_pos.z / brick_step)),
+        );
+
+        let old_snap = scroll_state.snap_origins[level].xyz;
+        let cam_moved = any(new_snap != old_snap);
+
+        if cam_moved || edit_dirty {
+            dirty_flags[level] = 1u;
+            scroll_state.snap_origins[level] = vec4<i32>(new_snap, 0);
+        }
     }
 
     // Thread 0 acknowledges the edit generation after all level threads have

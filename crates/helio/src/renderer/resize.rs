@@ -25,7 +25,6 @@ impl Renderer {
             width,
             height,
             surface_format: self.surface_format,
-            gi_config: self.gi_config,
             shadow_quality: self.shadow_quality,
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,

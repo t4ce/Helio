@@ -113,13 +113,24 @@ impl RenderGraph {
     }
 
     pub fn add_pass(&mut self, pass: Box<dyn RenderPass>) {
-        assert!(!self.locked, "RenderGraph: cannot add_pass() after lock()");
+        // Renderer constructors return an already-locked default graph, while
+        // Renderer::add_pass is intentionally part of the public extension
+        // API. Re-lock transparently when a pass is appended to such a graph.
+        // This is normally used during application initialization, before the
+        // first frame is submitted.
+        let relock_size = self.locked.then_some((self.internal_w, self.internal_h));
+        self.locked = false;
+
         let type_id = pass.as_any().type_id();
         self.pass_index_map
             .entry(type_id)
             .or_insert(self.passes.len());
         self.passes.push(pass);
         self.gpu_render_bundles.push(None);
+
+        if let Some((width, height)) = relock_size {
+            self.lock(width, height);
+        }
     }
 
     pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
@@ -885,7 +896,6 @@ fn route_named_texture<'a>(
         "sky_lut" => frame.sky_lut.write(view, "Graph"),
         "water_sim_texture" => frame.water_sim_texture.write(view, "Graph"),
         "water_caustics" => frame.water_caustics.write(view, "Graph"),
-        "rc_cascades" => frame.rc_view.write(view, "Graph"),
         "shadow_atlas" => frame.shadow_atlas.write(view, "Graph"),
         "static_shadow_atlas" => frame.static_shadow_atlas.write(view, "Graph"),
         "gbuffer_albedo" | "gbuffer_normal" | "gbuffer_orm" | "gbuffer_emissive" => {}

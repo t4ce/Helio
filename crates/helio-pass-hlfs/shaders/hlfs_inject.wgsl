@@ -45,7 +45,7 @@ struct LightSample {
 @group(0) @binding(10) var clip_stack_level2: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(11) var clip_stack_level3: texture_storage_3d<rgba16float, write>;
 
-const VOXEL_RESOLUTION: u32 = 128u;
+const VOXEL_RESOLUTION: u32 = 32u;
 
 fn world_to_voxel(world_pos: vec3<f32>, level: u32) -> vec3<i32> {
     let half_extent = globals.near_field_size * 0.5 * pow(globals.cascade_scale, f32(level));

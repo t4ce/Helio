@@ -13,9 +13,11 @@ use crate::groups::GroupId;
 use crate::mesh::MeshBuffers;
 use crate::scene::Scene;
 
-use super::config::{GiConfig, RendererConfig};
+use super::config::RendererConfig;
 use super::debug::DebugDrawState;
-use super::graph::{build_default_graph, build_default_graph_external, build_simple_graph};
+use super::graph::{
+    build_default_graph, build_default_graph_external, build_hlfs_graph, build_simple_graph,
+};
 
 type CustomGraphBuilder = Arc<
     dyn Fn(
@@ -70,7 +72,6 @@ pub struct Renderer {
     pub(crate) ambient_color: [f32; 3],
     pub(crate) ambient_intensity: f32,
     pub(crate) clear_color: [f32; 4],
-    pub(crate) gi_config: GiConfig,
     pub(crate) shadow_quality: libhelio::ShadowQuality,
     pub(crate) shadow_atlas_size: u32,
     pub(crate) debug_mode: u32,
@@ -288,14 +289,6 @@ impl<'a> DebugBatch<'a> {
 }
 
 impl Renderer {
-    pub fn set_gi_config(&mut self, gi_config: GiConfig) {
-        self.gi_config = gi_config;
-    }
-
-    pub fn gi_config(&self) -> GiConfig {
-        self.gi_config
-    }
-
     pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality) {
         self.shadow_quality = quality;
         if matches!(self.graph_kind, GraphKind::Default) {
@@ -431,12 +424,37 @@ impl Renderer {
         self.graph_kind = GraphKind::Simple;
     }
 
+    /// Switch to Helio's compute-driven hierarchical light-field graph.
+    pub fn use_hlfs_graph(&mut self) {
+        let config = RendererConfig {
+            width: self.output_width,
+            height: self.output_height,
+            surface_format: self.surface_format,
+            shadow_quality: self.shadow_quality,
+            debug_mode: self.debug_mode,
+            render_scale: self.render_scale,
+            perf_overlay_mode: self.perf_overlay_mode,
+            shadow_atlas_size: self.shadow_atlas_size,
+        };
+        let builder: CustomGraphBuilder = Arc::new(build_hlfs_graph);
+        let graph = builder(
+            &self.device,
+            &self.queue,
+            &self.scene,
+            config,
+            self.debug_state.clone(),
+            &self.debug_camera_buffer,
+            &self.cull_stats_buffer,
+            Some(&self.debug_overlay_shared),
+        );
+        self.set_graph_custom(graph, config, builder);
+    }
+
     pub fn use_default_graph(&mut self) {
         let config = RendererConfig {
             width: self.output_width,
             height: self.output_height,
             surface_format: self.surface_format,
-            gi_config: self.gi_config,
             shadow_quality: self.shadow_quality,
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,

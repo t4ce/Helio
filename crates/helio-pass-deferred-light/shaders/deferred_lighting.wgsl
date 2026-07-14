@@ -2,7 +2,7 @@
 //!
 //! Runs as a fullscreen triangle (no vertex buffer) over the G-buffer written
 //! by the gbuffer pass.  Performs the full Cook-Torrance PBR evaluation,
-//! PCF shadow sampling, Radiance-Cascades GI, environment IBL and tonemapping
+//! PCF shadow sampling, ambient/environment IBL and tonemapping
 //! in a single screen-space draw — O(pixels) instead of O(pixels × lights).
 //!
 //! Feature override constants injected by PipelineCache:
@@ -40,20 +40,10 @@ struct Globals {
     light_count:       u32,
     ambient_intensity: f32,
     ambient_color:     vec4<f32>,
-    rc_world_min:      vec4<f32>,
-    rc_world_max:      vec4<f32>,
     csm_splits:        vec4<f32>,
     debug_mode:        u32,
-    // 1 if a real HLFS-produced radiance-cascade texture is bound this frame,
-    // 0 if it fell back to a 1x1 black dummy (FXAA/simple/default pipelines,
-    // which never run the HLFS inject/propagate passes that write rc_cascade0).
-    // rc_world_min/max are always a non-degenerate camera-centred volume
-    // regardless of pipeline, so they can't be used to detect this — has_rc_gi
-    // is the real signal, checked in sample_rc_irradiance() before doing any
-    // of its ~128 texture loads.
-    has_rc_gi:         u32,
     num_tiles_x:       u32,
-    _pad2:             u32,
+    _pad:              vec2<u32>,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -128,12 +118,15 @@ struct ShadowConfig {
 @group(2) @binding(2) var shadow_sampler: sampler_comparison;
 @group(2) @binding(3) var env_cube:       texture_cube<f32>;
 @group(2) @binding(4) var <storage, read> shadow_matrices: array<LightMatrix>;
-@group(2) @binding(5) var rc_cascade0:    texture_2d<f32>;
 @group(2) @binding(6) var env_sampler:    sampler;
 @group(2) @binding(7) var shadow_depth_sampler: sampler;  // Non-comparison sampler for PCSS blocker search
 @group(2) @binding(8) var water_caustics: texture_2d<f32>;  // Caustics texture from WaterCausticsPass
 @group(2) @binding(9) var caustics_sampler: sampler;  // Sampler for caustics
 @group(2) @binding(10) var<storage, read> water_volumes: array<GpuWaterVolume>;  // Water volumes
+
+fn shadow_atlas_size() -> f32 {
+    return f32(textureDimensions(shadow_atlas).x);
+}
 
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
@@ -165,8 +158,6 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {
 }
 
 // ── Shadow helpers ────────────────────────────────────────────────────────────
-
-const ATLAS_SIZE: f32 = 1024.0;
 
 // Vogel disk sampling - blue-noise-like spiral pattern for high-quality PCF
 fn vogel_disk_sample(sample_idx: u32, sample_count: u32, theta: f32) -> vec2<f32> {
@@ -222,7 +213,7 @@ fn sample_cascade_shadow(
         return 1.0;
     }
 
-    let filter_radius = (2.0 / ATLAS_SIZE) * cascade_scale;
+    let filter_radius = (2.0 / shadow_atlas_size()) * cascade_scale;
 
     // Per-pixel rotation to break up banding (stable hash — no frame counter)
     let theta = hash22(frag_coord) * 6.28318530718;
@@ -281,10 +272,10 @@ fn pcss_blocker_search(
         let sample_uv = shadow_uv + offset;
 
         // Convert UV to pixel coordinates for textureLoad (no filtering needed for blocker search)
-        let pixel_coord = vec2<i32>(sample_uv * ATLAS_SIZE);
+        let pixel_coord = vec2<i32>(sample_uv * shadow_atlas_size());
 
         // Bounds check to prevent out-of-range access
-        if any(pixel_coord < vec2<i32>(0)) || any(pixel_coord >= vec2<i32>(i32(ATLAS_SIZE))) {
+        if any(pixel_coord < vec2<i32>(0)) || any(pixel_coord >= vec2<i32>(i32(shadow_atlas_size()))) {
             continue;
         }
 
@@ -345,7 +336,7 @@ fn sample_cascade_shadow_pcss(
 
     // Step 1: Blocker search (average occluder depth)
     // Uses unbiased depth so nearby occluders are correctly identified.
-    let search_radius = config.pcss_light_size / ATLAS_SIZE;
+    let search_radius = config.pcss_light_size / shadow_atlas_size();
     let blocker = pcss_blocker_search(layer, shadow_uv, receiver_depth, search_radius,
                                        shadow_config.pcss_blocker_samples, theta);
 
@@ -355,9 +346,10 @@ fn sample_cascade_shadow_pcss(
 
     // Step 2: Compute penumbra size (distance-based filter width)
     let penumbra = pcss_penumbra_size(receiver_depth, blocker.x, config.pcss_light_size);
-    let filter_radius = clamp(penumbra / ATLAS_SIZE,
-                                config.filter_radius / ATLAS_SIZE,
-                                config.filter_radius * 3.0 / ATLAS_SIZE);
+    let atlas_size = shadow_atlas_size();
+    let filter_radius = clamp(penumbra / atlas_size,
+                                config.filter_radius / atlas_size,
+                                config.filter_radius * 3.0 / atlas_size);
 
     // Step 3: Variable-kernel PCF (filter size scales with penumbra)
     var lit_sum = 0.0;
@@ -590,103 +582,6 @@ fn pbr_direct_light(
     return (kD * albedo / PI + specular) * radiance * NdL * sf;
 }
 
-// ── Radiance Cascades GI ──────────────────────────────────────────────────────
-
-const RC_PROBE_DIM: u32 = 16u;
-const RC_DIR_DIM:   u32 = 4u;
-
-fn rc_oct_decode(uv: vec2<f32>) -> vec3<f32> {
-    let f  = uv * 2.0 - 1.0;
-    let af = abs(f);
-    let l  = af.x + af.y;
-    var n: vec3<f32>;
-    if l > 1.0 {
-        let sx = select(-1.0, 1.0, f.x >= 0.0);
-        let sz = select(-1.0, 1.0, f.y >= 0.0);
-        n = vec3<f32>((1.0 - af.y) * sx, 1.0 - l, (1.0 - af.x) * sz);
-    } else {
-        n = vec3<f32>(f.x, 1.0 - l, f.y);
-    }
-    return normalize(n);
-}
-
-fn rc_corner_irradiance_precomp(
-    px: u32, py: u32, pz: u32,
-    cos_weights: array<f32, 16>,
-) -> vec3<f32> {
-    let dim = RC_PROBE_DIM - 1u;
-    let cpx = min(px, dim); let cpy = min(py, dim); let cpz = min(pz, dim);
-    var irr  = vec3<f32>(0.0);
-    var wsum = 0.0;
-    var idx  = 0u;
-    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
-        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
-            let cos_w = cos_weights[idx];
-            if cos_w > 0.001 {
-                let atlas_x = i32(cpx * RC_DIR_DIM + ddx);
-                let atlas_y = i32((cpy * RC_PROBE_DIM + cpz) * RC_DIR_DIM + ddy);
-                irr  += textureLoad(rc_cascade0, vec2<i32>(atlas_x, atlas_y), 0).rgb * cos_w;
-                wsum += cos_w;
-            }
-            idx++;
-        }
-    }
-    return irr / max(wsum, 0.001);
-}
-
-fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    // No real HLFS cascade bound this frame (e.g. FXAA/simple/default
-    // pipelines) — rc_cascade0 is a 1x1 black dummy, so every one of the ~128
-    // texture loads below would just read zero. Skip the whole thing.
-    if globals.has_rc_gi == 0u {
-        return vec3<f32>(0.0);
-    }
-
-    let world_min  = globals.rc_world_min.xyz;
-    let world_max  = globals.rc_world_max.xyz;
-    let world_size = world_max - world_min;
-    if world_size.x <= 0.0 || world_size.y <= 0.0 || world_size.z <= 0.0 {
-        return vec3<f32>(0.0);
-    }
-
-    let t            = (world_pos - world_min) / world_size;
-    let fade_margin  = 0.05;
-    let fade         = smoothstep(vec3<f32>(0.0), vec3<f32>(fade_margin), t)
-                     * smoothstep(vec3<f32>(1.0), vec3<f32>(1.0 - fade_margin), t);
-    let volume_weight = fade.x * fade.y * fade.z;
-    if volume_weight <= 0.0 { return vec3<f32>(0.0); }
-
-    // Precompute per-direction cosine weights ONCE, shared across all 8 trilinear corners.
-    var cos_weights: array<f32, 16>;
-    var idx = 0u;
-    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
-        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
-            let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
-            cos_weights[idx] = max(0.0, dot(normal, rc_oct_decode(dir_uv)));
-            idx++;
-        }
-    }
-
-    let cell_size = world_size / f32(RC_PROBE_DIM);
-    let probe_f   = (world_pos - world_min) / cell_size - 0.5;
-    let pf        = clamp(probe_f, vec3<f32>(0.0), vec3<f32>(f32(RC_PROBE_DIM) - 1.0));
-    let pi        = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
-    let frc       = fract(pf);
-
-    let c000 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z,      cos_weights);
-    let c001 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z + 1u, cos_weights);
-    let c010 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z,      cos_weights);
-    let c011 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z + 1u, cos_weights);
-    let c100 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z,      cos_weights);
-    let c101 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z + 1u, cos_weights);
-    let c110 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z,      cos_weights);
-    let c111 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z + 1u, cos_weights);
-
-    let c0 = mix(mix(c000, c001, frc.z), mix(c010, c011, frc.z), frc.y);
-    let c1 = mix(mix(c100, c101, frc.z), mix(c110, c111, frc.z), frc.y);
-    return mix(c0, c1, frc.x) * volume_weight;
-}
-
 // ── Tonemapping & bloom ───────────────────────────────────────────────────────
 
 fn luminance(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)); }
@@ -833,12 +728,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // ── RC indirect diffuse ───────────────────────────────────────────────────
-    let rc_irr   = sample_rc_irradiance(world_pos, N);
-    let F_ibl    = fresnel_schlick_roughness(NdV, F0, roughness);
-    let kD_ibl   = (1.0 - F_ibl) * (1.0 - metallic);
-    let diff_ind = kD_ibl * rc_irr * albedo;
-    
     // ── Indirect specular: environment cubemap ────────────────────────────────
     let R            = reflect(-V, N);
     let env_lod      = roughness * 8.0;  // approx mip from roughness (WebGPU: textureSample not allowed in non-uniform flow)
@@ -852,22 +741,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // indirect-light occlusion instead.  This ensures shadowed areas still
     // receive fill light and are never pitch black.
     //
-    // When RC GI is active it replaces the hemisphere fallback with physically-
-    // based global illumination.  When inactive the hemisphere ambient is used.
-
     let sky_color      = globals.ambient_color.rgb * globals.ambient_intensity;
     let ground_color   = sky_color * 0.15;
     let hemi_t         = N.y * 0.5 + 0.5;
     let hemi           = mix(ground_color, sky_color, hemi_t) * albedo;
 
-    // RC weight: 0 = no RC data, 1 = full RC coverage
-    let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
-
-    let ambient_final = mix(hemi, diff_ind, rc_weight);
-
     // ── Combine ───────────────────────────────────────────────────────────────
     //
-    var color = Lo + (ambient_final + spec_ind) * ao_combined;
+    var color = Lo + (hemi + spec_ind) * ao_combined;
     color        += emissive;               // emissive from G-buffer
 
     // ── Water caustics ────────────────────────────────────────────────────────

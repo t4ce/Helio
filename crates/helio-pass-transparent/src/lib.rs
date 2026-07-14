@@ -26,8 +26,6 @@ struct GBufferGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
-    rc_world_min: [f32; 4],
-    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
 }
 
@@ -239,8 +237,6 @@ impl RenderPass for TransparentPass {
             light_count: ctx.scene.lights.len() as u32,
             ambient_intensity: 0.1,
             ambient_color: [0.1, 0.1, 0.15, 1.0],
-            rc_world_min: [0.0; 4],
-            rc_world_max: [0.0; 4],
             csm_splits: [0.0; 4],
         };
         ctx.queue

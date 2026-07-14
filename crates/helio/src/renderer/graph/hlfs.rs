@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use helio_pass_debug_overlay::DebugOverlayState;
 use helio_pass_hlfs::HlfsPass;
-use helio_pass_perf_overlay::PerfOverlayAnalyzerPass;
 use helio_pass_taa::TaaPass;
 use helio_v3::RenderGraph;
 
