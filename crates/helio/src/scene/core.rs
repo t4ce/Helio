@@ -107,6 +107,10 @@ pub struct Scene {
     /// Used by shadow caching to detect when Movable lights move.
     pub(in crate::scene) movable_lights_generation: u64,
 
+    /// Number of shadow-map array layers available in the active render graph.
+    /// Six consecutive layers are reserved per realtime shadow caster.
+    pub(in crate::scene) shadow_face_capacity: u32,
+
     /// Per-frame custom trait-based scene actors.
     pub(in crate::scene) custom_actors: Vec<Box<dyn SceneActorTrait>>,
 
@@ -293,6 +297,7 @@ impl Scene {
             group_hidden: GroupMask::NONE,
             movable_objects_generation: 0,
             movable_lights_generation: 0,
+            shadow_face_capacity: 32,
             custom_actors: Vec::new(),
             vg_meshes: HashMap::new(),
             vg_next_mesh_id: 0,
@@ -322,6 +327,10 @@ impl Scene {
             section_to_instance: HashMap::new(),
             voxel_volumes: DenseArena::new(),
         }
+    }
+
+    pub(crate) fn set_shadow_face_capacity(&mut self, capacity: u32) {
+        self.shadow_face_capacity = capacity.clamp(1, 256);
     }
 
     pub fn insert_voxel_volume(&mut self, descriptor: VoxelVolumeDescriptor) -> Result<VoxelVolumeId> {

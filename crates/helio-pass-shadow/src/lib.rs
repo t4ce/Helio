@@ -120,6 +120,9 @@ pub struct ShadowPass {
     /// Resolution of each atlas face (width × height).
     atlas_size: u32,
 
+    /// Number of texture-array layers actually allocated by the graph.
+    atlas_layers: u32,
+
     // ── Per-caster CPU dirty tracking (light movement only) ──────────────────
     /// Per-caster last-rendered generation, compared against `per_caster_dirty_gen`.
     /// Only updated when a light moves (object movement is now detected GPU-side).
@@ -149,7 +152,9 @@ impl ShadowPass {
         face_cull_indirect: Arc<wgpu::Buffer>,
         face_cull_counts: Arc<wgpu::Buffer>,
         atlas_size: u32,
+        atlas_layers: u32,
     ) -> Self {
+        let atlas_layers = atlas_layers.clamp(1, MAX_SHADOW_FACES as u32);
         // ── Shader ────────────────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow"),
@@ -392,11 +397,16 @@ impl ShadowPass {
                 .features()
                 .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
             atlas_size,
+            atlas_layers,
         }
     }
 
-    fn create_face_views(texture: &wgpu::Texture, label: &str) -> Box<[wgpu::TextureView]> {
-        (0..MAX_SHADOW_FACES as u32)
+    fn create_face_views(
+        texture: &wgpu::Texture,
+        label: &str,
+        layer_count: u32,
+    ) -> Box<[wgpu::TextureView]> {
+        (0..layer_count)
             .map(|i| {
                 texture.create_view(&wgpu::TextureViewDescriptor {
                     label: Some(label),
@@ -426,9 +436,9 @@ impl RenderPass for ShadowPass {
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         let sz = ResourceSize::Absolute { width: self.atlas_size, height: self.atlas_size };
         builder.write_color_raw("shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
-        builder.with_layers(256);
+        builder.with_layers(self.atlas_layers);
         builder.write_color_raw("static_shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
-        builder.with_layers(256);
+        builder.with_layers(self.atlas_layers);
     }
 
     fn name(&self) -> &'static str {
@@ -451,19 +461,23 @@ impl RenderPass for ShadowPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let face_count = (ctx.scene.shadow_count as usize).min(MAX_SHADOW_FACES);
+        let face_count = (ctx.scene.shadow_count as usize)
+            .min(self.atlas_layers as usize)
+            .min(MAX_SHADOW_FACES);
         let static_draw_count = ctx.scene.shadow_static_draw_count;
         let movable_draw_count = ctx.scene.shadow_movable_draw_count;
 
         // ── Lazily initialize per-face views from graph-owned textures ─────────
         if self.face_views.is_empty() {
             if let Some(tex) = ctx.resource_pool.get_texture("shadow_atlas") {
-                self.face_views = Self::create_face_views(tex, "Shadow/DynamicFace");
+                self.face_views =
+                    Self::create_face_views(tex, "Shadow/DynamicFace", self.atlas_layers);
             }
         }
         if self.static_face_views.is_empty() {
             if let Some(tex) = ctx.resource_pool.get_texture("static_shadow_atlas") {
-                self.static_face_views = Self::create_face_views(tex, "Shadow/StaticFace");
+                self.static_face_views =
+                    Self::create_face_views(tex, "Shadow/StaticFace", self.atlas_layers);
             }
         }
 

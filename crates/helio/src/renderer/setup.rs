@@ -60,6 +60,7 @@ impl Renderer {
         debug_camera_buffer: wgpu::Buffer,
         cull_stats_buffer: wgpu::Buffer,
     ) -> Self {
+        scene.set_shadow_face_capacity(config.shadow_face_capacity);
         scene.set_render_size(width, height);
 
         assert!(
@@ -148,6 +149,7 @@ impl Renderer {
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,
             shadow_atlas_size: config.shadow_atlas_size,
+            shadow_face_capacity: config.shadow_face_capacity,
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,

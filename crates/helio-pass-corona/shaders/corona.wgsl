@@ -18,7 +18,9 @@
 
 const PI:          f32 = 3.14159265359;
 const INV_MAX_U32: f32 = 1.0 / 4294967295.0;
-const F32_MAX:     f32 = 3.4028235e38;
+// Stay just below the largest finite f32. The previously rounded decimal was
+// above the representable range in Dawn's strict WebGPU WGSL parser.
+const F32_MAX:     f32 = 3.4028234e38;
 const WG:          u32 = 256u;
 const ATLAS_COLS:  u32 = 4u;
 

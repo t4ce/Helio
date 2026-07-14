@@ -121,8 +121,9 @@ impl Scene {
         // triggers shadow atlas re-renders (expensive with many draw calls). The budget
         // should only change when lights are added/removed or their properties change.
         {
-            const MAX_SHADOW_CASTERS: usize = 42;
             const FACES_PER_LIGHT: u32 = 6;
+            let max_shadow_casters =
+                ((self.shadow_face_capacity / FACES_PER_LIGHT) as usize).min(42);
             let light_count = self.gpu_scene.lights.len();
 
             // Phase 1: score and select the top MAX_SHADOW_CASTERS.
@@ -149,7 +150,7 @@ impl Scene {
                 b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
             });
 
-            let winner_count = scored.len().min(MAX_SHADOW_CASTERS);
+            let winner_count = scored.len().min(max_shadow_casters);
 
             // Phase 2: re-sort winners by their buffer index (stable secondary key).
             // Lights that stay in budget from frame to frame retain the same atlas slot,
@@ -160,7 +161,7 @@ impl Scene {
             let mut next_layer: u32 = 0;
             for (rank, &(_, i)) in scored.iter().enumerate() {
                 let light = self.gpu_scene.lights.0.as_slice()[i];
-                if rank < MAX_SHADOW_CASTERS {
+                if rank < max_shadow_casters {
                     let mut assigned = light;
                     assigned.shadow_index = next_layer;
                     self.gpu_scene.lights.update(i, assigned);

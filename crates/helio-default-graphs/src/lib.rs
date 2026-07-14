@@ -100,6 +100,7 @@ fn add_common_early_passes(
         face_cull_indirect,
         face_cull_counts,
         config.shadow_atlas_size,
+        config.shadow_face_capacity,
     )));
 
     if scene.sky_context().has_sky {

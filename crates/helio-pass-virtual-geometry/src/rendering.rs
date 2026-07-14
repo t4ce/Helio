@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::num::NonZeroU32;
 
 use crate::{
@@ -91,15 +92,10 @@ impl VirtualGeometryPass {
                         &format!("binding_array<sampler, {MAX_TEXTURES}>"),
                     );
                 #[cfg(target_arch = "wasm32")]
-                let s = s
-                    .replace(&format!("binding_array<sampler, {MAX_TEXTURES}>"), "sampler")
-                    .replace("scene_samplers[slot.texture_index]", "scene_samplers")
-                    .replace(&format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"), "texture_2d<f32>")
-                    .replace("scene_textures[slot.texture_index]", "scene_textures")
-                    .replace(
-                        "return textureSample(scene_textures, scene_samplers, uv);",
-                        "return textureSampleLevel(scene_textures, scene_samplers, uv, 0.0);",
-                    );
+                let s = helio::radiant::RadiantTemplate::apply_webgpu_fixups(
+                    &s,
+                    MAX_TEXTURES,
+                );
                 s.into()
             }),
         });
@@ -816,28 +812,54 @@ impl RenderPass for VirtualGeometryPass {
         if self.draw_bg_1.is_none()
             || self.bg1_version != Some(main_scene.material_textures.version)
         {
+            let mut entries = vec![
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ctx.scene.materials.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: main_scene
+                        .material_textures
+                        .material_textures
+                        .as_entire_binding(),
+                },
+            ];
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureViewArray(
+                        main_scene.material_textures.texture_views,
+                    ),
+                });
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::SamplerArray(
+                        main_scene.material_textures.samplers,
+                    ),
+                });
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                for (index, view) in main_scene.material_textures.texture_views.iter().enumerate() {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 2 + index as u32,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    });
+                }
+                for (index, sampler) in main_scene.material_textures.samplers.iter().enumerate() {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 2 + MAX_TEXTURES as u32 + index as u32,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    });
+                }
+            }
             self.draw_bg_1 = Some(
                 ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("VG Draw BG1"),
                     layout: &self.draw_bgl_1,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.materials.buffer().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: main_scene.material_textures.material_textures.as_entire_binding() },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            #[cfg(not(target_arch = "wasm32"))]
-                            resource: wgpu::BindingResource::TextureViewArray(main_scene.material_textures.texture_views),
-                            #[cfg(target_arch = "wasm32")]
-                            resource: wgpu::BindingResource::TextureView(main_scene.material_textures.texture_views.first().copied().expect("scene must have at least one texture view")),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            #[cfg(not(target_arch = "wasm32"))]
-                            resource: wgpu::BindingResource::SamplerArray(main_scene.material_textures.samplers),
-                            #[cfg(target_arch = "wasm32")]
-                            resource: wgpu::BindingResource::Sampler(main_scene.material_textures.samplers.first().copied().expect("scene must have at least one sampler")),
-                        },
-                    ],
+                    entries: &entries,
                 }),
             );
             self.bg1_version = Some(main_scene.material_textures.version);
@@ -1042,52 +1064,74 @@ impl RenderPass for VirtualGeometryPass {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    #[cfg(not(target_arch = "wasm32"))]
     let count = NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero");
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("VG Material BGL"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
+    let mut entries = vec![
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
             },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
             },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
+            count: None,
+        },
+    ];
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: Some(count),
+        });
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: Some(count),
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for index in 0..MAX_TEXTURES {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 2 + index as u32,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
-                #[cfg(not(target_arch = "wasm32"))]
-                count: Some(count),
-                #[cfg(target_arch = "wasm32")]
                 count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
+            });
+        }
+        for index in 0..MAX_TEXTURES {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 2 + MAX_TEXTURES as u32 + index as u32,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                #[cfg(not(target_arch = "wasm32"))]
-                count: Some(count),
-                #[cfg(target_arch = "wasm32")]
                 count: None,
-            },
-        ],
+            });
+        }
+    }
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("VG Material BGL"),
+        entries: &entries,
     })
 }

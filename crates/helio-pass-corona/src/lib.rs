@@ -67,8 +67,11 @@ pub struct CoronaPass {
     sort_local_merge_pipeline: wgpu::ComputePipeline,
     render_pipeline:          wgpu::RenderPipeline,
 
-    // ── Single unified BGL / pipeline layout ─────────────────────────────────
-    bgl: wgpu::BindGroupLayout,
+    // Compute writes particle storage, while the vertex stage may only read it
+    // on WebGPU. Keep compatible layouts rather than exposing writable storage
+    // to the vertex stage.
+    compute_bgl: wgpu::BindGroupLayout,
+    render_bgl: wgpu::BindGroupLayout,
 
     // ── GPU buffers ──────────────────────────────────────────────────────────
     uniform_buf:       wgpu::Buffer,   // CoronaUniforms (32 bytes, UNIFORM | COPY_DST)
@@ -90,8 +93,9 @@ pub struct CoronaPass {
     particle_view:    wgpu::TextureView,
     particle_sampler: wgpu::Sampler,
 
-    // ── Bind group (rebuilt when camera or particle buffer pointer changes) ───
-    bg:     Option<wgpu::BindGroup>,
+    // ── Bind groups (rebuilt when camera or particle buffer pointer changes) ─
+    compute_bg: Option<wgpu::BindGroup>,
+    render_bg:  Option<wgpu::BindGroup>,
     bg_key: Option<(usize, usize)>,  // (particle_buf ptr, camera_buf ptr)
 
     // ── State ────────────────────────────────────────────────────────────────
@@ -118,9 +122,27 @@ impl CoronaPass {
         camera_buf:     &wgpu::Buffer,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("Corona Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/corona.wgsl").into()),
+        let source = include_str!("../shaders/corona.wgsl");
+        let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label:  Some("Corona Compute Shader"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let render_source = source
+            .replace(
+                "var<storage, read_write>  particles:",
+                "var<storage, read>        particles:",
+            )
+            .replace(
+                "var<storage, read_write>  emitters:",
+                "var<storage, read>        emitters:",
+            )
+            .replace(
+                "var<storage, read_write>  compact_buf:",
+                "var<storage, read>        compact_buf:",
+            );
+        let render_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label:  Some("Corona Render Shader"),
+            source: wgpu::ShaderSource::Wgsl(render_source.into()),
         });
 
         // ── Buffers ──────────────────────────────────────────────────────────
@@ -249,47 +271,17 @@ impl CoronaPass {
             ..Default::default()
         });
 
-        // ── Unified bind group layout (b0-b11) ────────────────────────────────
+        let compute_bgl = Self::create_bgl(device, false);
+        let render_bgl = Self::create_bgl(device, true);
 
-        use wgpu::ShaderStages as SS;
-        let cv  = SS::COMPUTE | SS::VERTEX;
-        let cvf = SS::COMPUTE | SS::VERTEX | SS::FRAGMENT;
-        let c   = SS::COMPUTE;
-        let f   = SS::FRAGMENT;
-
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Corona BGL"),
-            entries: &[
-                Self::uniform_entry(0,  cvf),                          // uniforms
-                Self::storage_entry(1,  cv,  false),                   // particles
-                Self::storage_entry(2,  cv,  false),                   // emitters (VERTEX for atlas)
-                Self::storage_entry(3,  cv,  false),                   // compact_buf
-                Self::storage_entry(4,  c,   false),                   // emitter_alive
-                Self::storage_entry(5,  c,   false),                   // draw_args_staging
-                Self::uniform_entry(6,  cv),                           // camera
-                Self::storage_entry(7,  c,   false),                   // prefix_buf
-                Self::storage_entry(8,  c,   false),                   // block_sums_buf
-                Self::storage_entry(9,  c,   false),                   // sort_key_buf
-                wgpu::BindGroupLayoutEntry {                            // particle_tex
-                    binding: 10, visibility: f,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type:    wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled:   false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {                            // particle_sampler
-                    binding: 11, visibility: f,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
+        let compute_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Corona Compute PL"),
+            bind_group_layouts: &[Some(&compute_bgl)],
+            immediate_size: 0,
         });
-
-        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Corona PL"),
-            bind_group_layouts: &[Some(&bgl)],
+        let render_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Corona Render PL"),
+            bind_group_layouts: &[Some(&render_bgl)],
             immediate_size: 0,
         });
 
@@ -298,8 +290,8 @@ impl CoronaPass {
         let mk_compute = |entry: &str| -> wgpu::ComputePipeline {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label:  Some(&format!("Corona {entry}")),
-                layout: Some(&pl),
-                module: &shader,
+                layout: Some(&compute_pl),
+                module: &compute_shader,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
                 cache: None,
@@ -320,13 +312,13 @@ impl CoronaPass {
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label:  Some("Corona Render"),
-            layout: Some(&pl),
+            layout: Some(&render_pl),
             vertex: wgpu::VertexState {
-                module: &shader, entry_point: Some("vs_main"),
+                module: &render_shader, entry_point: Some("vs_main"),
                 compilation_options: Default::default(), buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader, entry_point: Some("fs_main"),
+                module: &render_shader, entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
@@ -361,8 +353,16 @@ impl CoronaPass {
         let camera_ptr = camera_buf as *const _ as usize;
         let part_ptr   = &particle_buf as *const _ as usize;
 
-        let bg = Some(Self::build_bg(
-            device, &bgl,
+        let compute_bg = Some(Self::build_bg(
+            device, &compute_bgl,
+            &uniform_buf, &particle_buf, &emitter_buf, &compact_buf,
+            &emitter_alive_buf, &draw_args_staging,
+            camera_buf,
+            &prefix_buf, &block_sums_buf, &sort_key_buf,
+            &particle_view, &particle_sampler,
+        ));
+        let render_bg = Some(Self::build_bg(
+            device, &render_bgl,
             &uniform_buf, &particle_buf, &emitter_buf, &compact_buf,
             &emitter_alive_buf, &draw_args_staging,
             camera_buf,
@@ -375,13 +375,13 @@ impl CoronaPass {
             scan_local_pipeline, scan_blocks_pipeline, scatter_pipeline, build_multi_pipeline,
             sort_local_pipeline, sort_global_pipeline, sort_local_merge_pipeline,
             render_pipeline,
-            bgl,
+            compute_bgl, render_bgl,
             uniform_buf, particle_buf, emitter_buf, compact_buf,
             emitter_alive_buf, draw_args_staging, draw_args_buf,
             prefix_buf, block_sums_buf, sort_key_buf,
             sort_steps_buf,
             _particle_tex: particle_tex, particle_view, particle_sampler,
-            bg, bg_key: Some((part_ptr, camera_ptr)),
+            compute_bg, render_bg, bg_key: Some((part_ptr, camera_ptr)),
             uploaded_generation: u64::MAX,
             max_particles: DEFAULT_MAX_PARTICLES,
             emitter_count: 0,
@@ -414,6 +414,54 @@ impl CoronaPass {
             },
             count: None,
         }
+    }
+
+    fn create_bgl(device: &wgpu::Device, for_render: bool) -> wgpu::BindGroupLayout {
+        use wgpu::ShaderStages as SS;
+
+        let storage_visibility = if for_render { SS::VERTEX } else { SS::COMPUTE };
+        let uniform_visibility = if for_render {
+            SS::VERTEX | SS::FRAGMENT
+        } else {
+            SS::COMPUTE
+        };
+        let label = if for_render {
+            "Corona Render BGL"
+        } else {
+            "Corona Compute BGL"
+        };
+
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(label),
+            entries: &[
+                Self::uniform_entry(0, uniform_visibility),
+                Self::storage_entry(1, storage_visibility, for_render),
+                Self::storage_entry(2, storage_visibility, for_render),
+                Self::storage_entry(3, storage_visibility, for_render),
+                Self::storage_entry(4, SS::COMPUTE, false),
+                Self::storage_entry(5, SS::COMPUTE, false),
+                Self::uniform_entry(6, uniform_visibility),
+                Self::storage_entry(7, SS::COMPUTE, false),
+                Self::storage_entry(8, SS::COMPUTE, false),
+                Self::storage_entry(9, SS::COMPUTE, false),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: SS::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: SS::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        })
     }
 
     // ── Bind group builder ────────────────────────────────────────────────────
@@ -702,8 +750,16 @@ impl RenderPass for CoronaPass {
         let key = (part_ptr, camera_ptr);
 
         if self.bg_key != Some(key) {
-            self.bg = Some(Self::build_bg(
-                ctx.device, &self.bgl,
+            self.compute_bg = Some(Self::build_bg(
+                ctx.device, &self.compute_bgl,
+                &self.uniform_buf, &self.particle_buf, &self.emitter_buf,
+                &self.compact_buf, &self.emitter_alive_buf, &self.draw_args_staging,
+                ctx.scene.camera,
+                &self.prefix_buf, &self.block_sums_buf, &self.sort_key_buf,
+                &self.particle_view, &self.particle_sampler,
+            ));
+            self.render_bg = Some(Self::build_bg(
+                ctx.device, &self.render_bgl,
                 &self.uniform_buf, &self.particle_buf, &self.emitter_buf,
                 &self.compact_buf, &self.emitter_alive_buf, &self.draw_args_staging,
                 ctx.scene.camera,
@@ -713,7 +769,8 @@ impl RenderPass for CoronaPass {
             self.bg_key = Some(key);
         }
 
-        let bg = self.bg.as_ref().unwrap();
+        let compute_bg = self.compute_bg.as_ref().unwrap();
+        let render_bg = self.render_bg.as_ref().unwrap();
         let wg = self.max_particles.div_ceil(WG);
         let ec = self.emitter_count;
 
@@ -723,7 +780,7 @@ impl RenderPass for CoronaPass {
                 label: Some("Corona Simulate"), timestamp_writes: None,
             });
             p.set_pipeline(&self.simulate_pipeline);
-            p.set_bind_group(0, bg, &[]);
+            p.set_bind_group(0, compute_bg, &[]);
             p.dispatch_workgroups(wg, 1, 1);
         }
 
@@ -733,7 +790,7 @@ impl RenderPass for CoronaPass {
                 label: Some("Corona Emit"), timestamp_writes: None,
             });
             p.set_pipeline(&self.emit_pipeline);
-            p.set_bind_group(0, bg, &[]);
+            p.set_bind_group(0, compute_bg, &[]);
             p.dispatch_workgroups(ec, 1, 1);
         }
 
@@ -743,7 +800,7 @@ impl RenderPass for CoronaPass {
                 label: Some("Corona ScanLocal"), timestamp_writes: None,
             });
             p.set_pipeline(&self.scan_local_pipeline);
-            p.set_bind_group(0, bg, &[]);
+            p.set_bind_group(0, compute_bg, &[]);
             p.dispatch_workgroups(wg, 1, 1);
         }
 
@@ -753,7 +810,7 @@ impl RenderPass for CoronaPass {
                 label: Some("Corona ScanBlocks"), timestamp_writes: None,
             });
             p.set_pipeline(&self.scan_blocks_pipeline);
-            p.set_bind_group(0, bg, &[]);
+            p.set_bind_group(0, compute_bg, &[]);
             p.dispatch_workgroups(ec, 1, 1);
         }
 
@@ -763,7 +820,7 @@ impl RenderPass for CoronaPass {
                 label: Some("Corona Scatter"), timestamp_writes: None,
             });
             p.set_pipeline(&self.scatter_pipeline);
-            p.set_bind_group(0, bg, &[]);
+            p.set_bind_group(0, compute_bg, &[]);
             p.dispatch_workgroups(wg, 1, 1);
         }
 
@@ -773,7 +830,7 @@ impl RenderPass for CoronaPass {
                 label: Some("Corona BuildMulti"), timestamp_writes: None,
             });
             p.set_pipeline(&self.build_multi_pipeline);
-            p.set_bind_group(0, bg, &[]);
+            p.set_bind_group(0, compute_bg, &[]);
             p.dispatch_workgroups(ec, 1, 1);
         }
 
@@ -815,7 +872,7 @@ impl RenderPass for CoronaPass {
                     label: Some("Corona SortLocal"), timestamp_writes: None,
                 });
                 p.set_pipeline(&self.sort_local_pipeline);
-                p.set_bind_group(0, bg, &[]);
+                p.set_bind_group(0, compute_bg, &[]);
                 p.dispatch_workgroups(blocks, 1, 1);
             } else if step.j == u32::MAX {
                 // cs_sort_local_merge: tail steps (j=128..1) for a global k-stage.
@@ -823,7 +880,7 @@ impl RenderPass for CoronaPass {
                     label: Some("Corona SortLocalMerge"), timestamp_writes: None,
                 });
                 p.set_pipeline(&self.sort_local_merge_pipeline);
-                p.set_bind_group(0, bg, &[]);
+                p.set_bind_group(0, compute_bg, &[]);
                 p.dispatch_workgroups(blocks, 1, 1);
             } else {
                 // cs_sort_global: one compare-swap step for j >= 256.
@@ -831,7 +888,7 @@ impl RenderPass for CoronaPass {
                     label: Some("Corona SortGlobal"), timestamp_writes: None,
                 });
                 p.set_pipeline(&self.sort_global_pipeline);
-                p.set_bind_group(0, bg, &[]);
+                p.set_bind_group(0, compute_bg, &[]);
                 p.dispatch_workgroups(blocks, 1, 1);
             }
         }
@@ -842,7 +899,7 @@ impl RenderPass for CoronaPass {
 
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         rp.set_pipeline(&self.render_pipeline);
-        rp.set_bind_group(0, bg, &[]);
+        rp.set_bind_group(0, render_bg, &[]);
 
         // One draw_indirect per emitter — each draws only its alive, sorted particles.
         let stride = std::mem::size_of::<libhelio::GpuCoronaDrawIndirect>() as u64;

@@ -107,6 +107,10 @@ pub struct RendererConfig {
     /// Resolution of each shadow atlas face (width × height). Default 1024.
     /// Higher values improve shadow quality at the cost of VRAM (N² scaling).
     pub shadow_atlas_size: u32,
+    /// Maximum number of allocated shadow-map array layers. Each realtime light
+    /// reserves six consecutive faces. A capacity of 32 supports five lights
+    /// while keeping the two 1024px browser atlases to 256 MiB total.
+    pub shadow_face_capacity: u32,
 }
 
 impl RendererConfig {
@@ -121,6 +125,7 @@ impl RendererConfig {
             render_scale: 0.75,
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: 1024,
+            shadow_face_capacity: 32,
         }
     }
 
@@ -141,6 +146,11 @@ impl RendererConfig {
 
     pub fn with_perf_overlay_mode(mut self, mode: PerfOverlayMode) -> Self {
         self.perf_overlay_mode = mode;
+        self
+    }
+
+    pub fn with_shadow_face_capacity(mut self, capacity: u32) -> Self {
+        self.shadow_face_capacity = capacity.clamp(1, 256);
         self
     }
 

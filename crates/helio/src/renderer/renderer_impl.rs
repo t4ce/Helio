@@ -90,6 +90,7 @@ pub struct Renderer {
     pub(crate) gi_config: GiConfig,
     pub(crate) shadow_quality: libhelio::ShadowQuality,
     pub(crate) shadow_atlas_size: u32,
+    pub(crate) shadow_face_capacity: u32,
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
@@ -430,6 +431,7 @@ impl Renderer {
             render_scale: self.render_scale,
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: self.shadow_atlas_size,
+            shadow_face_capacity: self.shadow_face_capacity,
         }
     }
 }

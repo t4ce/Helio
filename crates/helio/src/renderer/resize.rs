@@ -53,6 +53,7 @@ impl Renderer {
                 render_scale: self.render_scale,
                 perf_overlay_mode: PerfOverlayMode::Disabled,
                 shadow_atlas_size: self.shadow_atlas_size,
+                shadow_face_capacity: self.shadow_face_capacity,
             };
             self.graph = rebuilder(
                 &self.device,
