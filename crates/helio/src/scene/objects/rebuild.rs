@@ -3,7 +3,7 @@
 //! This module contains the core logic for reconstructing GPU instance, AABB, draw call,
 //! indirect, and visibility buffers from the CPU-side object arena.
 
-use helio_v3::{DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
+use helio_core::{DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
 
 use super::super::helpers::object_is_visible;
 
@@ -96,8 +96,26 @@ impl super::super::Scene {
             self.gpu_scene.draw_calls.set_data(Vec::new());
             self.gpu_scene.indirect.set_data(Vec::new());
             self.gpu_scene.visibility.set_data(Vec::new());
+            self.gpu_scene.material_class_ranges.clear();
             return;
         }
+
+        let group_hidden = self.group_hidden;
+
+        // Build sort order by (material_class, graph_hash) so contiguous
+        // ranges are uniform in both fields, letting each range share a single PSO.
+        let mut indexed: Vec<(u32, u64, usize)> = (0..n)
+            .map(|i| {
+                let r = self.objects.get_dense(i).unwrap();
+                let (class, graph_hash) = self
+                    .materials
+                    .get(r.material)
+                    .map(|m| (m.gpu.material_class, m.graph_hash))
+                    .unwrap_or((0, 0));
+                (class, graph_hash, i)
+            })
+            .collect();
+        indexed.sort_by_key(|&(class, gh, _)| (class, gh));
 
         let mut instances = Vec::with_capacity(n);
         let mut aabbs = Vec::with_capacity(n);
@@ -105,20 +123,17 @@ impl super::super::Scene {
         let mut indirect = Vec::with_capacity(n);
         let mut visibility = Vec::with_capacity(n);
 
-        let group_hidden = self.group_hidden;
-
-        // Linear iteration: each object gets slot = dense_index
-        for i in 0..n {
-            let r = self.objects.get_dense(i).unwrap();
+        for &(_, _, dense_idx) in &indexed {
+            let r = self.objects.get_dense(dense_idx).unwrap();
+            let slot = instances.len() as u32;
             instances.push(r.instance);
             aabbs.push(r.aabb);
 
-            // One draw call per object
             draw_calls.push(GpuDrawCall {
                 index_count: r.draw.index_count,
                 first_index: r.draw.first_index,
                 vertex_offset: r.draw.vertex_offset,
-                first_instance: i as u32,
+                first_instance: slot,
                 instance_count: 1,
             });
 
@@ -127,7 +142,7 @@ impl super::super::Scene {
                 instance_count: 1,
                 first_index: r.draw.first_index,
                 base_vertex: r.draw.vertex_offset,
-                first_instance: i as u32,
+                first_instance: slot,
             });
 
             visibility.push(if object_is_visible(r.groups, group_hidden) {
@@ -137,11 +152,27 @@ impl super::super::Scene {
             });
         }
 
-        // Update ObjectRecords with GPU slots
-        for i in 0..n {
-            if let Some(r) = self.objects.get_dense_mut(i) {
-                r.gpu_slot = i as u32;
-                r.draw.first_instance = i as u32;
+        // Build material class ranges (contiguous runs of the same class + graph_hash)
+        let mut ranges: Vec<(u32, u64, u32, u32)> = Vec::new();
+        let mut ri = 0;
+        while ri < indexed.len() {
+            let class = indexed[ri].0;
+            let graph_hash = indexed[ri].1;
+            let start = ri as u32;
+            let mut count = 0u32;
+            while ri < indexed.len() && indexed[ri].0 == class && indexed[ri].1 == graph_hash {
+                count += 1;
+                ri += 1;
+            }
+            ranges.push((class, graph_hash, start, count));
+        }
+        self.gpu_scene.material_class_ranges = ranges;
+
+        // Update ObjectRecords with their new sorted GPU slots
+        for (sorted_idx, &(_, _, dense_idx)) in indexed.iter().enumerate() {
+            if let Some(r) = self.objects.get_dense_mut(dense_idx) {
+                r.gpu_slot = sorted_idx as u32;
+                r.draw.first_instance = sorted_idx as u32;
             }
         }
 
@@ -208,14 +239,23 @@ impl super::super::Scene {
             self.gpu_scene.draw_calls.set_data(Vec::new());
             self.gpu_scene.indirect.set_data(Vec::new());
             self.gpu_scene.visibility.set_data(Vec::new());
+            self.gpu_scene.material_class_ranges.clear();
             return;
         }
 
-        // Build a sort order over the dense array indices, grouped by (mesh_id, material_id).
+        // Build a sort order over the dense array indices, grouped by
+        // (material_class, graph_hash, mesh_id, material_id) so that contiguous
+        // draw groups share both class and graph_hash, letting each range use a
+        // single PSO.
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by_key(|&i| {
             let r = self.objects.get_dense(i).unwrap();
-            (r.instance.mesh_id, r.instance.material_id)
+            let (class, graph_hash) = self
+                .materials
+                .get(r.material)
+                .map(|m| (m.gpu.material_class, m.graph_hash))
+                .unwrap_or((0, 0));
+            (class, graph_hash, r.instance.mesh_id, r.instance.material_id)
         });
 
         let mut instances: Vec<GpuInstanceData> = Vec::with_capacity(n);
@@ -225,12 +265,19 @@ impl super::super::Scene {
         let mut visibility: Vec<u32> = Vec::with_capacity(n);
         // Track the new GPU slot assigned to each dense-array entry.
         let mut gpu_slots: Vec<u32> = vec![0u32; n];
+        // Track the (material_class, graph_hash) of each draw group for range building.
+        let mut group_keys: Vec<(u32, u64)> = Vec::new();
 
         let group_hidden = self.group_hidden;
 
         let mut i = 0;
         while i < order.len() {
             let r0 = self.objects.get_dense(order[i]).unwrap();
+            let (class, graph_hash) = self
+                .materials
+                .get(r0.material)
+                .map(|m| (m.gpu.material_class, m.graph_hash))
+                .unwrap_or((0, 0));
             let key = (r0.instance.mesh_id, r0.instance.material_id);
             let group_start = instances.len() as u32;
             let (index_count, first_index, vertex_offset) = (
@@ -271,7 +318,24 @@ impl super::super::Scene {
                 base_vertex: vertex_offset,
                 first_instance: group_start,
             });
+            group_keys.push((class, graph_hash));
         }
+
+        // Build material class ranges from consecutive draw groups with the same
+        // (class, graph_hash) so each range can use a single PSO.
+        let mut ranges: Vec<(u32, u64, u32, u32)> = Vec::new();
+        let mut gi = 0;
+        while gi < group_keys.len() {
+            let (class, graph_hash) = group_keys[gi];
+            let start = gi as u32;
+            let mut count = 0u32;
+            while gi < group_keys.len() && group_keys[gi] == (class, graph_hash) {
+                count += 1;
+                gi += 1;
+            }
+            ranges.push((class, graph_hash, start, count));
+        }
+        self.gpu_scene.material_class_ranges = ranges;
 
         // Patch each ObjectRecord with its new GPU slot so that in-frame
         // `update_object_transform` / `update_object_bounds` can update in-place.
@@ -299,7 +363,7 @@ impl super::super::Scene {
     /// Builds the shadow-specific partitioned instance + indirect buffers.
     ///
     /// Separates objects by movability into two groups:
-    /// - Static/Stationary → `shadow_static_instances` + `shadow_static_indirect`  
+    /// - Static/Stationary → `shadow_static_instances` + `shadow_static_indirect`
     /// - Movable           → `shadow_movable_instances` + `shadow_movable_indirect`
     ///
     /// Each group has its own 0-based instance indices so the shadow passes can

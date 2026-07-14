@@ -14,8 +14,8 @@
 //! (e.g. after resize). `blend` bind group is rebuilt in `on_resize()` since it references
 //! the internal `edge_view` which is recreated then.
 
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, RenderPass, Result as HelioResult};
 
 /// SMAA pass (3 sequential fullscreen draws).
 pub struct SmaaPass {
@@ -311,7 +311,7 @@ impl RenderPass for SmaaPass {
         // Edge and neighbor bind groups reference the pre_aa view from frame resources.
         // They are rebuilt whenever that view's pointer changes (e.g. after resize).
         let pre_aa = ctx.resources.pre_aa.read("SMAA").ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "SmaaPass requires frame.pre_aa (published by the geometry pass)".to_string(),
             )
         })?;

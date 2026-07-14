@@ -1,16 +1,14 @@
 use std::sync::{Arc, Mutex};
 
-use helio_pass_debug::{DebugPass, DebugVertex};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
-use super::renderer_impl::{DebugBatch, Renderer};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use super::renderer_impl::{DebugBatch, DebugVertex, Renderer};
 
 pub struct DebugDrawState {
     pub editor_enabled: bool,
     pub camera_position: glam::Vec3,
     pub user_lines: Vec<DebugVertex>,
     pub user_lines_generation: u64,
-    /// Filled triangles (TriangleList) from the current frame — cleared by `debug_clear`.
     pub user_tris: Vec<DebugVertex>,
     pub user_tris_generation: u64,
 }
@@ -25,6 +23,482 @@ impl Default for DebugDrawState {
             user_tris: Vec::new(),
             user_tris_generation: 0,
         }
+    }
+}
+
+const MAX_DEBUG_VERTS: u32 = 65536;
+const MAX_DEBUG_TRIS: u32 = 65536;
+
+pub struct DebugPass {
+    pipeline_depth: wgpu::RenderPipeline,
+    pipeline_no_depth: wgpu::RenderPipeline,
+    pipeline_tri_depth: wgpu::RenderPipeline,
+    pipeline_tri_no_depth: wgpu::RenderPipeline,
+    #[allow(dead_code)]
+    bgl: wgpu::BindGroupLayout,
+    camera_buf: wgpu::Buffer,
+    bind_group: Option<wgpu::BindGroup>,
+    bind_group_key: Option<usize>,
+    vertex_buf: wgpu::Buffer,
+    pub vertex_count: u32,
+    tri_buf: wgpu::Buffer,
+    pub tri_count: u32,
+    depth_test_enabled: bool,
+}
+
+impl DebugPass {
+    pub fn new(
+        device: &wgpu::Device,
+        camera_buf: &wgpu::Buffer,
+        target_format: wgpu::TextureFormat,
+        depth_test: bool,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Debug Draw Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/debug_draw.wgsl").into()),
+        });
+
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Debug Draw BGL"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Debug Draw PL"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+
+        let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Vertex Buffer"),
+            size: (MAX_DEBUG_VERTS as usize * std::mem::size_of::<DebugVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let pipeline_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Debug Draw Pipeline Depth"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<DebugVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 16,
+                            shader_location: 1,
+                        },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let pipeline_no_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Debug Draw Pipeline NoDepth"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<DebugVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 16,
+                            shader_location: 1,
+                        },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let tri_attribs = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 1,
+            },
+        ];
+        let tri_vbl = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<DebugVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &tri_attribs,
+        };
+        let tri_target = wgpu::ColorTargetState {
+            format: target_format,
+            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+            write_mask: wgpu::ColorWrites::ALL,
+        };
+        let tri_prim = wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        };
+
+        let pipeline_tri_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Debug Tri Pipeline Depth"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[tri_vbl.clone()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(tri_target.clone())],
+            }),
+            primitive: tri_prim,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let pipeline_tri_no_depth =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Debug Tri Pipeline NoDepth"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[tri_vbl],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(tri_target)],
+                }),
+                primitive: tri_prim,
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        let tri_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Tri Buffer"),
+            size: (MAX_DEBUG_TRIS as usize * std::mem::size_of::<DebugVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline_depth,
+            pipeline_no_depth,
+            pipeline_tri_depth,
+            pipeline_tri_no_depth,
+            bgl,
+            camera_buf: camera_buf.clone(),
+            bind_group: None,
+            bind_group_key: None,
+            vertex_buf,
+            vertex_count: 0,
+            tri_buf,
+            tri_count: 0,
+            depth_test_enabled: depth_test,
+        }
+    }
+
+    pub fn update_lines(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
+        let count = verts.len().min(MAX_DEBUG_VERTS as usize);
+        if count > 0 {
+            helio_core::upload::write_buffer(
+                queue,
+                &self.vertex_buf,
+                0,
+                bytemuck::cast_slice(&verts[..count]),
+            );
+        }
+        self.vertex_count = count as u32;
+    }
+
+    pub fn update_lines_at(
+        &mut self,
+        queue: &wgpu::Queue,
+        first_vertex: usize,
+        verts: &[DebugVertex],
+    ) {
+        if verts.is_empty() || first_vertex >= MAX_DEBUG_VERTS as usize {
+            return;
+        }
+        let max_writable = (MAX_DEBUG_VERTS as usize).saturating_sub(first_vertex);
+        let count = verts.len().min(max_writable);
+        if count == 0 {
+            return;
+        }
+        let offset_bytes = (first_vertex * std::mem::size_of::<DebugVertex>()) as u64;
+        helio_core::upload::write_buffer(
+            queue,
+            &self.vertex_buf,
+            offset_bytes,
+            bytemuck::cast_slice(&verts[..count]),
+        );
+    }
+
+    pub fn set_line_vertex_count(&mut self, count: usize) {
+        self.vertex_count = count.min(MAX_DEBUG_VERTS as usize) as u32;
+    }
+
+    pub fn update_tris(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
+        let count = verts.len().min(MAX_DEBUG_TRIS as usize);
+        if count > 0 {
+            helio_core::upload::write_buffer(
+                queue,
+                &self.tri_buf,
+                0,
+                bytemuck::cast_slice(&verts[..count]),
+            );
+        }
+        self.tri_count = count as u32;
+    }
+
+    pub fn clear(&mut self) {
+        self.vertex_count = 0;
+        self.tri_count = 0;
+    }
+
+    pub fn set_depth_test(&mut self, enabled: bool) {
+        self.depth_test_enabled = enabled;
+    }
+}
+
+impl DebugPass {
+    fn draw_commands(&self, rp: &mut wgpu::RenderPass) {
+        rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
+
+        if self.vertex_count > 0 {
+            if self.depth_test_enabled {
+                rp.set_pipeline(&self.pipeline_depth);
+            } else {
+                rp.set_pipeline(&self.pipeline_no_depth);
+            }
+            rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
+            rp.draw(0..self.vertex_count, 0..1);
+        }
+
+        if self.tri_count > 0 {
+            if self.depth_test_enabled {
+                rp.set_pipeline(&self.pipeline_tri_depth);
+            } else {
+                rp.set_pipeline(&self.pipeline_tri_no_depth);
+            }
+            rp.set_vertex_buffer(0, self.tri_buf.slice(..));
+            rp.draw(0..self.tri_count, 0..1);
+        }
+    }
+
+    fn ensure_bind_group(&mut self, device: &wgpu::Device) {
+        let camera_key = &self.camera_buf as *const _ as usize;
+        if self.bind_group_key != Some(camera_key) {
+            self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Debug Draw BG"),
+                layout: &self.bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.camera_buf.as_entire_binding(),
+                }],
+            }));
+            self.bind_group_key = Some(camera_key);
+        }
+    }
+
+    pub fn execute_on_target(
+        &mut self,
+        ctx: &mut PassContext,
+        target: &wgpu::TextureView,
+    ) -> HelioResult<()> {
+        if self.vertex_count == 0 && self.tri_count == 0 {
+            return Ok(());
+        }
+
+        self.ensure_bind_group(ctx.device);
+
+        let depth_attachment = if self.depth_test_enabled {
+            let depth_view = if let Some(frd) = ctx.resources.full_res_depth.get() {
+                frd
+            } else {
+                ctx.depth
+            };
+            Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            })
+        } else {
+            None
+        };
+
+        let color_attachment = wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        };
+        let color_attachments = [Some(color_attachment)];
+        let desc = wgpu::RenderPassDescriptor {
+            label: Some("DebugDraw"),
+            color_attachments: &color_attachments,
+            depth_stencil_attachment: depth_attachment,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        };
+
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
+        self.draw_commands(&mut pass);
+        Ok(())
+    }
+}
+
+impl RenderPass for DebugPass {
+    fn name(&self) -> &'static str {
+        "DebugDraw"
+    }
+
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let depth_attachment = if self.depth_test_enabled {
+            let depth_view = if let Some(frd) = resources.full_res_depth.get() {
+                frd
+            } else {
+                depth
+            };
+            Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            })
+        } else {
+            None
+        };
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("DebugDraw"),
+            color_attachments,
+            depth_stencil_attachment: depth_attachment,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
+    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+        Ok(())
+    }
+
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if self.vertex_count == 0 && self.tri_count == 0 {
+            return Ok(());
+        }
+        self.ensure_bind_group(ctx.device);
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        self.draw_commands(rp);
+        Ok(())
     }
 }
 
@@ -66,8 +540,6 @@ impl DebugDrawPass {
         }
     }
 
-    /// Toggle depth-test at runtime. Propagates to the inner `DebugPass`
-    /// without any pipeline rebuild (both pipelines are pre-compiled).
     pub fn set_depth_test(&mut self, enabled: bool) {
         self.pass.set_depth_test(enabled);
     }
@@ -327,19 +799,6 @@ impl RenderPass for DebugDrawPass {
 }
 
 impl Renderer {
-    pub fn set_debug_overlay_enabled(&mut self, enabled: bool) {
-        if let Ok(mut state) = self.debug_overlay_shared.lock() {
-            state.enabled = enabled;
-        }
-    }
-
-    pub fn set_debug_depth_test(&mut self, enabled: bool) {
-        self.debug_depth_test = enabled;
-        for pass in self.graph.iter_passes_mut::<DebugDrawPass>() {
-            pass.set_depth_test(enabled);
-        }
-    }
-
     pub fn debug_clear(&mut self) {
         if let Ok(mut s) = self.debug_state.lock() {
             if !s.user_lines.is_empty() {

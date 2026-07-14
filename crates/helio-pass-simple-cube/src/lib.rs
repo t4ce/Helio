@@ -1,4 +1,4 @@
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use wgpu::util::DeviceExt;
 
 // ── Vertex layout ─────────────────────────────────────────────────────────────
@@ -127,7 +127,7 @@ impl SimpleCubePass {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
+                buffers: &[wgpu::VertexBufferLayout {
                     array_stride: 36,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -147,7 +147,7 @@ impl SimpleCubePass {
                             shader_location: 2,
                         },
                     ],
-                })],
+                }],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -213,7 +213,7 @@ impl RenderPass for SimpleCubePass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
@@ -230,11 +230,12 @@ impl RenderPass for SimpleCubePass {
                     store: wgpu::StoreOp::Store,
                 },
             })]));
+        let depth_view = resources.full_res_depth.get().unwrap_or(depth);
         Some(wgpu::RenderPassDescriptor {
             label: Some("SimpleCube"),
             color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth,
+                view: depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,

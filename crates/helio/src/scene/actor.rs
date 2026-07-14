@@ -1,11 +1,12 @@
 use crate::handles::{
-    LightId, MeshId, ObjectId, SectionedInstanceId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
+    LightId, MeshId, ObjectId, PostProcessVolumeId, SectionedInstanceId, VirtualObjectId,
+    WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::MeshUpload;
 use crate::scene::types::ObjectDescriptor;
 use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
-use helio_v3::{GpuLight, SkyContext};
-use libhelio::{GpuWaterVolume, SkyActor};
+use helio_core::{GpuLight, SkyContext};
+use libhelio::{GpuWaterVolume, PostProcessVolumeDescriptor, SkyActor};
 
 /// Result of inserting a typed scene actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,7 @@ pub enum SceneActorId {
     SectionedObject(SectionedInstanceId),
     WaterVolume(WaterVolumeId),
     WaterHitbox(WaterHitboxId),
+    PostProcessVolume(PostProcessVolumeId),
 }
 
 impl SceneActorId {
@@ -721,6 +723,44 @@ impl SceneActorTrait for WaterHitboxActor {
     }
 }
 
+// ── Post-Process Volume ─────────────────────────────────────────────────────────
+
+/// A post-process volume actor (descriptor + optional volume handle).
+#[derive(Debug, Clone)]
+pub struct PostProcessVolumeActor {
+    pub descriptor: PostProcessVolumeDescriptor,
+    pub volume_id: Option<PostProcessVolumeId>,
+}
+
+impl PostProcessVolumeActor {
+    pub fn new(descriptor: PostProcessVolumeDescriptor) -> Self {
+        Self {
+            descriptor,
+            volume_id: None,
+        }
+    }
+
+    pub fn id(&self) -> Option<PostProcessVolumeId> {
+        self.volume_id
+    }
+}
+
+impl SceneActorTrait for PostProcessVolumeActor {
+    fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
+        if self.volume_id.is_none() {
+            if let Ok(id) = scene.insert_post_process_volume(self.descriptor.clone()) {
+                self.volume_id = Some(id);
+            }
+        }
+    }
+
+    fn inserted_id(&self) -> SceneActorId {
+        self.volume_id
+            .map(SceneActorId::PostProcessVolume)
+            .unwrap_or(SceneActorId::None)
+    }
+}
+
 /// Unified scene actor type. Includes shading, geometry, and user custom logic.
 #[derive(Debug, Clone)]
 pub enum SceneActor {
@@ -732,6 +772,7 @@ pub enum SceneActor {
     Object(ObjectActor),
     WaterVolume(WaterVolumeActor),
     WaterHitbox(WaterHitboxActor),
+    PostProcessVolume(PostProcessVolumeActor),
 }
 
 impl SceneActor {
@@ -777,6 +818,10 @@ impl SceneActor {
     pub fn water_hitbox(descriptor: WaterHitboxDescriptor) -> Self {
         SceneActor::WaterHitbox(WaterHitboxActor::new(descriptor))
     }
+
+    pub fn post_process_volume(descriptor: PostProcessVolumeDescriptor) -> Self {
+        SceneActor::PostProcessVolume(PostProcessVolumeActor::new(descriptor))
+    }
 }
 
 impl SceneActorTrait for SceneActor {
@@ -794,6 +839,7 @@ impl SceneActorTrait for SceneActor {
             SceneActor::Object(actor) => actor.inserted_id(),
             SceneActor::WaterVolume(actor) => actor.inserted_id(),
             SceneActor::WaterHitbox(actor) => actor.inserted_id(),
+            SceneActor::PostProcessVolume(actor) => actor.inserted_id(),
         }
     }
 
@@ -809,6 +855,7 @@ impl SceneActorTrait for SceneActor {
             SceneActor::Object(actor) => actor.on_attach(scene),
             SceneActor::WaterVolume(actor) => actor.on_attach(scene),
             SceneActor::WaterHitbox(actor) => actor.on_attach(scene),
+            SceneActor::PostProcessVolume(actor) => actor.on_attach(scene),
         }
     }
 
@@ -822,6 +869,7 @@ impl SceneActorTrait for SceneActor {
             SceneActor::WaterVolume(actor) => actor.on_tick(scene),
             SceneActor::WaterHitbox(_) => {}
             SceneActor::Sky(_) => {}
+            SceneActor::PostProcessVolume(_) => {}
         }
     }
 

@@ -2,14 +2,15 @@
 name = "helio-wasm"
 version = "0.1.0"
 edition = "2021"
-description = "Browser WASM wrapper for Helio WebGPU applications"
+description = "Cross-platform WASM wrapper — turns any helio demo into a browser app"
 
 [lib]
 crate-type = ["rlib"]
 
 [dependencies]
 helio = { workspace = true }
-wgpu.workspace = true
+helio-default-graphs = { path = "../helio-default-graphs" }
+wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }
 winit = { workspace = true }
 log = { workspace = true }
 glam = { workspace = true, features = ["bytemuck"] }
@@ -25,9 +26,12 @@ web-sys = { version = "0.3", features = [
     "Element",
     "HtmlCanvasElement",
     "HtmlElement",
-    "Location",
-    "Navigator",
     "Performance",
 ] }
 console_log             = "1"
 console_error_panic_hook = "0.1"
+
+# ----- native-only deps -----------------------------------------------------
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster    = { workspace = true }
+env_logger  = { workspace = true }

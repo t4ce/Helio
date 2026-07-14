@@ -1,8 +1,8 @@
 pub mod pipeline;
 pub mod simulation;
 
-use helio_v3::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use wgpu::util::DeviceExt;
 
 /// Simple fullscreen blit: copies a texture to the render target as-is.
@@ -808,7 +808,7 @@ impl RenderPass for WaterSimPass {
                 };
 
                 let src_depth_tex = ctx.resources.depth_texture.get().ok_or_else(|| {
-                    helio_v3::Error::InvalidPassConfig(
+                    helio_core::Error::InvalidPassConfig(
                         "Water SSR requires depth_texture in FrameResources".to_string(),
                     )
                 })?;

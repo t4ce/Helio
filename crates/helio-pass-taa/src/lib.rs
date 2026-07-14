@@ -11,9 +11,9 @@
 //! All three are constant-time GPU operations.
 //!
 //! ## Jitter
-//! The resolve consumes the exact NDC jitter stored in `GpuCameraUniforms`.
-//! Projection, ray-marched effects, and temporal resolve therefore cannot drift
-//! onto different sequences or frame phases.
+//! A non-repeating low-discrepancy sequence based on the plastic ratio (R1, R2)
+//! indexed by `frame_num`.  Unlike Halton(2,3) which repeats every 16 frames,
+//! the R1/R2 sequence never repeats, eliminating temporal periodic artefacts.
 //!
 //! ## History ping-pong
 //! The pass owns two textures: `output_texture` (render target each frame) and
@@ -25,12 +25,31 @@
 //! pointer changes (i.e. on resize). No views are required at construction time.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+
+/// R1/R2 low-discrepancy jitter offset for a given frame index.
+///
+/// Based on the plastic ratio (2D generalisation of the golden ratio):
+///   R1 ≈ 1.324717957, R2 = R1² ≈ 1.754877666
+/// Returns offset in [-0.5, 0.5) — the sub-pixel jitter for the frame.
+/// A phase offset is added to avoid exactly -0.5 at frame 0 (which would
+/// cause off-by-one sampling with NEAREST filtering).
+fn r1_r2_jitter(frame: u64) -> [f32; 2] {
+    // Pre-computed plastic ratio constants
+    const INV_R1: f64 = 0.7548776662466927; // 1 / R1
+    const INV_R2: f64 = 0.5698402905980539; // 1 / R2
+    // Phase offset to avoid exact -0.5 at frame 0
+    const PHASE: f64 = 0.5;
+    let fx = frame as f64 * INV_R1 + PHASE;
+    let fy = frame as f64 * INV_R2 + PHASE;
+    [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TaaUniform {
+    jitter: [f32; 2],    // R1/R2 jitter offset in [-0.5, 0.5]
     upscale_factor: f32, // output_width / internal_width (≥ 1.0)
     reset: u32,          // 1 on the very first frame so RESET path runs
     time_delta: f32,     // seconds since last frame
@@ -139,15 +158,6 @@ impl TaaPass {
         output_height: u32,
         format: wgpu::TextureFormat,
     ) -> Self {
-        // Browser canvases can report a transient 0×0 size while a page is
-        // being attached or moved between lifecycle states. WebGPU forbids
-        // zero-sized textures, so keep allocations legal until the real
-        // resize event replaces them.
-        let internal_width = internal_width.max(1);
-        let internal_height = internal_height.max(1);
-        let output_width = output_width.max(1);
-        let output_height = output_height.max(1);
-
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("TAA Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/taa.wgsl").into()),
@@ -188,26 +198,18 @@ impl TaaPass {
         // in the alpha channel — an 8-bit swapchain format would clamp it to [0, 1].
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d {
-                width: output_width,
-                height: output_height,
-                depth_or_array_layers: 1,
-            },
+            size: wgpu::Extent3d { width: output_width, height: output_height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT
-                | extra,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
             view_formats: &[],
         };
 
-        let history_texture =
-            device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
+        let history_texture = device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
         let history_view = history_texture.create_view(&Default::default());
-        let output_texture =
-            device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
+        let output_texture = device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
         let output_view = output_texture.create_view(&Default::default());
 
         // ── TAA BGL ────────────────────────────────────────────────────────────
@@ -309,10 +311,7 @@ impl TaaPass {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -344,10 +343,7 @@ impl TaaPass {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -392,9 +388,7 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
 }
 
 impl RenderPass for TaaPass {
-    fn name(&self) -> &'static str {
-        "TAA"
-    }
+    fn name(&self) -> &'static str { "TAA" }
 
     fn render_pass_descriptor<'a>(
         &'a self,
@@ -414,8 +408,6 @@ impl RenderPass for TaaPass {
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let width = width.max(1);
-        let height = height.max(1);
         self.output_width = width;
         self.output_height = height;
         // Internal resolution stays at the last create-time value.
@@ -424,26 +416,18 @@ impl RenderPass for TaaPass {
         let fmt = wgpu::TextureFormat::Rgba16Float;
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: fmt,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT
-                | extra,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
             view_formats: &[],
         };
 
-        self.history_texture =
-            device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
+        self.history_texture = device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
         self.history_view = self.history_texture.create_view(&Default::default());
-        self.output_texture =
-            device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
+        self.output_texture = device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
         self.output_view = self.output_texture.create_view(&Default::default());
 
         // blit_bind_group references output_view — must be rebuilt.
@@ -470,71 +454,43 @@ impl RenderPass for TaaPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let reset = if self.first_frame {
-            self.first_frame = false;
-            1u32
-        } else {
-            0u32
-        };
+        let jitter = r1_r2_jitter(ctx.frame_num);
+        let reset = if self.first_frame { self.first_frame = false; 1u32 } else { 0u32 };
         let upscale_factor = (self.output_width as f32 / self.internal_width as f32)
             .max(1.0)
             .min(16.0);
         let time_delta = ctx.delta_time.max(0.0);
         let uniforms = TaaUniform {
+            jitter,
             upscale_factor,
             reset,
             time_delta,
             _pad: 0.0,
         };
-        ctx.queue
-            .write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        ctx.queue.write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ────────────────────────────────────────────────
         let pre_aa_view = ctx.resources.pre_aa.read("TAA").ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "TaaPass requires frame.pre_aa (published by DeferredLightPass)".to_string(),
             )
         })?;
-        let key = (
-            pre_aa_view as *const _ as usize,
-            ctx.depth as *const _ as usize,
-        );
+        let key = (pre_aa_view as *const _ as usize, ctx.depth as *const _ as usize);
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TAA BG"),
                 layout: &self.bgl,
                 entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(pre_aa_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.history_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: ctx.scene.camera.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(ctx.depth),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::Sampler(&self.point_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: self.taa_uniform_buf.as_entire_binding(),
-                    },
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(pre_aa_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.history_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: ctx.scene.camera.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(ctx.depth) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.point_sampler) },
+                    wgpu::BindGroupEntry { binding: 6, resource: self.taa_uniform_buf.as_entire_binding() },
                 ],
             }));
             self.bind_group_key = Some(key);
@@ -569,11 +525,7 @@ impl RenderPass for TaaPass {
         unsafe { &mut *ctx.encoder_ptr }.copy_texture_to_texture(
             self.output_texture.as_image_copy(),
             self.history_texture.as_image_copy(),
-            wgpu::Extent3d {
-                width: self.output_width,
-                height: self.output_height,
-                depth_or_array_layers: 1,
-            },
+            wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
         );
 
         // ── 4. Blit output_view → ctx.target ─────────────────────────────────
@@ -587,15 +539,14 @@ impl RenderPass for TaaPass {
                     store: wgpu::StoreOp::Store,
                 },
             })];
-            let mut pass =
-                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("TAA Blit"),
-                    color_attachments: &attachments,
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
+            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("TAA Blit"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             pass.set_pipeline(&self.blit_pipeline);
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..3, 0..1);

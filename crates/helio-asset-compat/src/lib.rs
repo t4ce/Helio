@@ -209,7 +209,10 @@ impl UploadedScene {
     ///
     /// Falls back to `material_ids[0]` when the mesh has no material index, and
     /// returns `None` when `material_ids` is empty.
-    pub fn mesh_material(&self, converted: &scene_converter::ConvertedMesh) -> Option<MaterialId> {
+    pub fn mesh_material(
+        &self,
+        converted: &scene_converter::ConvertedMesh,
+    ) -> Option<MaterialId> {
         let idx = converted.material_index?;
         self.material_ids
             .get(idx)
@@ -242,19 +245,16 @@ pub fn upload_scene(renderer: &mut Renderer, scene: &ConvertedScene) -> Result<U
         .meshes
         .iter()
         .filter_map(|mesh| {
-            let actor_id =
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
-                        vertices: mesh.vertices.clone(),
-                        indices: mesh.indices.clone(),
-                    }));
+            let actor_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
+                vertices: mesh.vertices.clone(),
+                indices: mesh.indices.clone(),
+            }));
             match actor_id {
                 helio::SceneActorId::Mesh(id) => Some(id),
                 _ => None,
             }
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>() ;
     Ok(UploadedScene {
         mesh_ids,
         material_ids,
@@ -303,9 +303,10 @@ pub fn upload_sectioned_scene(
     renderer: &mut Renderer,
     scene: &ConvertedScene,
 ) -> Result<(MultiMeshId, Vec<MaterialId>)> {
-    let sm = scene.sectioned_mesh.as_ref().expect(
-        "upload_sectioned_scene called on a scene without sectioned_mesh; use merge_meshes=true",
-    );
+    let sm = scene
+        .sectioned_mesh
+        .as_ref()
+        .expect("upload_sectioned_scene called on a scene without sectioned_mesh; use merge_meshes=true");
 
     // Upload textures and materials (same as upload_scene_materials).
     let texture_ids: Result<Vec<TextureId>> = scene
@@ -360,7 +361,8 @@ pub fn upload_sectioned_scene(
                         tex_occlusion: helio::GpuMaterial::NO_TEXTURE,
                         workflow: 0,
                         flags: 0,
-                        _pad: 0,
+                        material_class: 0,
+                        class_params: [0.0; 4],
                     })
                 })
         })

@@ -122,3 +122,4 @@ impl super::super::Scene {
         self.mesh_pool.dynamic_buffers()
     }
 }
+

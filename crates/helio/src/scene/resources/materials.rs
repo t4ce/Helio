@@ -5,7 +5,7 @@
 //! Multiple objects can reference the same material.
 
 use bytemuck::Zeroable;
-use helio_v3::GpuMaterial;
+use helio_core::GpuMaterial;
 
 use crate::handles::MaterialId;
 use crate::material::{MaterialAsset, MaterialTextures};
@@ -113,6 +113,7 @@ impl super::super::Scene {
             gpu: material.gpu,
             textures: material.textures,
             ref_count: 0,
+            graph_hash: 0,
         });
         // Use the GrowableBuffer length as the source of truth for push-vs-update.
         // After a pool reset the GPU buffer is empty (len=0) even though the SparsePool
@@ -272,13 +273,10 @@ impl super::super::Scene {
 
         // Cascade: free any textures whose ref count just hit zero.
         for tex_id in tex_ids {
-            if self
-                .textures
-                .get(tex_id)
-                .map_or(false, |r| r.ref_count == 0)
-            {
+            if self.textures.get(tex_id).map_or(false, |r| r.ref_count == 0) {
                 self.textures.remove(tex_id);
-                self.texture_binding_version = self.texture_binding_version.wrapping_add(1);
+                self.texture_binding_version =
+                    self.texture_binding_version.wrapping_add(1);
             }
         }
 
@@ -366,3 +364,4 @@ impl super::super::Scene {
         Ok(())
     }
 }
+

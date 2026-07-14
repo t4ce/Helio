@@ -1,7 +1,8 @@
 //! Camera types and constructors, and scene camera update logic.
 
 use glam::{Mat4, Vec3};
-use helio_v3::GpuCameraUniforms;
+use helio_core::GpuCameraUniforms;
+use libhelio::PostProcessSettings;
 
 use crate::scene::Scene;
 
@@ -31,7 +32,7 @@ use crate::scene::Scene;
 /// );
 /// scene.update_camera(camera);
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Camera {
     /// View matrix (world-to-camera transform, right-handed).
     pub view: Mat4,
@@ -53,6 +54,9 @@ pub struct Camera {
     /// Format: `[x, y]` in normalized device coordinates (NDC).
     /// For example, `[0.5 / width, 0.5 / height]` shifts by half a pixel.
     pub jitter: [f32; 2],
+
+    /// Post-processing settings for this camera (exposure, bloom, tonemapping, etc.).
+    pub postprocess_settings: PostProcessSettings,
 }
 
 impl Camera {
@@ -79,6 +83,7 @@ impl Camera {
             near,
             far,
             jitter: [0.0, 0.0],
+            postprocess_settings: PostProcessSettings::default(),
         }
     }
 
@@ -171,8 +176,9 @@ impl Scene {
         );
         // Store the UNJITTERED view_proj so next frame's motion-vector
         // reprojection (prev_view_proj) is not contaminated by this frame's jitter.
-        let inv_jitter =
-            Mat4::from_translation(glam::Vec3::new(-camera.jitter[0], -camera.jitter[1], 0.0));
+        let inv_jitter = Mat4::from_translation(glam::Vec3::new(
+            -camera.jitter[0], -camera.jitter[1], 0.0,
+        ));
         let unjittered_proj = inv_jitter * camera.proj;
         self.prev_view_proj = unjittered_proj * camera.view;
         self.gpu_scene.camera.update(uniforms);

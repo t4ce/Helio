@@ -20,10 +20,10 @@ pub mod light;
 pub mod material;
 pub mod meshlet;
 pub mod movability;
+pub mod postprocess;
 pub mod shadow;
 pub mod sky;
 pub mod water;
-pub mod webgpu_material;
 
 pub use camera::*;
 pub use corona::*;
@@ -34,7 +34,8 @@ pub use light::*;
 pub use material::*;
 pub use meshlet::*;
 pub use movability::*;
+pub use postprocess::*;
 pub use shadow::*;
 pub use sky::{SkyActor, VolumetricClouds};
 pub use water::*;
-pub use webgpu_material::*;
+

@@ -5,8 +5,8 @@
 //! a single instanced draw call. O(1) CPU.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const MAX_BILLBOARDS: u32 = 65536;
 
@@ -142,7 +142,7 @@ impl BillboardPass {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        helio_v3::upload::write_texture(
+        helio_core::upload::write_texture(
             queue,
             wgpu::TexelCopyTextureInfo {
                 texture: &white_texture,
@@ -227,7 +227,7 @@ impl BillboardPass {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        helio_v3::upload::write_buffer(
+        helio_core::upload::write_buffer(
             queue,
             &quad_vertex_buf,
             0,
@@ -252,7 +252,7 @@ impl BillboardPass {
                 compilation_options: Default::default(),
                 buffers: &[
                     // Slot 0: per-vertex quad data  (stride 16)
-                    Some(wgpu::VertexBufferLayout {
+                    wgpu::VertexBufferLayout {
                         array_stride: 16,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[
@@ -267,9 +267,9 @@ impl BillboardPass {
                                 shader_location: 1,
                             },
                         ],
-                    }),
+                    },
                     // Slot 1: per-instance billboard data  (stride 48)
-                    Some(wgpu::VertexBufferLayout {
+                    wgpu::VertexBufferLayout {
                         array_stride: 48,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &[
@@ -289,7 +289,7 @@ impl BillboardPass {
                                 shader_location: 4,
                             },
                         ],
-                    }),
+                    },
                 ],
             },
             fragment: Some(wgpu::FragmentState {
@@ -353,7 +353,7 @@ impl BillboardPass {
     pub fn update_instances(&mut self, queue: &wgpu::Queue, instances: &[BillboardInstance]) {
         let count = instances.len().min(MAX_BILLBOARDS as usize);
         if count > 0 {
-            helio_v3::upload::write_buffer(
+            helio_core::upload::write_buffer(
                 queue,
                 &self.instance_buf,
                 0,
@@ -395,7 +395,7 @@ impl BillboardPass {
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
-            helio_v3::upload::write_texture(
+            helio_core::upload::write_texture(
                 queue,
                 wgpu::TexelCopyTextureInfo {
                     texture: &sprite_texture,
@@ -445,13 +445,7 @@ impl RenderPass for BillboardPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[
-            "pre_aa",
-            "full_res_depth",
-            "billboards",
-            "depth",
-            "main_scene",
-        ]
+        &["pre_aa", "full_res_depth", "billboards", "depth", "main_scene"]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -515,8 +509,8 @@ impl RenderPass for BillboardPass {
         } else {
             depth
         };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -524,7 +518,8 @@ impl RenderPass for BillboardPass {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            })]));
+            }),
+        ]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("Billboard"),
             color_attachments,
@@ -556,3 +551,4 @@ impl RenderPass for BillboardPass {
         Ok(())
     }
 }
+

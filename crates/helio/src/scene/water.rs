@@ -63,9 +63,7 @@ impl Scene {
     /// scene.remove_water_volume(volume_id)?;
     /// ```
     pub fn remove_water_volume(&mut self, id: WaterVolumeId) -> Result<()> {
-        let DenseRemove {
-            dense_index, moved, ..
-        } = self
+        let DenseRemove { dense_index, moved, .. } = self
             .water_volumes
             .remove(id)
             .ok_or_else(|| invalid("water volume"))?;
@@ -226,9 +224,7 @@ impl Scene {
 
     /// Remove a water hitbox from the scene.
     pub fn remove_water_hitbox(&mut self, id: WaterHitboxId) -> Result<()> {
-        let DenseRemove {
-            dense_index, moved, ..
-        } = self
+        let DenseRemove { dense_index, moved, .. } = self
             .water_hitboxes
             .remove(id)
             .ok_or_else(|| invalid("water hitbox"))?;

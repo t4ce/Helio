@@ -23,11 +23,9 @@ struct HlfsGlobals {
 @group(0) @binding(9) var out_level2: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(10) var out_level3: texture_storage_3d<rgba16float, write>;
 
-const VOXEL_RESOLUTION: u32 = 32u;
+const VOXEL_RESOLUTION: u32 = 128u;
 
-// WebGPU guarantees at least 256 invocations per workgroup. 8×8×4 stays
-// within that portable limit; 8×8×8 (512) is rejected by browser adapters.
-@compute @workgroup_size(8, 8, 4)
+@compute @workgroup_size(8, 8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Level 0 smoothing
     if (all(global_id < vec3<u32>(VOXEL_RESOLUTION))) {

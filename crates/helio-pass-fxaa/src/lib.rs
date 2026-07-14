@@ -7,8 +7,8 @@
 //! ## O(1) guarantee
 //! `execute()` records exactly one `draw(0..3, 0..1)`.
 
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, RenderPass, Result as HelioResult};
 
 pub struct FxaaPass {
     pipeline: wgpu::RenderPipeline,
@@ -127,8 +127,8 @@ impl RenderPass for FxaaPass {
         _depth: &'a wgpu::TextureView,
         _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -136,7 +136,8 @@ impl RenderPass for FxaaPass {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            })]));
+            }),
+        ]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("FXAA"),
             color_attachments,
@@ -149,7 +150,7 @@ impl RenderPass for FxaaPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let input_view = ctx.resources.pre_aa.read("FXAA").ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig("FXAA requires published pre_aa input".to_string())
+            helio_core::Error::InvalidPassConfig("FXAA requires published pre_aa input".to_string())
         })?;
         let input_key = input_view as *const _ as usize;
         if self.bind_group_key != Some(input_key) {
@@ -177,3 +178,4 @@ impl RenderPass for FxaaPass {
         Ok(())
     }
 }
+

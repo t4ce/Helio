@@ -4,7 +4,7 @@
 //! O(1) CPU — single compute dispatch regardless of light count.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const WORKGROUP_SIZE: u32 = 64;
 
@@ -193,13 +193,13 @@ impl RenderPass for ShadowMatrixPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let count = ctx.scene.light_count;
+        let count = ctx.scene.movable_light_count; // Only movable lights (static/stationary shadows are baked)
         if count == 0 {
             return Ok(());
         }
         let wg = count.div_ceil(WORKGROUP_SIZE);
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }
+            .begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ShadowMatrix"),
                 timestamp_writes: None,
             });
@@ -209,3 +209,4 @@ impl RenderPass for ShadowMatrixPass {
         Ok(())
     }
 }
+

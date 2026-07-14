@@ -4,7 +4,7 @@
 //! Unlike other resources, lights have no reference counting (they exist
 //! independently of objects).
 
-use helio_v3::GpuLight;
+use helio_core::GpuLight;
 
 use crate::handles::LightId;
 
@@ -68,7 +68,12 @@ impl super::super::Scene {
         });
         let pushed = self.gpu_scene.lights.push(light);
         debug_assert_eq!(pushed, dense_index);
-
+        
+        // Invalidate any previous bake if this is a static/stationary light
+        if !movability.can_move() {
+            self.bake_invalidated = true;
+        }
+        
         id
     }
 
@@ -163,3 +168,4 @@ impl super::super::Scene {
         Ok(())
     }
 }
+

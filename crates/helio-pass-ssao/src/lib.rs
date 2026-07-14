@@ -4,9 +4,9 @@
 //! O(1) CPU: single fullscreen draw.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::graph::ResourceSize;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::graph::ResourceSize;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const KERNEL_SIZE: usize = 64;
 const NOISE_DIM: u32 = 4;
@@ -23,7 +23,7 @@ struct SsaoCameraUniform {
     _pad0: f32,
 }
 
-/// Globals matching ssao.wgsl Globals.
+/// Globals matching ssao.wgsl Globals (80 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuGlobals {
@@ -32,6 +32,8 @@ struct GpuGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
+    rc_world_min: [f32; 4],
+    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
 }
 
@@ -63,6 +65,9 @@ pub struct SsaoPass {
     sample_kernel_buf: wgpu::Buffer,
     noise_texture: wgpu::Texture,
     noise_sampler: wgpu::Sampler,
+    /// When set, replaces the runtime SSAO computation with a pre-baked AO texture.
+    /// The pass skips GPU execution and publishes this view into `frame.ssao` instead.
+    baked_ao_override: Option<std::sync::Arc<wgpu::TextureView>>,
 }
 
 impl SsaoPass {
@@ -111,7 +116,7 @@ impl SsaoPass {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        helio_v3::upload::write_buffer(queue, &sample_kernel_buf, 0, bytemuck::cast_slice(&kernel));
+        helio_core::upload::write_buffer(queue, &sample_kernel_buf, 0, bytemuck::cast_slice(&kernel));
 
         // ── Noise texture (4×4 Rgba8Unorm, random rotation vectors) ───────────
         let noise_data = generate_noise();
@@ -129,7 +134,7 @@ impl SsaoPass {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        helio_v3::upload::write_texture(
+        helio_core::upload::write_texture(
             queue,
             wgpu::TexelCopyTextureInfo {
                 texture: &noise_texture,
@@ -375,6 +380,7 @@ impl SsaoPass {
             sample_kernel_buf,
             noise_texture,
             noise_sampler,
+            baked_ao_override: None,
         }
     }
 }
@@ -389,11 +395,7 @@ impl RenderPass for SsaoPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw(
-            "ssao",
-            wgpu::TextureFormat::R8Unorm,
-            ResourceSize::MatchSurface,
-        );
+        builder.write_color_raw("ssao", wgpu::TextureFormat::R8Unorm, ResourceSize::MatchSurface);
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -405,7 +407,11 @@ impl RenderPass for SsaoPass {
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        let _ = frame;
+        // The graph already populated frame.ssao with the graph-owned texture.
+        // Only override if a pre-baked AO texture is in use.
+        if let Some(ref baked) = self.baked_ao_override {
+            frame.ssao.write(baked.as_ref(), "SSAO");
+        }
     }
 
     fn render_pass_descriptor<'a>(
@@ -415,8 +421,8 @@ impl RenderPass for SsaoPass {
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let ssao_view = resources.ssao.read("SSAO")?;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
                 view: ssao_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -424,7 +430,8 @@ impl RenderPass for SsaoPass {
                     load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
                     store: wgpu::StoreOp::Store,
                 },
-            })]));
+            }),
+        ]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("SSAO"),
             color_attachments,
@@ -457,6 +464,11 @@ impl RenderPass for SsaoPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        // Skip computation if a pre-baked AO texture is in use.
+        if self.baked_ao_override.is_some() {
+            return Ok(());
+        }
+
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, &self.bind_group_0, &[]);
@@ -470,6 +482,15 @@ impl RenderPass for SsaoPass {
 impl SsaoPass {
     /// Resize is handled by the graph — this is a no-op.
     pub fn resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
+
+    /// Replace runtime SSAO with a pre-baked AO texture.
+    ///
+    /// After this call, the pass does no GPU work and publishes `view` as
+    /// `frame.ssao` instead of the screen-space computed result.
+    /// Pass `None` to restore normal SSAO computation.
+    pub fn set_baked_ao(&mut self, view: Option<std::sync::Arc<wgpu::TextureView>>) {
+        self.baked_ao_override = view;
+    }
 }
 
 // ── Private helpers ────────────────────────────────────────────────────────────
@@ -544,14 +565,8 @@ mod test_utils {
             let b = noise[base + 2];
             let a = noise[base + 3];
 
-            assert_ne!(
-                r, 0,
-                "R channel should be pseudo-random and non-zero in deterministic stream"
-            );
-            assert_ne!(
-                g, 0,
-                "G channel should be pseudo-random and non-zero in deterministic stream"
-            );
+            assert_ne!(r, 0, "R channel should be pseudo-random and non-zero in deterministic stream");
+            assert_ne!(g, 0, "G channel should be pseudo-random and non-zero in deterministic stream");
             assert_eq!(b, 128, "B channel must be fixed at 128");
             assert_eq!(a, 255, "A channel must be fixed at 255");
         }
@@ -561,10 +576,7 @@ mod test_utils {
     fn generate_noise_is_deterministic() {
         let first = generate_noise();
         let second = generate_noise();
-        assert_eq!(
-            first, second,
-            "generate_noise() should be deterministic across calls"
-        );
+        assert_eq!(first, second, "generate_noise() should be deterministic across calls");
     }
 
     #[test]
@@ -577,16 +589,10 @@ mod test_utils {
             let x = sample[0];
             let y = sample[1];
             let z = sample[2];
-            assert!(
-                z >= -1e-6f32,
-                "kernel sample z should be non-negative (hemisphere), got {z}"
-            );
+            assert!(z >= -1e-6f32, "kernel sample z should be non-negative (hemisphere), got {z}");
 
             let length = (x * x + y * y + z * z).sqrt();
-            assert!(
-                length <= 1.01f32,
-                "kernel sample length must be <= 1.0, got {length}"
-            );
+            assert!(length <= 1.01f32, "kernel sample length must be <= 1.0, got {length}");
             if length > 0.001f32 {
                 has_nonzero = true;
             }
@@ -602,3 +608,5 @@ mod test_utils {
         assert_eq!(a, b, "generate_kernel() must be deterministic");
     }
 }
+
+

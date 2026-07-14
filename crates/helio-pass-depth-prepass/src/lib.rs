@@ -1,6 +1,6 @@
 //! Depth prepass — writes depth buffer before main geometry pass.
 //!
-//! Draw arguments are generated on the GPU and submitted as WebGPU indirect draws.
+//! O(1) CPU: single `multi_draw_indexed_indirect` call regardless of scene size.
 //!
 //! # Vertex / Index Buffers
 //!
@@ -8,7 +8,7 @@
 //! shared mesh vertex buffer (slot 0) and index buffer **before** this pass
 //! executes, or the GPU draw will read from undefined memory.
 
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub struct DepthPrepassPass {
     pipeline: wgpu::RenderPipeline,
@@ -75,7 +75,7 @@ impl DepthPrepassPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
+                buffers: &[wgpu::VertexBufferLayout {
                     array_stride: 40, // PackedVertex: pos(12)+bitan(4)+uv0(8)+uv1(8)+normal(4)+tangent(4)
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -90,7 +90,7 @@ impl DepthPrepassPass {
                             shader_location: 2,
                         },
                     ],
-                })],
+                }],
             },
             // Depth-only: no fragment stage, no color outputs.
             fragment: None,
@@ -139,8 +139,7 @@ impl RenderPass for DepthPrepassPass {
         depth: &'a wgpu::TextureView,
         _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([]));
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("DepthPrepass"),
             color_attachments,
@@ -159,13 +158,13 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // WebGPU records one call per GPU-generated indirect command.
+        // O(1): single multi_draw_indexed_indirect — no CPU loop over draw calls.
         let draw_count = ctx.scene.draw_count;
         if draw_count == 0 {
             return Ok(());
         }
         let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "DepthPrepass requires main_scene mesh buffers".to_string(),
             )
         })?;
@@ -202,9 +201,13 @@ impl RenderPass for DepthPrepassPass {
             main_scene.mesh_buffers.indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
+        #[cfg(target_arch = "wasm32")]
         for i in 0..draw_count {
             pass.draw_indexed_indirect(indirect, i as u64 * 20);
         }
         Ok(())
     }
 }
+

@@ -1,0 +1,37 @@
+[package]
+name = "helio-default-graphs"
+version = "0.1.0"
+edition = "2021"
+description = "Default render graph builders for Helio — depends on all pass crates"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio = { path = "../helio" }
+helio-core = { workspace = true }
+image = { workspace = true, features = ["png"] }
+wgpu = { workspace = true }
+helio-pass-billboard = { path = "../helio-pass-billboard" }
+helio-pass-corona = { path = "../helio-pass-corona" }
+helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
+helio-pass-deferred-light = { path = "../helio-pass-deferred-light" }
+helio-pass-fxaa = { path = "../helio-pass-fxaa" }
+helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
+helio-pass-hiz = { path = "../helio-pass-hiz" }
+helio-pass-hlfs = { path = "../helio-pass-hlfs" }
+helio-pass-indirect-dispatch = { path = "../helio-pass-indirect-dispatch" }
+helio-pass-light-cull = { path = "../helio-pass-light-cull" }
+helio-pass-occlusion-cull = { path = "../helio-pass-occlusion-cull" }
+helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
+helio-pass-postprocess = { path = "../helio-pass-postprocess" }
+helio-pass-shadow = { path = "../helio-pass-shadow" }
+helio-pass-shadow-cull = { path = "../helio-pass-shadow-cull" }
+helio-pass-shadow-dirty = { path = "../helio-pass-shadow-dirty" }
+helio-pass-shadow-matrix = { path = "../helio-pass-shadow-matrix" }
+helio-pass-simple-cube = { path = "../helio-pass-simple-cube" }
+helio-pass-sky = { path = "../helio-pass-sky" }
+helio-pass-sky-lut = { path = "../helio-pass-sky-lut" }
+helio-pass-taa = { workspace = true }
+helio-pass-transparent = { path = "../helio-pass-transparent" }
+helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
+helio-pass-water-sim = { path = "../helio-pass-water-sim" }
+helio-pass-voxel-mesh = { path = "../helio-pass-voxel-mesh" }

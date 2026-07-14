@@ -38,6 +38,7 @@ struct CameraUniforms {
 @group(0) @binding(5) var point_sampler: sampler;
 
 struct TaaUniform {
+    jitter_offset: vec2<f32>,
     upscale_factor: f32,
     reset: u32,
     time_delta: f32,
@@ -188,10 +189,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let out_texel = 1.0 / out_dims;
 
     // ── Jitter correction ───────────────────────────────────────────────────
-    // This is the exact NDC translation already applied to camera.proj. NDC
-    // spans two UV units and viewport Y points down, hence the 0.5 and Y flip.
-    let jitter_uv = camera.jitter_frame.xy * vec2<f32>(0.5, -0.5);
-    let jitter_offset_pixels = camera.jitter_frame.xy * in_dims * 0.5;
+    let jitter_uv = taa.jitter_offset * vec2<f32>(1.0, -1.0) / in_dims;
     let cur_uv    = in.uv + jitter_uv;
 
     // ── Current frame sample ────────────────────────────────────────────────
@@ -203,9 +201,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // ── Depth-based reprojection → history UV ───────────────────────────────
-    // Color, depth, and clip coordinates must identify the same jittered pixel.
-    let depth_val  = textureSample(depth_tex, point_sampler, cur_uv);
-    let ndc_xy     = vec2<f32>(cur_uv.x * 2.0 - 1.0, 1.0 - cur_uv.y * 2.0);
+    let depth_val  = textureSample(depth_tex, point_sampler, in.uv);
+    let ndc_xy     = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
     let clip       = vec4<f32>(ndc_xy, depth_val, 1.0);
     let world_h    = camera.inv_view_proj * clip;
     let world_pos  = world_h.xyz / world_h.w;
@@ -241,7 +238,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // ── Sub-pixel jitter offset weight ──────────────────────────────────────
     // Pixels sampled near the sub-pixel centre are more reliable.
-    let jitter_len_sq = dot(jitter_offset_pixels, jitter_offset_pixels);
+    let jitter_len_sq = dot(taa.jitter_offset, taa.jitter_offset);
     let offset_w = exp(-4.0 * (1.0 - blend_toward_current) * jitter_len_sq);
     let w = offset_w * taa.upscale_factor * taa.upscale_factor;
 

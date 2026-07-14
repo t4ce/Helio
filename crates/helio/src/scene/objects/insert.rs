@@ -3,7 +3,7 @@
 //! Provides the [`Scene::insert_object`](crate::Scene::insert_object) method for adding
 //! renderable objects to the scene with O(1) performance in persistent mode.
 
-use helio_v3::{DrawIndexedIndirectArgs, GpuDrawCall};
+use helio_core::{DrawIndexedIndirectArgs, GpuDrawCall};
 
 use crate::handles::ObjectId;
 
@@ -107,6 +107,8 @@ impl super::super::Scene {
             .unwrap_or_default();
         if !inserted_movability.can_move() {
             self.static_objects_dirty = true;
+            // Invalidate any previous bake - static geometry has changed
+            self.bake_invalidated = true;
         }
 
         if self.objects_layout_optimized {

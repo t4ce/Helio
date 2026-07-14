@@ -11,8 +11,8 @@
 //! skip every light that doesn't touch the current pixel's tile.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub const TILE_SIZE: u32 = 16;
 pub const MAX_LIGHTS_PER_TILE: u32 = 64;
@@ -70,7 +70,9 @@ impl LightCullPass {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("LightCull Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/light_cull.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/light_cull.wgsl").into(),
+            ),
         });
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -237,12 +239,8 @@ impl RenderPass for LightCullPass {
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        frame
-            .tile_light_lists
-            .write(&self.tile_light_lists, "LightCull");
-        frame
-            .tile_light_counts
-            .write(&self.tile_light_counts, "LightCull");
+        frame.tile_light_lists.write(&self.tile_light_lists, "LightCull");
+        frame.tile_light_counts.write(&self.tile_light_counts, "LightCull");
     }
 
     fn render_pass_descriptor<'a>(
@@ -262,7 +260,7 @@ impl RenderPass for LightCullPass {
         let params = LightCullParams {
             num_tiles_x: self.num_tiles_x,
             num_tiles_y: ctx.height.div_ceil(TILE_SIZE),
-            num_lights: ctx.scene.lights.len() as u32,
+            num_lights: ctx.scene.movable_light_count,
             screen_width: ctx.width,
             screen_height: ctx.height,
             _pad0: 0,
@@ -275,8 +273,9 @@ impl RenderPass for LightCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if ctx.scene.light_count == 0 {
+        if ctx.scene.movable_light_count == 0 {
             // No active movable lights: clear light lists/counts to avoid stale data usage.
+            // Static/stationary lights are baked and don't need runtime culling.
             unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_lists, 0, None);
             unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_counts, 0, None);
             self.cull_cache_key = None; // Invalidate cache
@@ -288,7 +287,7 @@ impl RenderPass for LightCullPass {
         let camera_gen = ctx.scene.camera_generation;
         let lights_gen = ctx.scene.movable_lights_generation;
 
-        let cache_key = (camera_gen, lights_gen, ctx.scene.light_count);
+        let cache_key = (camera_gen, lights_gen, ctx.scene.movable_light_count);
 
         // `self.width/height` are internal-resolution values maintained by
         // on_resize. ctx.width/height are full output resolution, so do not
@@ -342,8 +341,8 @@ impl RenderPass for LightCullPass {
         // Each workgroup has 256 threads, each thread handles one tile.
         let workgroups = total_tiles.div_ceil(256);
 
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass = unsafe { &mut *ctx.encoder_ptr }
+            .begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("LightCull"),
                 timestamp_writes: None,
             });

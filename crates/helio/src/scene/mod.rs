@@ -79,17 +79,21 @@ mod helpers;
 mod lifecycle;
 mod multi_mesh;
 mod objects;
+mod postprocess;
 mod resources;
 mod stats;
 mod types;
 mod virtual_geometry;
+mod voxel;
 mod water;
 
 pub use actor::{
-    SceneActor, SceneActorId, SceneActorTrait, WaterHitboxActor, WaterHitboxDescriptor,
-    WaterVolumeActor, WaterVolumeDescriptor,
+    PostProcessVolumeActor, SceneActor, SceneActorId, SceneActorTrait,
+    WaterHitboxDescriptor, WaterHitboxActor, WaterVolumeDescriptor, WaterVolumeActor,
 };
 pub use camera::Camera;
 pub use core::Scene;
 pub use errors::*;
-pub use types::{ObjectDescriptor, PickableObject};
+pub use types::{ObjectDescriptor, PickableObject, VoxelVolumeDescriptor};
+pub use voxel::VoxelMode;
+

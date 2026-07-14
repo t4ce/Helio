@@ -52,6 +52,7 @@ struct GpuLight {
 
 const ENABLE_SHADOWS: bool = true;
 const MAX_SHADOW_LIGHTS: u32 = 42u;
+const ATLAS_SIZE: f32 = 1024.0;
 const NORMAL_OFFSET_SCALE: f32 = 0.01;
 const PI: f32 = 3.14159265359;
 
@@ -108,10 +109,6 @@ struct ShadowConfig {
 @group(0) @binding(11) var shadow_sampler: sampler_comparison;
 @group(0) @binding(12) var <storage, read> shadow_matrices: array<LightMatrix>;
 
-fn shadow_atlas_size() -> f32 {
-    return f32(textureDimensions(shadow_atlas).x);
-}
-
 // Vogel disk sampling - blue-noise-like spiral pattern for high-quality PCF
 fn vogel_disk_sample(sample_idx: u32, sample_count: u32, theta: f32) -> vec2<f32> {
     let GOLDEN_ANGLE = 2.39996323;
@@ -152,9 +149,9 @@ fn pcss_blocker_search(
     for (var i = 0u; i < blocker_samples; i++) {
         let offset = vogel_disk_sample(i, blocker_samples, theta) * search_radius;
         let sample_uv = shadow_uv + offset;
-        let pixel_coord = vec2<i32>(sample_uv * shadow_atlas_size());
+        let pixel_coord = vec2<i32>(sample_uv * ATLAS_SIZE);
 
-        if any(pixel_coord < vec2<i32>(0)) || any(pixel_coord >= vec2<i32>(i32(shadow_atlas_size()))) {
+        if any(pixel_coord < vec2<i32>(0)) || any(pixel_coord >= vec2<i32>(i32(ATLAS_SIZE))) {
             continue;
         }
 
@@ -200,7 +197,7 @@ fn sample_cascade_shadow(layer: u32, cascade_idx: u32, cascade_scale: f32, world
 
     var lit_sum = 0.0;
     for (var i = 0u; i < pcf_count; i++) {
-        let offset = vogel_disk_sample(i, pcf_count, theta) * (cascade_scale / shadow_atlas_size());
+        let offset = vogel_disk_sample(i, pcf_count, theta) * (cascade_scale / ATLAS_SIZE);
         lit_sum += textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), ndc.z);
     }
 
@@ -223,7 +220,7 @@ fn sample_cascade_shadow_pcss(layer: u32, cascade_idx: u32, world_pos: vec3<f32>
     let theta = hash22(frag_coord) * 6.28318530718;
 
     // Blocker search uses unbiased depth so nearby occluders are correctly identified.
-    let search_radius = config.pcss_light_size / shadow_atlas_size();
+    let search_radius = config.pcss_light_size / ATLAS_SIZE;
     let blocker = pcss_blocker_search(layer, shadow_uv, receiver_depth, search_radius, shadow_config.pcss_blocker_samples, theta);
 
     if blocker.y < 0.5 {
@@ -231,8 +228,7 @@ fn sample_cascade_shadow_pcss(layer: u32, cascade_idx: u32, world_pos: vec3<f32>
     }
 
     let penumbra = pcss_penumbra_size(receiver_depth, blocker.x, config.pcss_light_size);
-    let atlas_size = shadow_atlas_size();
-    let filter_radius = clamp(penumbra / atlas_size, config.filter_radius / atlas_size, config.filter_radius * 3.0 / atlas_size);
+    let filter_radius = clamp(penumbra / ATLAS_SIZE, config.filter_radius / ATLAS_SIZE, config.filter_radius * 3.0 / ATLAS_SIZE);
 
     var lit_sum = 0.0;
 

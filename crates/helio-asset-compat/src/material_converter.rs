@@ -188,8 +188,10 @@ where
             tex_occlusion: GpuMaterial::NO_TEXTURE,
             workflow,
             flags,
-            _pad: 0,
+            material_class: 0,
+            class_params: [0.0; 4],
         },
         textures,
     })
 }
+

@@ -6,8 +6,8 @@
 //!   and handle-based lookup through a generation-protected slot handle.
 //! - [`SparsePool`] for sparse slot-based storage with stable handles and free-list reuse.
 
-use crate::handles::Handle;
 use std::marker::PhantomData;
+use crate::handles::Handle;
 
 #[derive(Clone, Copy, Debug)]
 struct DenseSlotMeta {
@@ -179,6 +179,71 @@ impl<T, H: Handle> DenseArena<T, H> {
             (H::from_parts(slot_idx, gen), value)
         })
     }
+
+    /// Insert a value using a closure that receives the newly-created handle.
+    ///
+    /// Useful when the value's constructor needs the handle it will be assigned.
+    pub fn insert_with(&mut self, f: impl FnOnce(H) -> T) -> H {
+        let dense_index = self.dense.len();
+        let (slot_index, generation) = if let Some(slot) = self.free_list.pop() {
+            let meta = &mut self.slots[slot as usize];
+            meta.occupied = true;
+            meta.dense_index = dense_index as u32;
+            (slot, meta.generation)
+        } else {
+            let slot = self.slots.len() as u32;
+            self.slots.push(DenseSlotMeta {
+                generation: 1,
+                dense_index: dense_index as u32,
+                occupied: true,
+            });
+            (slot, 1)
+        };
+        let handle = H::from_parts(slot_index, generation);
+        let value = f(handle);
+        self.dense.push(value);
+        self.dense_to_slot.push(slot_index);
+        handle
+    }
+
+    /// Number of live items in the arena.
+    pub fn len(&self) -> usize {
+        self.dense.len()
+    }
+
+    /// Immutable lookup by handle.
+    pub fn get(&self, handle: H) -> Option<&T> {
+        let meta = *self.slots.get(handle.slot() as usize)?;
+        if !meta.occupied || meta.generation != handle.generation() {
+            return None;
+        }
+        self.dense.get(meta.dense_index as usize)
+    }
+
+    /// Mutable lookup by handle.
+    pub fn get_mut(&mut self, handle: H) -> Option<&mut T> {
+        let meta = *self.slots.get(handle.slot() as usize)?;
+        if !meta.occupied || meta.generation != handle.generation() {
+            return None;
+        }
+        self.dense.get_mut(meta.dense_index as usize)
+    }
+
+    /// Iterate all live items yielding `(handle, &value)` with a simpler API.
+    pub fn iter(&self) -> impl Iterator<Item = (H, &T)> + '_ {
+        self.iter_with_handles()
+    }
+
+    /// Mutable iteration over all live items yielding `(handle, &mut value)`.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (H, &mut T)> + '_ {
+        let dense_to_slot = self.dense_to_slot.as_ptr();
+        let slots = self.slots.as_ptr();
+        self.dense.iter_mut().enumerate().map(move |(dense_idx, value)| {
+            let slot_idx = unsafe { *dense_to_slot.add(dense_idx) as usize };
+            let gen = unsafe { (*slots.add(slot_idx)).generation };
+            (H::from_parts(slot_idx as u32, gen), value)
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -285,3 +350,4 @@ impl<T, H: Handle> SparsePool<T, H> {
         !self.free_list.is_empty()
     }
 }
+

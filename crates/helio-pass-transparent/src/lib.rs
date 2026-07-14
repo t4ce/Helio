@@ -1,12 +1,12 @@
 //! Transparent geometry pass.
 //!
-//! Renders alpha-blended transparent geometry using GPU-generated indirect draws.
+//! Renders alpha-blended transparent geometry using `multi_draw_indexed_indirect`.
 //! The pass shares the same Group 0 binding layout (camera / globals / instances) as the
 //! opaque geometry pass, but enables `SrcAlpha / OneMinusSrcAlpha` blending and uses a
 //! read-only depth attachment so transparent surfaces sort correctly against opaque ones.
 //!
-//! ## Browser command encoding
-//! `execute()` records the GPU-generated indirect commands supported by WebGPU.
+//! ## O(1) CPU cost
+//! `execute()` issues a single `multi_draw_indexed_indirect` call regardless of scene size.
 //!
 //! ## Note on prepare()
 //! `prepare()` uploads per-frame globals (frame counter, light count).  In a real renderer
@@ -15,8 +15,8 @@
 //! A future OIT (Order-Independent Transparency) implementation would eliminate this sort.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::ResourceBuilder;
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::ResourceBuilder;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -26,6 +26,8 @@ struct GBufferGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
+    rc_world_min: [f32; 4],
+    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
 }
 
@@ -176,7 +178,7 @@ impl TransparentPass {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_buffer_layout)],
+                buffers: &[vertex_buffer_layout],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -234,9 +236,11 @@ impl RenderPass for TransparentPass {
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
             delta_time: 0.0,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: ctx.scene.movable_light_count, // Only movable lights (static/stationary are baked)
             ambient_intensity: 0.1,
             ambient_color: [0.1, 0.1, 0.15, 1.0],
+            rc_world_min: [0.0; 4],
+            rc_world_max: [0.0; 4],
             csm_splits: [0.0; 4],
         };
         ctx.queue
@@ -248,7 +252,7 @@ impl RenderPass for TransparentPass {
         &'a self,
         target: &'a wgpu::TextureView,
         depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
+        resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
@@ -260,11 +264,12 @@ impl RenderPass for TransparentPass {
                     store: wgpu::StoreOp::Store,
                 },
             })]));
+        let depth_view = resources.full_res_depth.get().unwrap_or(depth);
         Some(wgpu::RenderPassDescriptor {
             label: Some("Transparent"),
             color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth,
+                view: depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -284,7 +289,7 @@ impl RenderPass for TransparentPass {
         }
         let main_scene = ctx.resources.main_scene.read("Transparent");
         let main_scene = main_scene.as_ref().ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "TransparentPass requires main_scene mesh buffers".to_string(),
             )
         })?;
@@ -298,6 +303,9 @@ impl RenderPass for TransparentPass {
             main_scene.mesh_buffers.indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        rp.multi_draw_indexed_indirect(indirect, 0, draw_count);
+        #[cfg(target_arch = "wasm32")]
         for i in 0..draw_count {
             rp.draw_indexed_indirect(indirect, i as u64 * 20);
         }

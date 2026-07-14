@@ -2,223 +2,268 @@
 
 <img src="./branding/Helio.svg" alt="Helio Renderer" width="400"/>
 
-**GPU-driven deferred rendering for browser WebGPU, in Rust and WASM**
+**GPU-driven deferred rendering in pure Rust — modular, pass-based, zero-overhead**
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
-[![wgpu](https://img.shields.io/badge/wgpu-30-blue)](https://wgpu.rs/)
-[![Target](https://img.shields.io/badge/target-browser%20WebGPU-purple)](https://www.w3.org/TR/webgpu/)
+[![wgpu](https://img.shields.io/badge/wgpu-28-blue)](https://wgpu.rs/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 </div>
 
-Helio is a browser engine built on the browser's native WebGPU implementation through
-`wgpu` and `wasm32-unknown-unknown`. Culling, LOD selection, indirect draw generation,
-lighting, shadows, GI, water, and post-processing run on the GPU. The public scene API
-uses stable handles for meshes, materials, objects, lights, and other resources.
+Helio is a GPU-driven deferred renderer built entirely in Rust on `wgpu`. Every CPU-side call is bounded (typically O(1)) while culling, LOD selection, indirect-draw dispatch, and light evaluation happen entirely on the GPU.
 
-This repository intentionally has one graphics target.
+## What makes Helio special
 
-| Platform/API | Status | Included implementation |
-|---|---:|---|
-| Browser + WASM + WebGPU | Target | `wgpu` browser WebGPU backend and WGSL |
-| Browser + WebGL | Not supported | Removed |
-| Vulkan | Not supported | Removed |
-| Metal | Not supported | Removed |
-| Direct3D 12 | Not supported | Removed |
-| Native GLES | Not supported | Removed |
-| Native Rust executables | Not supported | Removed |
+**Truly modular pass architecture.** Every render pass is its own crate — `helio-pass-gbuffer`, `helio-pass-fxaa`, `helio-pass-taa`, and so on. The central `helio` crate has zero knowledge of any pass type. Adding a new pass means writing a crate and plugging it into a graph builder; central crates never change. This keeps the core small and makes experimentation trivial.
 
-Non-browser builds fail deliberately at compile time.
+**GPU-driven by default.** The CPU never iterates draw calls. Culling, LOD selection, and indirect-dispatch buffer generation all run on the GPU. Scene data lives in GPU buffers with dirty-tracked CPU mirrors — `flush()` uploads only what changed.
 
-## WebGPU engine coverage
+**Handle-based scene API.** Every resource (`MeshId`, `MaterialId`, `LightId`, `ObjectId`, …) is a lightweight `Copy` stable handle backed by generational arenas. Insert, update, or remove objects with O(1) operations and no aliasing.
 
-Browser WebGPU is the real renderer, not a preview or compatibility rasterizer.
+**Render graph with automatic rebuild.** Graphs carry their own rebuilder closure, so resizing the window transparently rebuilds the entire pipeline. No manual `set_rebuild` boilerplate needed — it just works.
 
-| Engine area | Browser WebGPU status | Notes |
-|---|---:|---|
-| Deferred PBR / MRT G-buffer | Full | Four color targets plus depth |
-| Compute passes | Full | Culling, Hi-Z, light bins, GI, SDF, water |
-| GPU-generated indirect draws | Full | Requires `indirect-first-instance` |
-| Virtual geometry | Full rendering | Meshlet culling and LOD remain GPU-side |
-| Dynamic and cached shadows | Full rendering | Browser records individual indirect draws |
-| HLFS compute lighting | Experimental custom graph | Real WebGPU compute injection, propagation, and raster output; browser-sized 32³ clip levels |
-| SSAO, TAA, FXAA, SMAA | Full | Selected by render graph |
-| Sky, corona, water, caustics | Full | Render and compute pipelines |
-| Materials and mipmapping | Full, bounded table | 16 texture/sampler slots per scene bind group |
-| CPU profiling | Full | Browser clock through `web-time` |
-| GPU timestamps | Optional | Enabled only when the adapter exposes both required timestamp features |
-| Hardware ray tracing | Not available | The removed ray-query/Radiance-Cascades source was an unwired placeholder, not a working renderer feature |
-| Offline baking / PVS / snapshots | Removed | Real-time visibility and lighting only |
-
-WebGPU does not expose wgpu's native multi-draw extensions. Helio therefore records one
-`draw_indexed_indirect` command per GPU-generated slot. This preserves pixels and GPU-side
-visibility decisions, but command encoding can cost more CPU time in very draw-heavy scenes.
-
-The browser default uses 256 px shadow-atlas faces: about 128 MiB for the static and movable
-256-layer `Depth32Float` atlases together. The former 1024 px default would reserve about
-2 GiB. The size remains configurable when a scene can justify the memory.
-
-## Vendored wgpu scope
-
-`vendor/wgpu` is a source slice, not the upstream multi-platform workspace.
-
-| Retained | Removed |
-|---|---|
-| High-level `wgpu` Rust API | `wgpu-core` and `wgpu-hal` |
-| Browser WebGPU backend | Vulkan, Metal, DX12, GLES, WebGL, noop |
-| Generated WebGPU JS bindings | Native platform integrations |
-| `wgpu-types` and `naga-types` | Naga translators and CLI tooling |
-| WGSL shader input | GLSL, SPIR-V, and Naga-IR inputs |
-| Required licenses | Upstream examples, tests, benches, docs tooling |
-
-Helio enables only:
-
-```toml
-wgpu = { path = "vendor/wgpu/wgpu", default-features = false, features = ["webgpu", "wgsl"] }
-```
-
-## Build and run
-
-Install the Rust target and `wasm-bindgen-cli`, then build one demo:
-
-```sh
-rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli
-./build-wasm.sh render_v2_basic
-npx serve target/wasm-prebuilt
-```
-
-Open `http://localhost:3000/render_v2_basic/` in a WebGPU-capable browser. The page must
-be served from a secure context (`localhost` is accepted); opening it directly as a file
-will not work.
-
-If a development server prints `Serving HTTP on 0.0.0.0`, that is its network bind address,
-not the URL to open. Use `http://localhost:<port>/` or `http://127.0.0.1:<port>/`; browsers do
-not expose WebGPU to an `http://0.0.0.0` origin. Production deployments must use HTTPS.
-
-To build every retained demo:
-
-```sh
-./build-wasm.sh
-```
-
-For a fast Rust-side validation without `wasm-bindgen`:
-
-```sh
-cargo check --workspace --target wasm32-unknown-unknown
-```
-
-## Minimal application
-
-Implement `HelioWasmApp`; `helio-wasm` owns the canvas, browser event loop, WebGPU adapter,
-surface, and presentation lifecycle.
-
-```rust
-use std::sync::Arc;
-use glam::Vec3;
-use helio::{Camera, Renderer};
-use helio_wasm::{HelioWasmApp, InputState};
-
-struct App;
-
-impl HelioWasmApp for App {
-    fn init(
-        _renderer: &mut Renderer,
-        _device: Arc<wgpu::Device>,
-        _queue: Arc<wgpu::Queue>,
-        _width: u32,
-        _height: u32,
-    ) -> Self {
-        Self
-    }
-
-    fn update(
-        &mut self,
-        _renderer: &mut Renderer,
-        _dt: f32,
-        _elapsed: f32,
-        _input: &InputState,
-    ) -> Camera {
-        Camera::perspective_look_at(
-            Vec3::new(0.0, 2.0, 6.0), Vec3::ZERO, Vec3::Y,
-            60_f32.to_radians(), 16.0 / 9.0, 0.1, 1000.0,
-        )
-    }
-}
-
-#[wasm_bindgen::prelude::wasm_bindgen(start)]
-pub fn run() {
-    helio_wasm::launch::<App>();
-}
-```
-
-The browser runner requests `wgpu::Backends::BROWSER_WEBGPU` explicitly. Device creation
-requires `INDIRECT_FIRST_INSTANCE`; timestamp queries are requested only when supported.
+---
 
 ## Architecture
 
-| Path | Responsibility |
-|---|---|
-| `crates/helio` | Public renderer, scene, material, mesh, light, and editor APIs |
-| `crates/helio-v3` | Render graph, pass contexts, GPU scene, profiling |
-| `crates/libhelio` | GPU-shared layouts and browser material bindings |
-| `crates/helio-pass-*` | Modular render and compute passes |
-| `crates/helio-wasm` | Browser canvas, input, WebGPU initialization, frame loop |
-| `crates/helio-web-demos` | Feature-selected WASM demos and generated HTML |
-| `crates/helio-asset-compat` | Optional in-browser asset conversion |
-| `vendor/wgpu` | Browser-only wgpu source slice |
-
-The default frame is approximately:
-
-```text
-scene dirty uploads
-  -> shadow matrices and shadow atlases
-  -> depth prepass
-  -> Hi-Z and occlusion/light culling compute
-  -> G-buffer and virtual geometry
-  -> deferred PBR + shadows + ambient/environment indirect light
-  -> sky / transparency / water / billboards
-  -> TAA and debug/performance overlays
-  -> browser WebGPU surface presentation
+```
+crates/helio               Public API: Renderer, Scene, Camera, debug helpers
+crates/helio-core          Render graph runtime, GpuScene, RenderPass trait
+crates/libhelio            GPU-shared types (GpuLight, GpuMaterial, uniforms)
+crates/helio-pass-*        One crate per render pass (30+ passes available)
+crates/helio-default-graphs Pre-built graph configurations
+crates/helio-asset-compat  FBX / glTF / OBJ / USD loading
+crates/examples            Runnable demos and editor
 ```
 
-## Materials
+The separation between `helio` (the central crate) and `helio-pass-*` (pass crates) is strict: **central crates never import pass types**. The `RenderPass` trait lives in `helio-core`. Pass crates implement it. Graph builder functions compose passes and store a `GraphRebuilder` inside the graph. The `Renderer` extracts it at construction time, giving automatic rebuild on resize without any dependency on specific pass types.
 
-WebGPU baseline limits guarantee a finite number of sampled textures and samplers per shader
-stage. Helio uses 16 fixed texture bindings and 16 sampler bindings, selected from WGSL with
-explicit gradients so transformed UVs retain correct mip selection. Missing material textures
-are filled with fallback views.
+---
 
-For scenes needing more than 16 simultaneously resident material textures, the next scaling
-step is material paging, atlases, or compatible texture arrays; native unbounded binding arrays
-are intentionally not part of this target.
+## Quick start
 
-## Asset loading
+```sh
+cargo run -p examples --bin indoor_cathedral --release
+cargo run -p examples --bin outdoor_city --release
+cargo run -p examples --bin load_fbx --release -- path/to/model.fbx
+```
 
-The base demos do not pull in SolidRS. Asset conversion is optional and enabled only for the
-asset demos:
+### Minimal setup
 
-| Demo feature | Asset conversion |
-|---|---:|
-| `render_v2_basic` and procedural demos | No |
-| `load_fbx_embedded` | Yes |
-| `ship_flight` | Yes |
-| `outdoor_rocks` | Yes |
+```rust
+use helio::{Camera, DebugDrawState, Renderer, RendererConfig, Scene,
+            required_wgpu_features, required_wgpu_limits};
+use helio_default_graphs::build_default_graph;
 
-Browser applications load embedded bytes or fetched bytes; there is no native filesystem path.
+let features = required_wgpu_features(adapter.features());
+let limits   = required_wgpu_limits(adapter.limits());
 
-## Demo features
+let config = RendererConfig::new(width, height, surface_format);
+let scene = Scene::new(device.clone(), queue.clone());
+let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor { … });
+let cull_stats_buf = device.create_buffer(&wgpu::BufferDescriptor { … });
+let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
+let graph = build_default_graph(&device, &queue, &scene, config,
+    debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
+let mut renderer = Renderer::new(
+    device.clone(), queue.clone(),
+    config.surface_format, config.width, config.height, config.render_scale,
+    config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
+);
 
-Each build selects one feature so unused scenes and optional import code are eliminated:
+let camera = Camera::perspective_look_at(
+    glam::Vec3::new(0.0, 2.0, 6.0), glam::Vec3::ZERO, glam::Vec3::Y,
+    60_f32.to_radians(), width as f32 / height as f32, 0.1, 1000.0,
+);
 
-| Category | Features |
+renderer.render(&camera, &surface_view)?;
+```
+
+**The graph carries its own rebuilder.** You don't need to create a closure or call `set_rebuilder`. Resize handling, depth recreation, and graph reconstruction happen transparently.
+
+---
+
+## Features
+
+### Rendering pipeline
+- GPU-driven GBuffer — culling, LOD, indirect-draw dispatch all on GPU
+- Virtual geometry — per-meshlet frustum/backface culling, coverage LOD
+- Hi-Z occlusion culling — min-reduction pyramid + GPU occlusion tests
+- Deferred lighting — Cook-Torrance BRDF, metallic-roughness, IOR, specular tint
+- Cascaded shadow maps — 4-split CSM with PCF/PCSS, quality presets
+- Tile/cluster light culling — O(tiles) evaluation
+- Screen-space ambient occlusion
+- Radiance Cascades GI — multi-bounce probe-based global illumination
+- Volumetric sky — Hillaire 2020 model with clouds
+
+### Post-processing
+- TAA (temporal AA with jitter + reprojection)
+- FXAA / FXAA+HLFS hybrid
+- Tone mapping (integrated into deferred light pass)
+- Debug visualisations — UV, normals, albedo, shadow heatmap, LOD heatmap
+
+### Scene management
+- Handle-based API — `MeshId`, `MaterialId`, `LightId`, `ObjectId`, etc.
+- Group system — 64-bit bitmask per object; per-group hide/show/transform
+- Sectioned meshes — single VB + N index ranges (Unreal-style multi-material)
+- Reusable voxel terrain component shared by mesh and ray-march rendering
+- GPU-native scene with dirty-tracked uploads
+
+### Radiant — hybrid material templates
+
+Radiant is a material system that combines hand-authored surface templates with graph-generated WGSL snippets. The GBuffer pass evaluates materials through a shared `radiant_eval_surface()` function containing `// RADIANT_OVERRIDE_SURFACE` markers — external graph compilers inject code at these points without touching the engine.
+
+**How it works:**
+
+- Material class selects the surface archetype: `0` = default PBR, `1+` = custom template
+- Feature flags toggle warp-uniform branches (`HAS_NORMAL_MAP`, `HAS_CLEAR_COAT`, `HAS_SUBSURFACE`, `HAS_ANISOTROPY`, `HAS_ALPHA_TEST`, etc.) at zero runtime cost
+- `class_params = [f32; 4]` provides class-specific float parameters read by templates or graph overrides
+- `graph_hash` references a WGSL snippet from the graph registry that overrides surface outputs at the `RADIANT_OVERRIDE_SURFACE` marker
+
+**Three tiers, one cost model:**
+
+| Tier | Mechanism | PSOs | Use case |
+|------|-----------|------|----------|
+| Tier 1 | Feature flags on the built-in uber-shader | 1 | ~95 % of materials — just toggle flags |
+| Tier 2 | Hand-authored `.wgsl` template + optional graph snippet | Per template | Surface archetypes (clear coat, hair, skin, fabric) |
+| Tier 3 | Full custom WGSL via graph compiler | Per snippet | Unique surfaces that don't fit a template |
+
+The GBuffer pass sorts instances by `(material_class, graph_hash)` at flush time and issues one `multi_draw_indexed_indirect` per PSO. Shader modules are lazily compiled and cached by `(template_id, graph_hash, feature_flags)`. The lighting pass is never touched — all variants write the same GBuffer format.
+
+**External toolchain API:**
+
+```rust
+use helio::radiant::{RadiantGraphRegistry, RadiantTemplateRegistry};
+
+// 1. Register a compiled graph snippet (called by your graph compiler)
+scene.radiant_graphs.register(graph_hash, wgsl_source);
+
+// 2. Load a new surface template — get the pass reference from the renderer
+let template_registry = renderer.find_pass_mut::<GBufferPass>()
+    .map(|p| p.template_registry_mut()).unwrap();
+
+let template_id = template_registry
+    .load_from_file("templates/clear_coat.wgsl").unwrap();
+
+// 3. Set a material to use the template with a specific graph
+scene.set_material_class(material_id,
+    template_id,             // material_class → selects the template
+    graph_hash,              // → selects the graph snippet (0 = none)
+    Some(flags),              // → overrides feature flags (None = keep existing)
+);
+
+// Or — Tier 1 — just toggle flags on the built-in PBR template:
+scene.set_material_class(material_id,
+    0,                       // class 0 = default PBR uber-shader
+    0,                       // no graph snippet
+    Some(FLAG_HAS_NORMAL_MAP | FLAG_ALPHA_TEST),
+);
+```
+
+**Registering templates at runtime:**
+
+```rust
+let reg = renderer.find_pass_mut::<GBufferPass>()
+    .map(|p| p.template_registry_mut()).unwrap();
+
+// From disk — for engine integrators shipping custom surface types
+let id = reg.load_from_file("paths/characters/skin.wgsl").unwrap();
+
+// From a string — for embedded or generated templates
+let id = reg.register_str("my_surface", wgsl_source);
+```
+
+Templates are full WGSL files with `// RADIANT_OVERRIDE_SURFACE` and `// RADIANT_OVERRIDE_END` markers. The graph snippet replaces everything between them. When no graph is present, the markers are removed and the template runs as-authored.
+
+### Pass system
+- 30+ pass crates, each independently versioned
+- Render graph automatically rebuilds on resize (no explicit rebuilder needed)
+- Debug-build tracking catches unwritten resources
+- Automatic CPU/GPU profiling per pass
+- Central crates have zero knowledge of pass types
+
+---
+
+## Pass reference
+
+| Crate | Pass | Description |
+|---|---|---|
+| `helio-pass-depth-prepass` | `DepthPrepassPass` | Early-Z, O(1) CPU |
+| `helio-pass-gbuffer` | `GBufferPass` | GPU-driven G-buffer fill |
+| `helio-pass-deferred-light` | `DeferredLightPass` | BRDF + shadows + GI + tone map |
+| `helio-pass-shadow` | `ShadowPass` | Shadow atlas |
+| `helio-pass-sky` | `SkyPass` | Fullscreen atmospheric background |
+| `helio-pass-virtual-geometry` | `VirtualGeometryPass` | Meshlet cull + LOD |
+| `helio-pass-fxaa` | `FxaaPass` | Fullscreen FXAA |
+| `helio-pass-taa` | `TaaPass` | Temporal AA |
+| `helio-pass-hlfs` | `HlfsPass` | Hybrid lighting |
+| `helio-pass-ssao` | `SsaoPass` | Screen-space ambient occlusion |
+| `helio-pass-hiz` | `HiZBuildPass` | Hi-Z mip chain |
+| `helio-pass-occlusion-cull` | `OcclusionCullPass` | GPU occlusion culling |
+| `helio-pass-debug-overlay` | `DebugOverlayPass` | Text/graph overlay (F2) |
+| `helio-pass-perf-overlay` | `PerfOverlayPass` | GPU performance heatmaps |
+
+Full pass reference, debug view tables, GPU layout docs, and asset pipeline details are available in the crate documentation.
+
+---
+
+## Debug overlay
+
+Press **F2** to toggle the debug overlay — shows FPS, frame timing, and optional user data. The overlay pass includes a `populate` callback hook for custom per-frame data. Press **F3** / **F4** to cycle through debug rendering views (UV, normals, shadow heatmap, LOD heatmap, etc.).
+
+---
+
+## Examples
+
+| Binary | Description |
 |---|---|
-| Core | `render_v2_basic`, `render_v2_sky`, `simple_graph` |
-| Indoor | `indoor_room`, `indoor_corridor`, `indoor_cathedral`, `indoor_server_room` |
-| Outdoor | `outdoor_night`, `outdoor_canyon`, `outdoor_city`, `outdoor_volcano`, `outdoor_rocks` |
-| Systems | `debug_shapes`, `light_benchmark`, `hlfs_benchmark`, `sdf_demo`, `editor_demo` |
-| Assets / flight | `load_fbx`, `load_fbx_embedded`, `ship_flight`, `space_station` |
+| `indoor_cathedral` | Gothic nave with RC GI, stained-glass light shafts |
+| `indoor_cathedral_fxaa` | FXAA anti-aliasing variant |
+| `indoor_cathedral_hlfs` | Hybrid lighting variant |
+| `outdoor_city` | Dense city block at dusk |
+| `outdoor_canyon` | Desert canyon, `Q/E` rotates sun |
+| `space_station` | Massive orbital station |
+| `load_fbx` | Drop-in FBX/glTF/OBJ/USD viewer |
+| `editor_demo` | Interactive scene editor — pick, translate, scale |
+| `editor_demo_mini` | Compact editor with FXAA |
+| `light_benchmark` | 150 simultaneous point lights |
+| `voxel_demo` | Editable voxel terrain rendered as GPU-generated meshlets |
+| `voxel_demo_raymarch` | The same terrain rendered with per-pixel DDA ray marching |
+| `simple_graph` | Minimal single-pass example |
+
+```sh
+cargo run -p examples --bin indoor_cathedral --release
+cargo run -p examples --bin load_fbx --release -- path/to/model.fbx
+```
+
+---
+
+## Asset pipeline
+
+FBX, glTF, OBJ, and USD support via `helio_asset_compat`. Baked AO, lightmaps, reflection probes, and irradiance SH for static geometry. Pre-computed potentially-visible sets for CPU-side culling.
+
+---
+
+## Custom passes
+
+Each pass is a struct implementing the `RenderPass` trait from `helio-core`. Passes register the resources they read and write; the graph validates the DAG at construction time and automatically manages texture pools and barriers.
+
+```rust
+use helio_core::{PrepareContext, PassContext, RenderPass, Result};
+
+struct MyPass { … }
+
+impl RenderPass for MyPass {
+    fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> { … }
+    fn execute(&mut self, ctx: &mut PassContext) -> Result<()> { … }
+}
+
+// Add to a graph builder:
+graph.add_pass(Box::new(MyPass::new(&device)));
+```
+
+---
 
 ## License
 
-[MIT](LICENSE). Vendored wgpu components retain their upstream MIT/Apache-2.0 licenses.
+MIT

@@ -2,7 +2,7 @@
 //!
 //! Implements a camera-centric hierarchical radiance field that achieves O(1) shading cost
 //! relative to light count. Combines Unreal's Megalights-style importance sampling with
-//! a persistent hierarchical light-field clip stack.
+//! a persistent radiance cascade structure.
 //!
 //! Architecture:
 //! 1. Light importance sampling (K samples per pixel)
@@ -11,13 +11,12 @@
 //! 4. Final shading using field + direct samples
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const CLIP_STACK_LEVELS: usize = 4;
-const VOXEL_RESOLUTION: u32 = 32; // Browser-sized 32^3 field per level.
-const SAMPLES_PER_PIXEL: u32 = 2; // Bounded browser memory and compute cost.
-const LIGHT_SAMPLE_BYTES: u64 = 48; // WGSL: two padded vec3s plus one vec4.
+const VOXEL_RESOLUTION: u32 = 128; // 128^3 per level
+const SAMPLES_PER_PIXEL: u32 = 8; // K samples for importance sampling
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -46,8 +45,9 @@ pub struct HlfsPass {
 
     // Resources
     globals_buf: wgpu::Buffer,
+    fallback_shadow_sampler: wgpu::Sampler,
 
-    // Clip-stack: 4 levels of browser-sized 3D RGBA16F textures.
+    // Clip-stack: 4 levels of 3D textures (128^3 RGBA16F each)
     clip_stack_views: Vec<wgpu::TextureView>,
     clip_stack_sampler: wgpu::Sampler,
 
@@ -105,7 +105,7 @@ impl HlfsPass {
             mapped_at_creation: false,
         });
 
-        // Create the four browser-sized clip-stack textures.
+        // Create clip-stack textures (4 levels of 128^3 RGBA16F)
         let mut clip_stack_textures = Vec::new();
         let mut clip_stack_views = Vec::new();
 
@@ -130,10 +130,10 @@ impl HlfsPass {
         }
 
         // Sample buffer: stores K samples per pixel (position, direction, radiance)
-        let sample_count = (width as u64) * (height as u64) * (SAMPLES_PER_PIXEL as u64);
+        let sample_count = (width * height * SAMPLES_PER_PIXEL) as u64;
         let sample_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("HLFS Sample Buffer"),
-            size: sample_count * LIGHT_SAMPLE_BYTES,
+            size: sample_count * 32, // 32 bytes per sample (vec3 pos, vec3 dir, vec4 radiance)
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -692,12 +692,24 @@ impl HlfsPass {
             ..Default::default()
         });
 
+        let fallback_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("HLFS Fallback Shadow Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+
         Self {
             importance_sample_pipeline,
             radiance_inject_pipeline,
             hierarchical_propagate_pipeline,
             final_shade_pipeline,
             globals_buf,
+            fallback_shadow_sampler,
             clip_stack_views,
             clip_stack_sampler,
             sample_buffer,
@@ -779,7 +791,7 @@ impl RenderPass for HlfsPass {
         let globals = HlfsGlobals {
             frame: ctx.frame_num as u32,
             sample_count: SAMPLES_PER_PIXEL,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: ctx.scene.movable_light_count, // Only movable lights (static/stationary are baked)
             screen_width: self.width,
             screen_height: self.height,
             near_field_size: 50.0, // 50m near field
@@ -807,21 +819,17 @@ impl RenderPass for HlfsPass {
         // Shade bind group 0 (clip-stack, pre_aa, lights, shadow, camera).
         // Lazily rebuilt only when any referenced pointer changes (resize, scene realloc).
         let pre_aa = ctx.resources.pre_aa.get().ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "HLFS requires pre_aa (sky + debug layers)".to_string(),
             )
         })?;
 
         let shadow_view = ctx.resources.shadow_atlas.get().ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "HLFS requires shadow_atlas (shadow pass must run first)".to_string(),
             )
         })?;
-        let shadow_sampler = ctx.resources.shadow_sampler.get().ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
-                "HLFS requires shadow_sampler (shadow pass must run first)".to_string(),
-            )
-        })?;
+        let shadow_sampler = ctx.resources.shadow_sampler.get().unwrap_or(&self.fallback_shadow_sampler);
 
         let shade0_key = (
             pre_aa as *const _ as usize,
@@ -898,7 +906,7 @@ impl RenderPass for HlfsPass {
         // Lazily rebuilt only when gbuffer or depth pointers change (resize).
         let gbuffer_opt = ctx.resources.gbuffer.read("HLFS");
         let gbuffer = gbuffer_opt.as_ref().ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
+            helio_core::Error::InvalidPassConfig(
                 "HLFS requires published gbuffer resources".to_string(),
             )
         })?;
@@ -1088,9 +1096,8 @@ impl RenderPass for HlfsPass {
                 });
             pass.set_pipeline(&self.hierarchical_propagate_pipeline);
             pass.set_bind_group(0, self.bind_group_compute_propagate.as_ref().unwrap(), &[]);
-            let workgroups_xy = VOXEL_RESOLUTION.div_ceil(8);
-            let workgroups_z = VOXEL_RESOLUTION.div_ceil(4);
-            pass.dispatch_workgroups(workgroups_xy, workgroups_xy, workgroups_z);
+            let workgroups = VOXEL_RESOLUTION.div_ceil(8);
+            pass.dispatch_workgroups(workgroups, workgroups, workgroups);
         }
 
         // Step 4: Final shading (render pass)

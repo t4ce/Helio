@@ -22,7 +22,7 @@ use bytemuck::{Pod, Zeroable};
 ///     mesh_id:      u32,          //  4 bytes
 ///     material_id:  u32,          //  4 bytes
 ///     flags:        u32,          //  4 bytes
-///     _reserved:     u32,        //  4 bytes
+///     lightmap_index: u32,        //  4 bytes — index into lightmap atlas regions buffer
 /// }
 /// ```
 #[repr(C)]
@@ -40,7 +40,8 @@ pub struct GpuInstanceData {
     pub material_id: u32,
     /// Flags (bit 0 = casts_shadow, bit 1 = receives_shadow)
     pub flags: u32,
-    pub _reserved: u32,
+    /// Index into the lightmap atlas regions buffer (0xFFFFFFFF = no lightmap)
+    pub lightmap_index: u32,
 }
 
 /// Per-instance AABB in world space for GPU culling. 32 bytes.
@@ -62,3 +63,4 @@ pub struct GpuInstanceAabb {
     pub max: [f32; 3],
     pub _pad1: f32,
 }
+

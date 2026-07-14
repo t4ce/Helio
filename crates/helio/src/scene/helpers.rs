@@ -1,7 +1,7 @@
 //! Internal helper functions for scene object management.
 
 use glam::{Mat3, Mat4, Vec3};
-use helio_v3::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
+use helio_core::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
 
 use crate::groups::GroupMask;
 use crate::handles::MeshId;
@@ -126,7 +126,7 @@ pub(super) fn object_gpu_data(
             mesh_id: mesh.slot(),
             material_id: material_slot as u32,
             flags: desc.flags,
-            _reserved: 0,
+            lightmap_index: 0xFFFFFFFF,  // No lightmap by default (populated after bake)
         },
         aabb: sphere_to_aabb(desc.bounds),
         // `first_instance` is set to 0 here; the actual GPU slot is assigned during
@@ -227,3 +227,4 @@ where
         f(texture);
     }
 }
+

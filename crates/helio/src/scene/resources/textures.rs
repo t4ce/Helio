@@ -61,7 +61,7 @@ impl super::super::Scene {
             return Err(SceneError::TextureCapacityExceeded);
         }
 
-        helio_v3::upload::record_upload_bytes(texture.data.len() as u64);
+        helio_core::upload::record_upload_bytes(texture.data.len() as u64);
         let gpu_texture = self.gpu_scene.device.create_texture_with_data(
             &self.gpu_scene.queue,
             &wgpu::TextureDescriptor {
@@ -186,3 +186,4 @@ impl super::super::Scene {
             .unwrap_or(&self.placeholder_sampler)
     }
 }
+

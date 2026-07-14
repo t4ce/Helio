@@ -5,7 +5,7 @@
 //! O(1) CPU execution — single `draw(0..vertex_count, 0..1)`.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const MAX_DEBUG_VERTS: u32 = 65536;
 const MAX_DEBUG_TRIS: u32 = 65536;
@@ -102,7 +102,7 @@ impl DebugPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
+                buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<DebugVertex>() as u64, // 32
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -117,7 +117,7 @@ impl DebugPass {
                             shader_location: 1,
                         },
                     ],
-                })],
+                }],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -152,7 +152,7 @@ impl DebugPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
+                buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<DebugVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -167,7 +167,7 @@ impl DebugPass {
                             shader_location: 1,
                         },
                     ],
-                })],
+                }],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -225,7 +225,7 @@ impl DebugPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(tri_vbl.clone())],
+                buffers: &[tri_vbl.clone()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -254,7 +254,7 @@ impl DebugPass {
                     module: &shader,
                     entry_point: Some("vs_main"),
                     compilation_options: Default::default(),
-                    buffers: &[Some(tri_vbl)],
+                    buffers: &[tri_vbl],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -299,7 +299,7 @@ impl DebugPass {
     pub fn update_lines(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
         let count = verts.len().min(MAX_DEBUG_VERTS as usize);
         if count > 0 {
-            helio_v3::upload::write_buffer(
+            helio_core::upload::write_buffer(
                 queue,
                 &self.vertex_buf,
                 0,
@@ -328,7 +328,7 @@ impl DebugPass {
             return;
         }
         let offset_bytes = (first_vertex * std::mem::size_of::<DebugVertex>()) as u64;
-        helio_v3::upload::write_buffer(
+        helio_core::upload::write_buffer(
             queue,
             &self.vertex_buf,
             offset_bytes,
@@ -347,7 +347,7 @@ impl DebugPass {
     pub fn update_tris(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
         let count = verts.len().min(MAX_DEBUG_TRIS as usize);
         if count > 0 {
-            helio_v3::upload::write_buffer(
+            helio_core::upload::write_buffer(
                 queue,
                 &self.tri_buf,
                 0,

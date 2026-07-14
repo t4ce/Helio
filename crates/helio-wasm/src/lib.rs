@@ -1,4 +1,4 @@
-//! Browser runner for Helio WebGPU applications.
+//! `helio-wasm` — cross-platform WASM wrapper for helio renderer examples.
 //!
 //! # Usage
 //!
@@ -26,20 +26,21 @@
 //!     }
 //! }
 //!
-//! // WASM entry point
+//! // Native entry point
+//! fn main() { launch::<MyDemo>(); }
+//!
+//! // WASM entry point (in helio-web-demos)
+//! #[cfg(target_arch = "wasm32")]
 //! #[wasm_bindgen::prelude::wasm_bindgen(start)]
 //! pub fn run() { launch::<MyDemo>(); }
 //! ```
-
-#[cfg(not(target_arch = "wasm32"))]
-compile_error!("helio-wasm only supports wasm32 browser targets");
 
 mod runner;
 pub use runner::launch;
 
 use std::collections::HashSet;
-pub use winit::event::MouseButton;
 pub use winit::keyboard::KeyCode;
+pub use winit::event::MouseButton;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ pub struct InputState {
     pub mouse_left_just_released: bool,
 }
 
-/// Implement this trait to create a Helio browser application.
+/// Implement this trait to create a helio demo that runs on both native and web.
 pub trait HelioWasmApp: Sized + 'static {
     /// Window/page title.
     fn title() -> &'static str {
@@ -110,3 +111,4 @@ pub trait HelioWasmApp: Sized + 'static {
     /// Called when the window is resized. Override to update projection state.
     fn on_resize(&mut self, _renderer: &mut helio::Renderer, _width: u32, _height: u32) {}
 }
+

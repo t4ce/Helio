@@ -7,24 +7,29 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use helio_v3::scene::GrowableBuffer;
-use helio_v3::GpuScene;
+use helio_core::scene::GrowableBuffer;
+use helio_core::GpuScene;
+use helio_voxel_core::VoxelEdit;
 use wgpu::util::DeviceExt;
 
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
-    LightId, MaterialId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId, VirtualObjectId,
-    WaterHitboxId, WaterVolumeId,
+    LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, SectionedInstanceId,
+    TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId, VoxelVolumeId,
 };
+use crate::radiant::RadiantGraphRegistry;
+use super::voxel::VoxelVolumeRecord;
+use super::types::VoxelVolumeDescriptor;
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::scene::multi_mesh::SectionedInstanceRecord;
 use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
 
+use super::errors::{invalid, Result};
 use super::types::{
-    LightRecord, MaterialRecord, ObjectRecord, TextureRecord, VirtualMeshRecord,
-    VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
+    LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord, TextureRecord,
+    VirtualMeshRecord, VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
 };
 
 /// High-level scene management with persistent GPU-driven state.
@@ -77,6 +82,11 @@ pub struct Scene {
     /// shadow atlas render. Triggers a re-render of the static shadow atlas.
     pub(in crate::scene) static_objects_dirty: bool,
 
+    /// True when static/stationary geometry or lights have been added since the last bake.
+    /// When this is true and a bake was previously configured, the user must explicitly
+    /// call auto_bake() again to rebake the scene with the new static content.
+    pub(in crate::scene) bake_invalidated: bool,
+
     /// True when objects have been added or removed via persistent-mode delta operations.
     /// In persistent mode, insert/remove bypass the full rebuild, so shadow partition
     /// indirect buffers must be explicitly rebuilt on the next flush.
@@ -110,18 +120,40 @@ pub struct Scene {
     /// Dense array of virtual objects (one entry per `insert_virtual_object` call).
     pub(in crate::scene) vg_objects: DenseArena<VirtualObjectRecord, VirtualObjectId>,
 
-    /// Set when VG topology or transforms change; triggers `rebuild_vg_buffers()`.
+    /// Set when VG topology changes; triggers `rebuild_vg_buffers()`.
     pub(in crate::scene) vg_objects_dirty: bool,
 
     /// Monotonically increasing counter forwarded to `VgFrameData::buffer_version`.
     /// The VG pass re-uploads GPU buffers only when this advances.
     pub(in crate::scene) vg_buffer_version: u64,
 
-    /// Flattened meshlet entries for the current VG layout (rebuilt when dirty).
+    // ── Radiant material graph system ──────────────────────────────────────────
+    /// Registry of compiled graph WGSL snippets, keyed by content hash.
+    pub radiant_graphs: RadiantGraphRegistry,
+
+    /// Transform-only changes accumulated until the next scene flush (end exclusive).
+    pub(in crate::scene) vg_instance_dirty_range: Option<(usize, usize)>,
+
+    /// Last transform-only range published to the render pass (end exclusive).
+    pub(in crate::scene) vg_published_instance_dirty_range: Option<(usize, usize)>,
+
+    /// Monotonic version for published transform-only changes.
+    pub(in crate::scene) vg_instance_version: u64,
+
+    /// Unique meshlet entries for virtual meshes referenced by the current VG layout.
     pub(in crate::scene) vg_cpu_meshlets: Vec<libhelio::GpuMeshletEntry>,
 
+    /// Object-level LOD ranges and bounds (one entry per VG object).
+    pub(in crate::scene) vg_cpu_objects: Vec<libhelio::GpuVgObject>,
+
     /// Instance data for all VG objects (one entry per VG object, in order).
-    pub(in crate::scene) vg_cpu_instances: Vec<helio_v3::GpuInstanceData>,
+    pub(in crate::scene) vg_cpu_instances: Vec<helio_core::GpuInstanceData>,
+
+    /// Immutable 64-meshlet expansion spans for the second GPU cull stage.
+    pub(in crate::scene) vg_cpu_work_items: Vec<libhelio::GpuVgWorkItem>,
+
+    /// Exact worst-case number of draws after choosing one LOD per object.
+    pub(in crate::scene) vg_max_draw_count: u32,
 
     // ── Water volumes ─────────────────────────────────────────────────────────
     /// Water volumes (dense array)
@@ -142,6 +174,15 @@ pub struct Scene {
 
     /// Dirty range of water hitboxes that need GPU upload.
     pub(in crate::scene) water_hitboxes_dirty_range: Option<(usize, usize)>,
+
+    // ── Post-process volumes ─────────────────────────────────────────────────────
+    /// Post-process volumes (dense array)
+    pub(in crate::scene) pp_volumes: DenseArena<PostProcessVolumeRecord, PostProcessVolumeId>,
+
+    pub(in crate::scene) pp_volumes_dirty: bool,
+
+    pub(in crate::scene) pp_volumes_dirty_range: Option<(usize, usize)>,
+
     // ── Multi-material (sectioned) meshes ─────────────────────────────────────
     /// Sectioned mesh assets: one record per `insert_sectioned_mesh` call.
     /// Each record stores N `MeshId`s (one per section) all sharing the same vertex buffer.
@@ -155,6 +196,10 @@ pub struct Scene {
     /// Reverse lookup: given any section's `ObjectId`, find the owning `SectionedInstanceId`.
     /// Populated by `insert_sectioned_object` and cleaned up by `remove_sectioned_object`.
     pub(in crate::scene) section_to_instance: HashMap<ObjectId, SectionedInstanceId>,
+
+    // ── Voxel volumes ──────────────────────────────────────────────────────────
+    /// Voxel volumes (dense array)
+    pub(in crate::scene) voxel_volumes: DenseArena<VoxelVolumeRecord, VoxelVolumeId>,
 }
 
 impl Scene {
@@ -190,7 +235,7 @@ impl Scene {
     /// let scene = Scene::new(device, queue);
     /// ```
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
-        helio_v3::upload::record_upload_bytes(4);
+        helio_core::upload::record_upload_bytes(4);
         let placeholder_texture = device.create_texture_with_data(
             &queue,
             &wgpu::TextureDescriptor {
@@ -242,6 +287,7 @@ impl Scene {
             objects_dirty: true,             // rebuild on first flush
             objects_layout_optimized: false, // start in persistent mode
             static_objects_dirty: true,      // rebuild static shadow atlas on first flush
+            bake_invalidated: false,         // no bake configured yet
             shadow_partition_dirty: false,   // full rebuild on first flush handles this
             prev_view_proj: glam::Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
@@ -253,17 +299,97 @@ impl Scene {
             vg_objects: DenseArena::new(),
             vg_objects_dirty: false,
             vg_buffer_version: 0,
+            vg_instance_dirty_range: None,
+            vg_published_instance_dirty_range: None,
+            vg_instance_version: 0,
             vg_cpu_meshlets: Vec::new(),
+            vg_cpu_objects: Vec::new(),
             vg_cpu_instances: Vec::new(),
+            vg_cpu_work_items: Vec::new(),
+            vg_max_draw_count: 0,
+            radiant_graphs: RadiantGraphRegistry::new(),
             water_volumes: DenseArena::new(),
             water_volumes_dirty: false,
             water_volumes_dirty_range: None,
             water_hitboxes: DenseArena::new(),
             water_hitboxes_dirty: false,
             water_hitboxes_dirty_range: None,
+            pp_volumes: DenseArena::new(),
+            pp_volumes_dirty: false,
+            pp_volumes_dirty_range: None,
             multi_meshes: SparsePool::new(),
             sectioned_instances: SparsePool::new(),
             section_to_instance: HashMap::new(),
+            voxel_volumes: DenseArena::new(),
         }
+    }
+
+    pub fn insert_voxel_volume(&mut self, descriptor: VoxelVolumeDescriptor) -> Result<VoxelVolumeId> {
+        let gpu_slot = self.voxel_volumes.len() as u32;
+        let id = self.voxel_volumes.insert_with(|id| {
+            VoxelVolumeRecord::new(id, gpu_slot, &descriptor)
+        });
+
+        if let Some(record) = self.voxel_volumes.get(id) {
+            record.upload_to_gpu(&mut self.gpu_scene, gpu_slot);
+        }
+
+        self.gpu_scene.voxel_volume_count = self.voxel_volumes.len() as u32;
+        Ok(id)
+    }
+
+    pub fn remove_voxel_volume(&mut self, id: VoxelVolumeId) -> Result<()> {
+        self.voxel_volumes.remove(id);
+        self.gpu_scene.voxel_volume_count = self.voxel_volumes.len() as u32;
+        Ok(())
+    }
+
+    /// Set the material class and graph hash for an existing material.
+    ///
+    /// `material_class` selects the surface archetype template (0 = default PBR).
+    /// `graph_hash` selects a WGSL snippet from the graph registry (0 = none).
+    /// `feature_flags` overrides the material's feature flags (pass `None` to keep existing).
+    pub fn set_material_class(
+        &mut self,
+        material_id: MaterialId,
+        material_class: u32,
+        graph_hash: u64,
+        feature_flags: Option<u32>,
+    ) -> Result<()> {
+        let Some((slot, record)) = self.materials.get_mut_with_slot(material_id) else {
+            return Err(invalid("material"));
+        };
+        record.gpu.material_class = material_class;
+        record.graph_hash = graph_hash;
+        if let Some(flags) = feature_flags {
+            record.gpu.flags = flags;
+        }
+        let updated = self.gpu_scene.materials.update(slot, record.gpu);
+        debug_assert!(updated);
+        Ok(())
+    }
+
+    /// Update only the class_params of a material (no texture revalidation).
+    pub fn update_material_class_params(&mut self, material_id: MaterialId, params: [f32; 4]) -> Result<()> {
+        let Some((slot, record)) = self.materials.get_mut_with_slot(material_id) else {
+            return Err(invalid("material"));
+        };
+        record.gpu.class_params = params;
+        self.gpu_scene.materials.update(slot, record.gpu);
+        Ok(())
+    }
+
+    pub fn edit_voxel_volume(&mut self, id: VoxelVolumeId, edit: VoxelEdit) -> Result<()> {
+        if let Some(record) = self.voxel_volumes.get_mut(id) {
+            record.edit(&edit);
+            record.push_edits_to_gpu(&mut self.gpu_scene, &[edit]);
+            Ok(())
+        } else {
+            Err(invalid("voxel volume"))
+        }
+    }
+
+    pub fn voxel_volume(&self, id: VoxelVolumeId) -> Option<&VoxelVolumeRecord> {
+        self.voxel_volumes.get(id)
     }
 }

@@ -1,5 +1,5 @@
 //! Stub — water surface rendering is handled by helio-pass-water-sim.
-use helio_v3::{PassContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, RenderPass, Result as HelioResult};
 
 pub struct WaterSurfacePass;
 

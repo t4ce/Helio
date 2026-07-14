@@ -5,7 +5,7 @@
 //! with flush operations.
 
 use bytemuck::Zeroable;
-use libhelio::GpuShadowMatrix;
+use libhelio::{GpuLight, GpuShadowMatrix};
 
 use crate::scene::Scene;
 
@@ -72,6 +72,34 @@ impl Scene {
     /// renderer.render(&scene, target)?;
     /// ```
     pub fn flush(&mut self) {
+        // ── Rebuild lights buffer to only contain movable lights ─────────────
+        // Static/stationary lights are baked and should not contribute to real-time lighting.
+        // This dramatically improves performance when scenes have many baked lights.
+        {
+            let light_rec_count = self.lights.dense_len();
+            let mut movable_lights: Vec<GpuLight> = Vec::with_capacity(light_rec_count);
+
+            for i in 0..light_rec_count {
+                if let Some(record) = self.lights.get_dense(i) {
+                    if record.movability.can_move() {
+                        movable_lights.push(record.gpu);
+                    }
+                }
+            }
+
+            // Replace the lights buffer with only movable lights
+            self.gpu_scene.lights.set_data(movable_lights.clone());
+            self.gpu_scene.movable_light_count = movable_lights.len() as u32;
+
+            if movable_lights.len() < light_rec_count {
+                log::trace!(
+                    "[helio] Filtered lights for runtime: {} movable, {} static/stationary (baked)",
+                    movable_lights.len(),
+                    light_rec_count - movable_lights.len()
+                );
+            }
+        }
+
         // Assign shadow atlas slots to the highest-importance shadow-casting lights.
         //
         // Problem with sequential assignment: the first N lights inserted always win the
@@ -186,10 +214,14 @@ impl Scene {
                         self.gpu_scene.camera.position(),
                         DIRECTIONAL_CAMERA_SNAP_METERS,
                     );
-                    let snapped_cam_forward =
-                        quantize_f32s(self.gpu_scene.camera.forward(), DIRECTIONAL_FORWARD_SNAP);
+                    let snapped_cam_forward = quantize_f32s(
+                        self.gpu_scene.camera.forward(),
+                        DIRECTIONAL_FORWARD_SNAP,
+                    );
 
-                    base_hash ^ fnv1a_f32s(&snapped_cam_pos) ^ fnv1a_f32s(&snapped_cam_forward)
+                    base_hash
+                        ^ fnv1a_f32s(&snapped_cam_pos)
+                        ^ fnv1a_f32s(&snapped_cam_forward)
                 } else {
                     base_hash
                 };
@@ -222,11 +254,67 @@ impl Scene {
             self.rebuild_shadow_partition_buffers();
             self.shadow_partition_dirty = false;
         }
-        // Rebuild virtual geometry CPU buffers when VG topology or transforms changed.
+        // Topology changes rebuild all mirrors. Transform-only changes publish
+        // one bounded instance range without touching descriptors or work spans.
         if self.vg_objects_dirty {
             self.rebuild_vg_buffers();
             self.vg_objects_dirty = false;
+        } else if let Some(range) = self.vg_instance_dirty_range.take() {
+            self.vg_published_instance_dirty_range = Some(range);
+            self.vg_instance_version = self.vg_instance_version.wrapping_add(1);
         }
+
+        // ── Voxel volume flush ───────────────────────────────────────────────
+        {
+            let mut any_dirty = false;
+            for (_id, record) in self.voxel_volumes.iter_mut() {
+                if record.dirty {
+                    record.upload_to_gpu(&mut self.gpu_scene, record.gpu_slot);
+                    record.dirty = false;
+                    any_dirty = true;
+                }
+            }
+            if any_dirty {
+                self.gpu_scene.voxel_volumes_generation += 1;
+            }
+        }
+
+        // ── Material graph hashes ─────────────────────────────────────────────
+        // Build a slot-indexed Vec from the SparsePool so the GBuffer pass can
+        // look up graph_hash by material_id (slot index) for PSO selection.
+        {
+            let slot_count = self.materials.slot_len();
+            let mut hashes = vec![0u64; slot_count];
+            for slot in 0..slot_count {
+                if let Some(record) = self.materials.get_by_slot(slot) {
+                    hashes[slot] = record.graph_hash;
+                }
+            }
+            self.gpu_scene.material_graph_hashes = hashes;
+        }
+
+        // ── Graph WGSL snippets ────────────────────────────────────────────────
+        // Sync the global snippet registry into GpuScene so passes (GBuffer) can
+        // look up WGSL source by hash when building PSOs.
+        {
+            let registry = &self.radiant_graphs;
+            // Collect all unique hashes referenced by any material.
+            // This is a fast-path: copy the whole registry rather than
+            // diffing, because the registry is small (typically << 100 entries).
+            let mut snippets = std::collections::HashMap::new();
+            for slot in 0..self.materials.slot_len() {
+                if let Some(record) = self.materials.get_by_slot(slot) {
+                    let hash = record.graph_hash;
+                    if hash != 0 && !snippets.contains_key(&hash) {
+                        if let Some(wgsl) = registry.get(hash) {
+                            snippets.insert(hash, wgsl.to_owned());
+                        }
+                    }
+                }
+            }
+            self.gpu_scene.graph_wgsl_snippets = snippets;
+        }
+
         self.gpu_scene.flush();
     }
 }

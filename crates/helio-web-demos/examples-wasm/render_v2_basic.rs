@@ -43,18 +43,10 @@ impl HelioWasmApp for Demo {
             0.0,
         ));
 
-        let cube1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.5, 0.0], 0.5)));
-        let cube2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4)));
-        let cube3 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([2.0, 0.3, 0.5], 0.3)));
-        let ground = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)));
+        let cube1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.5, 0.0], 0.5)));
+        let cube2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4)));
+        let cube3 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([2.0, 0.3, 0.5], 0.3)));
+        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)));
 
         let _ = insert_object(renderer, cube1, mat, glam::Mat4::IDENTITY, 0.5);
         let _ = insert_object(renderer, cube2, mat, glam::Mat4::IDENTITY, 0.4);
@@ -63,30 +55,11 @@ impl HelioWasmApp for Demo {
 
         let light_p0 = renderer
             .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [0.0, 2.2, 0.0],
-                [1.0, 0.55, 0.15],
-                6.0,
-                5.0,
-            )))
+            .insert_actor(helio::SceneActor::light(point_light([0.0, 2.2, 0.0], [1.0, 0.55, 0.15], 6.0, 5.0)))
             .as_light()
             .expect("insert_actor returned non-Light for light actor");
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [-3.5, 2.0, -1.5],
-                [0.25, 0.5, 1.0],
-                5.0,
-                6.0,
-            )));
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [3.5, 1.5, 1.5],
-                [1.0, 0.3, 0.5],
-                5.0,
-                6.0,
-            )));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-3.5, 2.0, -1.5], [0.25, 0.5, 1.0], 5.0, 6.0)));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([3.5, 1.5, 1.5], [1.0, 0.3, 0.5], 5.0, 6.0)));
 
         Self {
             cube1,
@@ -137,18 +110,19 @@ impl HelioWasmApp for Demo {
 
         // Animate light p0
         let p0 = [0.0_f32, 2.2 + (elapsed * 0.7).sin() * 0.3, 0.0];
-        let _ = renderer
-            .scene_mut()
-            .update_light(self.light_p0, point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
+        let _ = renderer.scene_mut().update_light(self.light_p0, point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
 
         Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + fwd,
             Vec3::Y,
             std::f32::consts::FRAC_PI_4,
-            renderer.output_width() as f32 / renderer.output_height().max(1) as f32,
+            1280.0 / 720.0,
             0.1,
             200.0,
         )
     }
 }
+
+
+
