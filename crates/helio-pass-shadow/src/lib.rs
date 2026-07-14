@@ -217,7 +217,7 @@ impl ShadowPass {
                 compilation_options: Default::default(),
                 // Shared mesh vertex buffer layout (stride = 40 bytes, matches GBuffer pass).
                 // Only position (Float32x3 at offset 0) is needed for depth projection.
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: 40,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[wgpu::VertexAttribute {
@@ -225,7 +225,7 @@ impl ShadowPass {
                         offset: 0,
                         shader_location: 0,
                     }],
-                }],
+                })],
             },
             // Depth-only: no colour outputs, no fragment shader.
             // The GPU writes depth from the vertex clip position automatically.
@@ -313,13 +313,16 @@ impl ShadowPass {
             mapped_at_creation: true,
         });
         {
-            let mut map = clear_indirect_buf.slice(..).get_mapped_range_mut();
+            let mut map = clear_indirect_buf
+                .slice(..)
+                .get_mapped_range_mut()
+                .expect("clear indirect buffer should be mapped");
             for i in 0..MAX_SHADOW_FACES {
                 let off = i * 16;
                 // vertex_count = 3
-                map[off..off + 4].copy_from_slice(&3u32.to_ne_bytes());
+                map.slice(off..off + 4).copy_from_slice(&3u32.to_ne_bytes());
                 // instance_count = 1
-                map[off + 4..off + 8].copy_from_slice(&1u32.to_ne_bytes());
+                map.slice(off + 4..off + 8).copy_from_slice(&1u32.to_ne_bytes());
                 // first_vertex = 0, first_instance = 0 (already zero from wgpu init)
             }
         }
@@ -333,12 +336,16 @@ impl ShadowPass {
             mapped_at_creation: true,
         });
         {
-            let mut map = face_idx_buf.slice(..).get_mapped_range_mut();
+            let mut map = face_idx_buf
+                .slice(..)
+                .get_mapped_range_mut()
+                .expect("face index buffer should be mapped");
             for i in 0..MAX_SHADOW_FACES {
                 let offset = i * FACE_BUF_STRIDE as usize;
                 // Write the face index as a little-endian u32; the rest of the 256-byte
                 // slot is zero-initialised by wgpu (mapped buffers are zeroed).
-                map[offset..offset + 4].copy_from_slice(&(i as u32).to_ne_bytes());
+                map.slice(offset..offset + 4)
+                    .copy_from_slice(&(i as u32).to_ne_bytes());
             }
         }
         face_idx_buf.unmap();
@@ -764,4 +771,3 @@ impl RenderPass for ShadowPass {
         Ok(())
     }
 }
-

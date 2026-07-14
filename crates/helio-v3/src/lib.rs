@@ -124,7 +124,11 @@
 //!     // graph.add_pass(Box::new(DeferredLightPass::new(&device)));
 //!
 //!     // Render loop
-//!     // let target = surface.get_current_texture().unwrap();
+//!     // let target = match surface.get_current_texture() {
+//!     //     wgpu::CurrentSurfaceTexture::Success(target)
+//!     //     | wgpu::CurrentSurfaceTexture::Suboptimal(target) => target,
+//!     //     _ => return,
+//!     // };
 //!     // let view = target.texture.create_view(&Default::default());
 //!     // graph.execute(&scene, &view, &depth_view).unwrap();
 //! }

@@ -1280,6 +1280,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-set"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
+dependencies = [
+ "bit-vec 0.9.1",
+]
+
+[[package]]
 name = "bit-vec"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1293,6 +1302,12 @@ checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "bit-vec"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
 
 [[package]]
 name = "bitflags"
@@ -1510,6 +1525,16 @@ name = "codespan-reporting"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
+dependencies = [
+ "serde",
+ "unicode-width",
+]
+
+[[package]]
+name = "codespan-reporting"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
@@ -2108,7 +2133,7 @@ dependencies = [
  "rapier3d 0.24.0",
  "rapier_testbed3d",
  "salva3d",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
  "winit",
 ]
 
@@ -2569,6 +2594,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash 0.2.0",
+]
+
+[[package]]
 name = "heapless"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2623,7 +2657,7 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "web-time",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
  "windows 0.62.2",
 ]
 
@@ -2643,7 +2677,7 @@ dependencies = [
  "solid-rs",
  "solid-usd",
  "thiserror 2.0.18",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2661,7 +2695,7 @@ dependencies = [
  "pollster 0.4.0",
  "serde",
  "thiserror 2.0.18",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2671,7 +2705,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2681,7 +2715,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2691,7 +2725,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2701,7 +2735,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2711,7 +2745,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2722,7 +2756,7 @@ dependencies = [
  "helio-v3",
  "libhelio",
  "log",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2732,7 +2766,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2743,7 +2777,7 @@ dependencies = [
  "helio-v3",
  "libhelio",
  "log",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2754,7 +2788,7 @@ dependencies = [
  "helio-v3",
  "libhelio",
  "log",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2765,7 +2799,7 @@ dependencies = [
  "glam 0.33.0",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2775,7 +2809,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2785,7 +2819,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2795,7 +2829,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2805,7 +2839,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2815,7 +2849,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2827,7 +2861,7 @@ dependencies = [
  "helio-v3",
  "libhelio",
  "log",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2838,7 +2872,7 @@ dependencies = [
  "helio-v3",
  "libhelio",
  "log",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2848,7 +2882,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2858,7 +2892,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2868,7 +2902,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2879,7 +2913,7 @@ dependencies = [
  "helio-v3",
  "libhelio",
  "log",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2889,7 +2923,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2899,7 +2933,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2909,7 +2943,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2919,7 +2953,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2929,7 +2963,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2941,7 +2975,7 @@ dependencies = [
  "helio-v3",
  "libhelio",
  "log",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2951,7 +2985,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2960,7 +2994,7 @@ version = "0.1.0"
 dependencies = [
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2971,7 +3005,7 @@ dependencies = [
  "helio-v3",
  "libhelio",
  "log",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2980,7 +3014,7 @@ version = "0.1.0"
 dependencies = [
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2990,7 +3024,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -2999,7 +3033,7 @@ version = "0.1.0"
 dependencies = [
  "helio-v3",
  "libhelio",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -3016,7 +3050,7 @@ dependencies = [
  "log",
  "pollster 0.4.0",
  "thiserror 2.0.18",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -3028,7 +3062,7 @@ dependencies = [
  "libhelio",
  "pollster 0.4.0",
  "thiserror 2.0.18",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -3046,7 +3080,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
  "winit",
 ]
 
@@ -3064,7 +3098,7 @@ dependencies = [
  "helio-wasm",
  "log",
  "wasm-bindgen",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -3373,11 +3407,12 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.91"
+version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b49715b7073f385ba4bc528e5747d02e66cb39c6146efb66b781f131f0fb399c"
+checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
 dependencies = [
- "once_cell",
+ "cfg-if",
+ "futures-util",
  "wasm-bindgen",
 ]
 
@@ -3425,7 +3460,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.0",
- "wgpu 28.0.0",
+ "wgpu 30.0.0",
 ]
 
 [[package]]
@@ -3652,6 +3687,40 @@ dependencies = [
  "termcolor",
  "thiserror 2.0.18",
  "unicode-ident",
+]
+
+[[package]]
+name = "naga"
+version = "30.0.0"
+dependencies = [
+ "arrayvec",
+ "bit-set 0.10.0",
+ "bitflags 2.11.0",
+ "cfg-if",
+ "cfg_aliases 0.2.1",
+ "codespan-reporting 0.13.1",
+ "half",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "libm",
+ "log",
+ "naga-types",
+ "num-traits",
+ "once_cell",
+ "rustc-hash 1.1.0",
+ "spirv 0.4.0+sdk-1.4.341.0",
+ "thiserror 2.0.18",
+ "unicode-ident",
+]
+
+[[package]]
+name = "naga-types"
+version = "30.0.0"
+dependencies = [
+ "hashbrown 0.17.1",
+ "indexmap",
+ "rustc-hash 1.1.0",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4266,6 +4335,7 @@ dependencies = [
  "bitflags 2.11.0",
  "objc2 0.6.4",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-metal 0.3.2",
 ]
@@ -5423,6 +5493,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spirv"
+version = "0.4.0+sdk-1.4.341.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9571ea910ebd84c86af4b3ed27f9dbdc6ad06f17c5f96146b2b671e2976744f"
+dependencies = [
+ "bitflags 2.11.0",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5972,9 +6051,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.114"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6532f9a5c1ece3798cb1c2cfdba640b9b3ba884f5db45973a6f442510a87d38e"
+checksum = "4b067c0c11094aef6b7a801c1e34a26affafdf3d051dba08456b868789aaf9a4"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -5985,23 +6064,19 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.64"
+version = "0.4.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9c5522b3a28661442748e09d40924dfb9ca614b21c00d3fd135720e48b67db8"
+checksum = "c62df1340f32221cb9c54d6a27b030e3dba64361d4a95bed55f9aacb44da291d"
 dependencies = [
- "cfg-if",
- "futures-util",
  "js-sys",
- "once_cell",
  "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.114"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18a2d50fcf105fb33bb15f00e7a77b772945a2ee45dcf454961fd843e74c18e6"
+checksum = "167ce5e579f6bcf889c4f7175a8a5a585de84e8ff93976ce393efa5f2837aab1"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -6009,9 +6084,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.114"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03ce4caeaac547cdf713d280eda22a730824dd11e6b8c3ca9e42247b25c631e3"
+checksum = "f3997c7839262f4ef12cf90b818d6340c18e80f263f1a94bf157d0ec4420380e"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -6022,9 +6097,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.114"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75a326b8c223ee17883a4251907455a2431acc2791c98c26279376490c378c16"
+checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
 ]
@@ -6140,9 +6215,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.91"
+version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "854ba17bb104abfb26ba36da9729addc7ce7f06f5c0f90f3c391f8461cca21f9"
+checksum = "8622dcb61c0bcc9fffa6938bed81210af2da9a7e4a1a834b2e37a59b6dfb6141"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -6217,9 +6292,31 @@ dependencies = [
  "cfg_aliases 0.2.1",
  "document-features",
  "hashbrown 0.16.1",
+ "log",
+ "portable-atomic",
+ "profiling",
+ "raw-window-handle",
+ "smallvec",
+ "static_assertions",
+ "wgpu-core 28.0.0",
+ "wgpu-hal 28.0.0",
+ "wgpu-types 28.0.0",
+]
+
+[[package]]
+name = "wgpu"
+version = "30.0.0"
+dependencies = [
+ "arrayvec",
+ "bitflags 2.11.0",
+ "bytemuck",
+ "cfg-if",
+ "cfg_aliases 0.2.1",
+ "document-features",
+ "hashbrown 0.17.1",
  "js-sys",
  "log",
- "naga 28.0.0",
+ "naga 30.0.0",
  "portable-atomic",
  "profiling",
  "raw-window-handle",
@@ -6228,9 +6325,9 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "wgpu-core 28.0.0",
- "wgpu-hal 28.0.0",
- "wgpu-types 28.0.0",
+ "wgpu-core 30.0.0",
+ "wgpu-hal 30.0.0",
+ "wgpu-types 30.0.0",
 ]
 
 [[package]]
@@ -6282,10 +6379,41 @@ dependencies = [
  "rustc-hash 1.1.0",
  "smallvec",
  "thiserror 2.0.18",
- "wgpu-core-deps-apple",
- "wgpu-core-deps-windows-linux-android",
+ "wgpu-core-deps-apple 28.0.0",
+ "wgpu-core-deps-windows-linux-android 28.0.0",
  "wgpu-hal 28.0.0",
  "wgpu-types 28.0.0",
+]
+
+[[package]]
+name = "wgpu-core"
+version = "30.0.0"
+dependencies = [
+ "arrayvec",
+ "bit-set 0.10.0",
+ "bit-vec 0.9.1",
+ "bitflags 2.11.0",
+ "bytemuck",
+ "cfg_aliases 0.2.1",
+ "document-features",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "log",
+ "naga 30.0.0",
+ "naga-types",
+ "once_cell",
+ "parking_lot",
+ "portable-atomic",
+ "profiling",
+ "raw-window-handle",
+ "rustc-hash 1.1.0",
+ "smallvec",
+ "thiserror 2.0.18",
+ "wgpu-core-deps-apple 30.0.0",
+ "wgpu-core-deps-windows-linux-android 30.0.0",
+ "wgpu-hal 30.0.0",
+ "wgpu-naga-bridge",
+ "wgpu-types 30.0.0",
 ]
 
 [[package]]
@@ -6297,11 +6425,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgpu-core-deps-apple"
+version = "30.0.0"
+dependencies = [
+ "wgpu-hal 30.0.0",
+]
+
+[[package]]
 name = "wgpu-core-deps-windows-linux-android"
 version = "28.0.0"
 source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?rev=fce5b80e8017304449124b12637ec324417e40c8#fce5b80e8017304449124b12637ec324417e40c8"
 dependencies = [
  "wgpu-hal 28.0.0",
+]
+
+[[package]]
+name = "wgpu-core-deps-windows-linux-android"
+version = "30.0.0"
+dependencies = [
+ "wgpu-hal 30.0.0",
 ]
 
 [[package]]
@@ -6393,6 +6535,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgpu-hal"
+version = "30.0.0"
+dependencies = [
+ "android_system_properties",
+ "arrayvec",
+ "ash",
+ "bit-set 0.10.0",
+ "bitflags 2.11.0",
+ "block2 0.6.2",
+ "bytemuck",
+ "cfg-if",
+ "cfg_aliases 0.2.1",
+ "gpu-allocator 0.28.0",
+ "hashbrown 0.17.1",
+ "libc",
+ "libloading",
+ "log",
+ "naga 30.0.0",
+ "naga-types",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "once_cell",
+ "ordered-float",
+ "parking_lot",
+ "portable-atomic",
+ "portable-atomic-util",
+ "profiling",
+ "range-alloc",
+ "raw-window-handle",
+ "raw-window-metal",
+ "renderdoc-sys",
+ "smallvec",
+ "static_assertions",
+ "thiserror 2.0.18",
+ "wgpu-naga-bridge",
+ "wgpu-types 30.0.0",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+]
+
+[[package]]
+name = "wgpu-naga-bridge"
+version = "30.0.0"
+dependencies = [
+ "naga 30.0.0",
+ "wgpu-types 30.0.0",
+]
+
+[[package]]
 name = "wgpu-types"
 version = "23.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6410,9 +6605,21 @@ source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?rev=fce5b80e801730444912
 dependencies = [
  "bitflags 2.11.0",
  "bytemuck",
- "js-sys",
  "log",
  "raw-window-handle",
+]
+
+[[package]]
+name = "wgpu-types"
+version = "30.0.0"
+dependencies = [
+ "bitflags 2.11.0",
+ "bytemuck",
+ "js-sys",
+ "log",
+ "naga-types",
+ "raw-window-handle",
+ "static_assertions",
  "web-sys",
 ]
 

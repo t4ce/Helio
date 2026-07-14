@@ -33,7 +33,7 @@ use winit::{
 // ── constants ─────────────────────────────────────────────────────────────────
 
 const LOOK_SENS: f32 = 0.002;
-const FLY_SPEED: f32 = 5.0;
+const FLY_SPEED: f32 = 500.0;
 const DRAG: f32 = 8.0;
 
 // ── app ───────────────────────────────────────────────────────────────────────
@@ -186,7 +186,7 @@ impl ApplicationHandler for App {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(event_loop.owned_display_handle()))
         });
         let surface = instance
             .create_surface(window.clone())
@@ -195,6 +195,7 @@ impl ApplicationHandler for App {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .expect("no adapter");
         let (device, queue) =
@@ -222,6 +223,7 @@ impl ApplicationHandler for App {
                 format: surface_format,
                 width: size.width,
                 height: size.height,
+                color_space: wgpu::SurfaceColorSpace::Auto,
                 present_mode: wgpu::PresentMode::Fifo,
                 alpha_mode: caps.alpha_modes[0],
                 view_formats: vec![],
@@ -324,6 +326,7 @@ impl ApplicationHandler for App {
                         format: state.surface_format,
                         width: size.width,
                         height: size.height,
+                        color_space: wgpu::SurfaceColorSpace::Auto,
                         present_mode: wgpu::PresentMode::Fifo,
                         alpha_mode: wgpu::CompositeAlphaMode::Opaque,
                         view_formats: vec![],
@@ -412,8 +415,8 @@ impl ApplicationHandler for App {
 
                 // ── Render ────────────────────────────────────────────────────
                 let output = match state.surface.get_current_texture() {
-                    Ok(t) => t,
-                    Err(e) => {
+                    wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                    e => {
                         log::warn!("surface error: {:?}", e);
                         return;
                     }
@@ -424,7 +427,7 @@ impl ApplicationHandler for App {
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }
-                output.present();
+                state.renderer.present(output);
             }
 
             _ => {}

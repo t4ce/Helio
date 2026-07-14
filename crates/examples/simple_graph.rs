@@ -143,7 +143,7 @@ impl ApplicationHandler for App {
         );
 
         // ── wgpu ──────────────────────────────────────────────────────────────
-        let instance = wgpu::Instance::default();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(event_loop.owned_display_handle())));
         let surface = instance
             .create_surface(window.clone())
             .expect("create surface");
@@ -151,6 +151,7 @@ impl ApplicationHandler for App {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .expect("no adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -177,6 +178,7 @@ impl ApplicationHandler for App {
                 format: surface_format,
                 width: size.width,
                 height: size.height,
+                color_space: wgpu::SurfaceColorSpace::Auto,
                 present_mode: wgpu::PresentMode::Fifo,
                 alpha_mode: caps.alpha_modes[0],
                 view_formats: vec![],
@@ -238,6 +240,7 @@ impl ApplicationHandler for App {
                         format: state.surface_format,
                         width: size.width,
                         height: size.height,
+                        color_space: wgpu::SurfaceColorSpace::Auto,
                         present_mode: wgpu::PresentMode::Fifo,
                         alpha_mode: wgpu::CompositeAlphaMode::Opaque,
                         view_formats: vec![],
@@ -292,8 +295,8 @@ impl ApplicationHandler for App {
                 let camera = state.camera(size.width, size.height);
 
                 let output = match state.surface.get_current_texture() {
-                    Ok(t) => t,
-                    Err(e) => {
+                    wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                    e => {
                         log::warn!("surface error: {:?}", e);
                         return;
                     }
@@ -304,7 +307,7 @@ impl ApplicationHandler for App {
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }
-                output.present();
+                state.renderer.present(output);
             }
 
             _ => {}

@@ -15,6 +15,11 @@ use crate::scene::Camera;
 use super::renderer_impl::{Renderer, HALTON_JITTER};
 
 impl Renderer {
+    /// Presents a rendered surface texture on this renderer's queue.
+    pub fn present(&self, texture: wgpu::SurfaceTexture) {
+        self.queue.present(texture);
+    }
+
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
         if let Some((w, h)) = self.pending_resize.take() {
             self.apply_resize_now(w, h);
@@ -662,9 +667,11 @@ impl Renderer {
         if self.owns_device {
             let staging_slice = self.cull_stats_staging.slice(..);
             staging_slice.map_async(wgpu::MapMode::Read, |_| {});
-            self.device.poll(wgpu::PollType::wait_indefinitely());
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
             {
-                let mapped = staging_slice.get_mapped_range();
+                let mapped = staging_slice
+                    .get_mapped_range()
+                    .expect("capture staging buffer should be mapped");
                 if mapped.len() >= 32 {
                     let ptr = mapped.as_ptr() as *const u32;
                     self.cull_stats = unsafe { std::ptr::read_unaligned(ptr.cast()) };

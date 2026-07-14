@@ -202,7 +202,10 @@ impl SdfPass {
                 mapped_at_creation: true,
             });
             let template_data: Vec<u32> = (0..level_count).flat_map(|_| [0u32, 1, 1]).collect();
-            buf.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&template_data));
+            buf.slice(..)
+                .get_mapped_range_mut()
+                .expect("indirect template buffer should be mapped")
+                .copy_from_slice(bytemuck::cast_slice(&template_data));
             buf.unmap();
             buf
         };

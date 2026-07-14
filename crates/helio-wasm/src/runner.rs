@@ -225,6 +225,7 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
                         format: state.surface_format,
                         width: new_size.width,
                         height: new_size.height,
+                        color_space: wgpu::SurfaceColorSpace::Auto,
                         present_mode: wgpu::PresentMode::Fifo,
                         desired_maximum_frame_latency: 2,
                         alpha_mode: wgpu::CompositeAlphaMode::Auto,
@@ -284,7 +285,7 @@ async fn init_wgpu<T: HelioWasmApp>(
         #[cfg(target_arch = "wasm32")]
         backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
         flags: wgpu::InstanceFlags::empty(),
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()))
     });
 
     let surface = instance
@@ -296,6 +297,7 @@ async fn init_wgpu<T: HelioWasmApp>(
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         })
         .await
         .expect("helio-wasm: no suitable wgpu adapter");
@@ -333,6 +335,7 @@ async fn init_wgpu<T: HelioWasmApp>(
             format: surface_format,
             width: size.width,
             height: size.height,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             present_mode: wgpu::PresentMode::Fifo,
             desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
@@ -402,8 +405,8 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
     let camera = state.demo.update(&mut state.renderer, dt, elapsed, &input);
 
     let output = match state.surface.get_current_texture() {
-        Ok(t) => t,
-        Err(e) => {
+        wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+        e => {
             log::warn!("helio-wasm: surface error: {:?}", e);
             return;
         }
@@ -415,7 +418,7 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
     if let Err(e) = state.renderer.render(&camera, &view) {
         log::error!("helio-wasm: render error: {:?}", e);
     }
-    output.present();
+    state.renderer.present(output);
 }
 
 // ── Canvas helper (WASM only) ─────────────────────────────────────────────────
@@ -491,4 +494,3 @@ pub fn launch<T: HelioWasmApp>() {
         event_loop.spawn_app(runner);
     }
 }
-

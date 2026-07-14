@@ -257,7 +257,7 @@ impl VirtualGeometryPass {
             bind_group_layouts: &[Some(&draw_bgl_0), Some(&draw_bgl_1)],
             immediate_size: 0,
         });
-        let vg_vertex_buffers = &[wgpu::VertexBufferLayout {
+        let vg_vertex_buffers = &[Some(wgpu::VertexBufferLayout {
             array_stride: 40,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
@@ -267,7 +267,7 @@ impl VirtualGeometryPass {
                 wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,     offset: 32, shader_location: 3 },
                 wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,     offset: 36, shader_location: 4 },
             ],
-        }];
+        })];
         let gbuffer_targets = &[
             Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm,   blend: None, write_mask: wgpu::ColorWrites::ALL }),
             Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float,  blend: None, write_mask: wgpu::ColorWrites::ALL }),
@@ -312,7 +312,7 @@ impl VirtualGeometryPass {
 
         let debug_draw_pipeline = if device
             .features()
-            .contains(wgpu::Features::SHADER_PRIMITIVE_INDEX)
+            .contains(wgpu::Features::PRIMITIVE_INDEX)
         {
             Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("VG Debug Pipeline"),

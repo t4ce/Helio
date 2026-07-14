@@ -113,7 +113,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     // ── 3. Initialise headless GPU ────────────────────────────────────────────
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
 
     let adapter = instance
@@ -121,6 +121,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         })
         .await
         .map_err(|_| SnapshotError::NoAdapter)?;
@@ -238,7 +239,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     // Flush all submitted GPU work before we copy the texture to the staging buffer.
     // Because we used new_with_external_device the graph never blocks internally —
     // this single poll is the only synchronisation point we need.
-    device.poll(wgpu::PollType::wait_indefinitely());
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
     // ── 12. Read pixels back to CPU ───────────────────────────────────────────
     readback_rgba(&device, &queue, &target_texture, cfg.width, cfg.height).await
@@ -333,11 +334,13 @@ async fn readback_rgba(
     let slice = staging.slice(..);
     let (tx, rx) = futures_channel::oneshot::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-    device.poll(wgpu::PollType::wait_indefinitely());
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
     rx.await.unwrap()?;
 
     // Strip the 256-byte row padding before building the image.
-    let data = slice.get_mapped_range();
+    let data = slice
+        .get_mapped_range()
+        .expect("readback buffer should be mapped");
     let mut pixels = Vec::with_capacity((width * height * 4) as usize);
     for row in 0..height {
         let start = (row * bytes_per_row) as usize;
@@ -410,7 +413,7 @@ impl SnapshotBatch {
     async fn new_async(config: SnapshotConfig) -> Result<Self, SnapshotError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         let adapter = instance
@@ -418,6 +421,7 @@ impl SnapshotBatch {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|_| SnapshotError::NoAdapter)?;
@@ -549,7 +553,7 @@ impl SnapshotBatch {
             .render(&camera, &self.target_view)
             .map_err(|e| SnapshotError::Render(e.to_string()))?;
 
-        self.device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
         // ── Readback ──────────────────────────────────────────────────────────
         let img = readback_rgba(
