@@ -1,16 +1,18 @@
 use std::sync::{Arc, Mutex};
 
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use crate::scene::Scene;
 use helio_core::RenderGraph;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
-use super::renderer_impl::{GraphRebuilder, Renderer, DebugCameraUniform, HALTON_JITTER};
+use super::renderer_impl::{
+    CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer, HALTON_JITTER,
+};
 
 impl Renderer {
     pub(crate) fn compute_jitter_matrices(width: u32, height: u32) -> [glam::Mat4; 16] {
@@ -39,7 +41,9 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -75,11 +79,8 @@ impl Renderer {
         let internal_w = config.internal_width();
         let internal_h = config.internal_height();
 
-        let (depth_texture, depth_view) = Self::create_depth_resources(
-            &device,
-            internal_w,
-            internal_h,
-        );
+        let (depth_texture, depth_view) =
+            Self::create_depth_resources(&device, internal_w, internal_h);
 
         let (full_res_depth_texture, full_res_depth_view) = if render_scale < 1.0 {
             let (t, v) = Self::create_depth_resources(&device, width, height);
@@ -170,6 +171,7 @@ impl Renderer {
             last_render_time: Instant::now(),
             delta_time: 0.0,
             cull_stats_staging,
+            cull_stats_readback_state: CullStatsReadbackState::Idle,
             cull_stats: [0; 8],
             graph_time_ms: 0.0,
             frame_times: vec![0.0; 200],

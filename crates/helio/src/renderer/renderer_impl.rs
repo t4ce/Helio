@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{RenderGraph, RenderPass};
@@ -11,15 +11,19 @@ use helio_core::{RenderGraph, RenderPass};
 use super::config::{PerfOverlayMode, RendererConfig};
 
 /// Closure that rebuilds the render graph on resize.
-pub type GraphRebuilder = Arc<dyn Fn(
-    &Arc<wgpu::Device>,
-    &Arc<wgpu::Queue>,
-    &Scene,
-    RendererConfig,
-    Arc<Mutex<DebugDrawState>>,
-    &wgpu::Buffer,
-    &wgpu::Buffer,
-) -> RenderGraph + Send + Sync>;
+pub type GraphRebuilder = Arc<
+    dyn Fn(
+            &Arc<wgpu::Device>,
+            &Arc<wgpu::Queue>,
+            &Scene,
+            RendererConfig,
+            Arc<Mutex<DebugDrawState>>,
+            &wgpu::Buffer,
+            &wgpu::Buffer,
+        ) -> RenderGraph
+        + Send
+        + Sync,
+>;
 
 use crate::groups::GroupId;
 use crate::mesh::MeshBuffers;
@@ -29,21 +33,21 @@ use super::config::GiConfig;
 use super::debug::DebugDrawState;
 
 pub(crate) const HALTON_JITTER: [[f32; 2]; 16] = [
-    [0.5,     0.333333],
-    [0.25,    0.666667],
-    [0.75,    0.111111],
-    [0.125,   0.444444],
-    [0.625,   0.777778],
-    [0.375,   0.222222],
-    [0.875,   0.555556],
-    [0.0625,  0.888889],
-    [0.5625,  0.037037],
-    [0.3125,  0.37037 ],
-    [0.8125,  0.703704],
-    [0.1875,  0.148148],
-    [0.6875,  0.481481],
-    [0.4375,  0.814815],
-    [0.9375,  0.259259],
+    [0.5, 0.333333],
+    [0.25, 0.666667],
+    [0.75, 0.111111],
+    [0.125, 0.444444],
+    [0.625, 0.777778],
+    [0.375, 0.222222],
+    [0.875, 0.555556],
+    [0.0625, 0.888889],
+    [0.5625, 0.037037],
+    [0.3125, 0.37037],
+    [0.8125, 0.703704],
+    [0.1875, 0.148148],
+    [0.6875, 0.481481],
+    [0.4375, 0.814815],
+    [0.9375, 0.259259],
     [0.03125, 0.592593],
 ];
 
@@ -67,6 +71,12 @@ pub struct BillboardInstance {
     pub world_pos: [f32; 4],
     pub scale_flags: [f32; 4],
     pub color: [f32; 4],
+}
+
+pub(crate) enum CullStatsReadbackState {
+    Idle,
+    Mapping(Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>),
+    Disabled,
 }
 
 pub struct Renderer {
@@ -112,6 +122,7 @@ pub struct Renderer {
     pub(crate) delta_time: f32,
     pub(crate) graph_time_ms: f32,
     pub(crate) cull_stats_staging: wgpu::Buffer,
+    pub(crate) cull_stats_readback_state: CullStatsReadbackState,
     pub(crate) cull_stats: [u32; 8],
     pub(crate) frame_times: Vec<f32>,
     pub(crate) frame_times_cursor: usize,
@@ -144,20 +155,42 @@ pub struct DebugBatch<'a> {
 
 impl<'a> DebugBatch<'a> {
     pub fn line(&mut self, from: [f32; 3], to: [f32; 3], color: [f32; 4]) {
-        self.state.user_lines.push(DebugVertex { position: from, _pad: 0.0, color });
-        self.state.user_lines.push(DebugVertex { position: to, _pad: 0.0, color });
+        self.state.user_lines.push(DebugVertex {
+            position: from,
+            _pad: 0.0,
+            color,
+        });
+        self.state.user_lines.push(DebugVertex {
+            position: to,
+            _pad: 0.0,
+            color,
+        });
         self.lines_changed = true;
     }
 
     pub fn tri(&mut self, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], color: [f32; 4]) {
-        self.state.user_tris.push(DebugVertex { position: v0, _pad: 0.0, color });
-        self.state.user_tris.push(DebugVertex { position: v1, _pad: 0.0, color });
-        self.state.user_tris.push(DebugVertex { position: v2, _pad: 0.0, color });
+        self.state.user_tris.push(DebugVertex {
+            position: v0,
+            _pad: 0.0,
+            color,
+        });
+        self.state.user_tris.push(DebugVertex {
+            position: v1,
+            _pad: 0.0,
+            color,
+        });
+        self.state.user_tris.push(DebugVertex {
+            position: v2,
+            _pad: 0.0,
+            color,
+        });
         self.tris_changed = true;
     }
 
     pub fn sphere(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 4 { return; }
+        if segments < 4 {
+            return;
+        }
         for plane in 0..3 {
             let mut prev = glam::Vec3::ZERO;
             for i in 0..=segments {
@@ -175,12 +208,26 @@ impl<'a> DebugBatch<'a> {
         }
     }
 
-    pub fn cone(&mut self, apex: [f32; 3], axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 3 { return; }
+    pub fn cone(
+        &mut self,
+        apex: [f32; 3],
+        axis: [f32; 3],
+        height: f32,
+        base_radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
+        if segments < 3 {
+            return;
+        }
         let apex_v = glam::Vec3::from(apex);
         let dir = glam::Vec3::from(axis).normalize_or_zero();
         let base = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 { glam::Vec3::X } else { glam::Vec3::Y };
+        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
+            glam::Vec3::X
+        } else {
+            glam::Vec3::Y
+        };
         let tangent = dir.cross(up).normalize_or_zero();
         let bitangent = dir.cross(tangent).normalize_or_zero();
         let mut prev = base + tangent * base_radius;
@@ -193,13 +240,27 @@ impl<'a> DebugBatch<'a> {
         }
     }
 
-    pub fn filled_cone(&mut self, apex: [f32; 3], axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 3 { return; }
+    pub fn filled_cone(
+        &mut self,
+        apex: [f32; 3],
+        axis: [f32; 3],
+        height: f32,
+        base_radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
+        if segments < 3 {
+            return;
+        }
         let apex_v = glam::Vec3::from(apex);
-        let dir    = glam::Vec3::from(axis).normalize_or_zero();
-        let base   = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 { glam::Vec3::X } else { glam::Vec3::Y };
-        let tangent   = dir.cross(up).normalize_or_zero();
+        let dir = glam::Vec3::from(axis).normalize_or_zero();
+        let base = apex_v + dir * height;
+        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
+            glam::Vec3::X
+        } else {
+            glam::Vec3::Y
+        };
+        let tangent = dir.cross(up).normalize_or_zero();
         let bitangent = dir.cross(tangent).normalize_or_zero();
         let mut prev = base + tangent * base_radius;
         for i in 1..=segments {
@@ -216,13 +277,13 @@ impl<'a> DebugBatch<'a> {
         let h = half;
         let corners = [
             c + glam::Vec3::new(-h, -h, -h),
-            c + glam::Vec3::new( h, -h, -h),
-            c + glam::Vec3::new( h,  h, -h),
-            c + glam::Vec3::new(-h,  h, -h),
-            c + glam::Vec3::new(-h, -h,  h),
-            c + glam::Vec3::new( h, -h,  h),
-            c + glam::Vec3::new( h,  h,  h),
-            c + glam::Vec3::new(-h,  h,  h),
+            c + glam::Vec3::new(h, -h, -h),
+            c + glam::Vec3::new(h, h, -h),
+            c + glam::Vec3::new(-h, h, -h),
+            c + glam::Vec3::new(-h, -h, h),
+            c + glam::Vec3::new(h, -h, h),
+            c + glam::Vec3::new(h, h, h),
+            c + glam::Vec3::new(-h, h, h),
         ];
         let quads: [[usize; 4]; 6] = [
             [0, 3, 2, 1],
@@ -233,8 +294,18 @@ impl<'a> DebugBatch<'a> {
             [3, 7, 6, 2],
         ];
         for [a, b, cc, d] in quads {
-            self.tri(corners[a].to_array(), corners[b].to_array(), corners[cc].to_array(), color);
-            self.tri(corners[a].to_array(), corners[cc].to_array(), corners[d].to_array(), color);
+            self.tri(
+                corners[a].to_array(),
+                corners[b].to_array(),
+                corners[cc].to_array(),
+                color,
+            );
+            self.tri(
+                corners[a].to_array(),
+                corners[cc].to_array(),
+                corners[d].to_array(),
+                color,
+            );
         }
     }
 
@@ -408,7 +479,9 @@ impl Renderer {
     }
 
     pub fn gizmo_camera_info(&self) -> Option<(&crate::scene::Camera, f32)> {
-        self.gizmo_camera.as_ref().map(|c| (c, self.gizmo_viewport_height))
+        self.gizmo_camera
+            .as_ref()
+            .map(|c| (c, self.gizmo_viewport_height))
     }
 
     pub fn output_width(&self) -> u32 {

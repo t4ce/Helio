@@ -1,7 +1,7 @@
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use super::config::{PerfOverlayMode, RendererConfig};
 use super::renderer_impl::Renderer;
@@ -22,14 +22,16 @@ impl Renderer {
         let internal_h = (((height as f32) * self.render_scale).ceil() as u32).max(1);
 
         let depth_start = Instant::now();
-        let (depth_texture, depth_view) = Self::create_depth_resources(
-            &self.device,
-            internal_w,
-            internal_h,
-        );
+        let (depth_texture, depth_view) =
+            Self::create_depth_resources(&self.device, internal_w, internal_h);
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
-        log::trace!("apply_resize_now: internal depth {}x{} {}ms", internal_w, internal_h, depth_start.elapsed().as_secs_f64() * 1000.0);
+        log::trace!(
+            "apply_resize_now: internal depth {}x{} {}ms",
+            internal_w,
+            internal_h,
+            depth_start.elapsed().as_secs_f64() * 1000.0
+        );
 
         if self.render_scale < 1.0 {
             let (t, v) = Self::create_depth_resources(&self.device, width, height);
@@ -70,7 +72,10 @@ impl Renderer {
 
         self.scene.mark_water_volumes_dirty();
 
-        log::trace!("apply_resize_now: total resize {}ms", resize_start.elapsed().as_secs_f64() * 1000.0);
+        log::trace!(
+            "apply_resize_now: total resize {}ms",
+            resize_start.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     pub fn set_render_scale(&mut self, scale: f32) {

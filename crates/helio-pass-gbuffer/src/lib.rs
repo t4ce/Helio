@@ -14,11 +14,11 @@
 //!
 //! # Material Bind Group
 //!
-//! Group 1 provides bindless texture access:
+//! Group 1 provides material texture access:
 //!  - binding 0: materials storage buffer
 //!  - binding 1: material_textures storage buffer (MaterialTextureData array)
-//!  - binding 2: scene_textures (256-slot texture array)
-//!  - binding 3: scene_samplers (256-slot sampler array)
+//!  - native: binding arrays for scene textures and samplers
+//!  - WebGPU: 16 fixed texture bindings followed by 16 fixed sampler bindings
 //!
 //! # Vertex / Index Buffers
 //!
@@ -28,7 +28,9 @@
 use bytemuck::{Pod, Zeroable};
 use helio::radiant::{RadiantShaderCache, RadiantShaderKey, RadiantTemplateRegistry};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{
+    DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
+};
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::num::NonZeroU32;
@@ -164,7 +166,7 @@ impl GBufferPass {
         // Each region is 32 bytes: uv_offset(8) + uv_scale(8) + uv_clamp_min(8) + uv_clamp_max(8).
         let lightmap_atlas_regions_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Lightmap Atlas Regions"),
-            size: 32,  // One empty region sentinel; recreated when real data loads.
+            size: 32, // One empty region sentinel; recreated when real data loads.
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -195,11 +197,31 @@ impl RenderPass for GBufferPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw("gbuffer_albedo", wgpu::TextureFormat::Rgba8Unorm, ResourceSize::MatchSurface);
-        builder.write_color_raw("gbuffer_normal", wgpu::TextureFormat::Rgba16Float, ResourceSize::MatchSurface);
-        builder.write_color_raw("gbuffer_orm", wgpu::TextureFormat::Rgba8Unorm, ResourceSize::MatchSurface);
-        builder.write_color_raw("gbuffer_emissive", wgpu::TextureFormat::Rgba16Float, ResourceSize::MatchSurface);
-        builder.write_color_raw("gbuffer_lightmap_uv", wgpu::TextureFormat::Rg16Float, ResourceSize::MatchSurface);
+        builder.write_color_raw(
+            "gbuffer_albedo",
+            wgpu::TextureFormat::Rgba8Unorm,
+            ResourceSize::MatchSurface,
+        );
+        builder.write_color_raw(
+            "gbuffer_normal",
+            wgpu::TextureFormat::Rgba16Float,
+            ResourceSize::MatchSurface,
+        );
+        builder.write_color_raw(
+            "gbuffer_orm",
+            wgpu::TextureFormat::Rgba8Unorm,
+            ResourceSize::MatchSurface,
+        );
+        builder.write_color_raw(
+            "gbuffer_emissive",
+            wgpu::TextureFormat::Rgba16Float,
+            ResourceSize::MatchSurface,
+        );
+        builder.write_color_raw(
+            "gbuffer_lightmap_uv",
+            wgpu::TextureFormat::Rg16Float,
+            ResourceSize::MatchSurface,
+        );
     }
 
     fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
@@ -212,53 +234,54 @@ impl RenderPass for GBufferPass {
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let gbuffer = resources.gbuffer.read("GBuffer")?;
         let lightmap_uv = resources.gbuffer_lightmap_uv.read("GBuffer")?;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
-            Some(wgpu::RenderPassColorAttachment {
-                view: gbuffer.albedo,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            }),
-            Some(wgpu::RenderPassColorAttachment {
-                view: gbuffer.normal,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            }),
-            Some(wgpu::RenderPassColorAttachment {
-                view: gbuffer.orm,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            }),
-            Some(wgpu::RenderPassColorAttachment {
-                view: gbuffer.emissive,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            }),
-            Some(wgpu::RenderPassColorAttachment {
-                view: lightmap_uv,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            }),
-        ]));
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([
+                Some(wgpu::RenderPassColorAttachment {
+                    view: gbuffer.albedo,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: gbuffer.normal,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: gbuffer.orm,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: gbuffer.emissive,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: lightmap_uv,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+            ]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("GBuffer"),
             color_attachments,
@@ -282,10 +305,25 @@ impl RenderPass for GBufferPass {
         let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
             if let Some(ref ms) = ctx.frame_resources.main_scene.get().as_ref() {
                 (
-                    [ms.ambient_color[0], ms.ambient_color[1], ms.ambient_color[2], 1.0],
+                    [
+                        ms.ambient_color[0],
+                        ms.ambient_color[1],
+                        ms.ambient_color[2],
+                        1.0,
+                    ],
                     ms.ambient_intensity,
-                    [ms.rc_world_min[0], ms.rc_world_min[1], ms.rc_world_min[2], 0.0],
-                    [ms.rc_world_max[0], ms.rc_world_max[1], ms.rc_world_max[2], 0.0],
+                    [
+                        ms.rc_world_min[0],
+                        ms.rc_world_min[1],
+                        ms.rc_world_min[2],
+                        0.0,
+                    ],
+                    [
+                        ms.rc_world_max[0],
+                        ms.rc_world_max[1],
+                        ms.rc_world_max[2],
+                        0.0,
+                    ],
                 )
             } else {
                 // Fallback for headless / test usage without a full renderer.
@@ -386,7 +424,12 @@ impl RenderPass for GBufferPass {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                for (index, view) in main_scene.material_textures.texture_views.iter().enumerate() {
+                for (index, view) in main_scene
+                    .material_textures
+                    .texture_views
+                    .iter()
+                    .enumerate()
+                {
                     entries.push(wgpu::BindGroupEntry {
                         binding: 2 + index as u32,
                         resource: wgpu::BindingResource::TextureView(view),
@@ -399,13 +442,11 @@ impl RenderPass for GBufferPass {
                     });
                 }
             }
-            self.bind_group_1 = Some(
-                ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("GBuffer BG 1"),
-                    layout: &self.bind_group_layout_1,
-                    entries: &entries,
-                }),
-            );
+            self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("GBuffer BG 1"),
+                layout: &self.bind_group_layout_1,
+                entries: &entries,
+            }));
             self.bind_group_1_version = Some(main_scene.material_textures.version);
         }
 
@@ -534,12 +575,16 @@ impl GBufferPass {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            
+
             // Invalidate bind group since buffer changed
             self.bind_group_0_key = None;
         }
 
-        queue.write_buffer(&self.lightmap_atlas_regions_buf, 0, bytemuck::cast_slice(regions));
+        queue.write_buffer(
+            &self.lightmap_atlas_regions_buf,
+            0,
+            bytemuck::cast_slice(regions),
+        );
 
         log::info!(
             "[GBufferPass] Uploaded {} lightmap atlas regions ({} bytes)",
@@ -570,11 +615,18 @@ impl GBufferPass {
                         "Radiant: template class {} not found, falling back to class 0",
                         key.template_id,
                     );
-                    self.template_registry.get(0).expect("Default PBR template (class 0) missing")
+                    self.template_registry
+                        .get(0)
+                        .expect("Default PBR template (class 0) missing")
                 }
             };
             let module = self.shader_cache.get_or_compile(
-                device, key, template, graph_wgsl, MAX_TEXTURES, "GBuffer Shader",
+                device,
+                key,
+                template,
+                graph_wgsl,
+                MAX_TEXTURES,
+                "GBuffer Shader",
             );
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("GBuffer Pipeline"),

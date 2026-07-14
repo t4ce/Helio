@@ -14,7 +14,10 @@ use helio_pass_hlfs::HlfsPass;
 use helio_pass_indirect_dispatch::IndirectDispatchPass;
 use helio_pass_light_cull::LightCullPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
-use helio_pass_perf_overlay::{PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared};
+use helio_pass_perf_overlay::{
+    PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
+};
+use helio_pass_postprocess::PostProcessPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_cull::ShadowCullPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
@@ -22,7 +25,6 @@ use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky::SkyPass;
 use helio_pass_sky_lut::SkyLutPass;
-use helio_pass_postprocess::PostProcessPass;
 use helio_pass_taa::TaaPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_voxel_mesh::VoxelMeshPass;
@@ -35,7 +37,11 @@ use helio::Scene;
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
 
-fn new_graph(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>, owns_device: bool) -> RenderGraph {
+fn new_graph(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    owns_device: bool,
+) -> RenderGraph {
     if owns_device {
         RenderGraph::new(device, queue)
     } else {
@@ -63,7 +69,9 @@ fn add_common_early_passes(
     let shadow_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Dirty Flags"),
         size: 42 * 4,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     }));
     let shadow_hashes_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -127,14 +135,10 @@ fn add_common_early_passes(
         cull_stats_buf.clone(),
     )));
     graph.add_pass(Box::new(hiz_pass));
-    let mut occlusion_cull = OcclusionCullPass::new(
-        device,
-        hiz_sampler,
-        w,
-        h,
-        cull_stats_buf.clone(),
-    );
-    if let Some(meta) = graph.find_pass::<HiZBuildPass>()
+    let mut occlusion_cull =
+        OcclusionCullPass::new(device, hiz_sampler, w, h, cull_stats_buf.clone());
+    if let Some(meta) = graph
+        .find_pass::<HiZBuildPass>()
         .and_then(|p| p.static_hiz_metadata())
     {
         occlusion_cull.set_static_hiz_metadata(
@@ -146,7 +150,9 @@ fn add_common_early_passes(
     graph.add_pass(Box::new(occlusion_cull));
 
     let perf_overlay_shared = PerfOverlayShared::new(device, w, h);
-    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(
+        &perf_overlay_shared,
+    ))));
 
     perf_overlay_shared
 }
@@ -239,11 +245,8 @@ fn add_final_passes(
 ) {
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 
-    let mut perf_overlay_pass = PerfOverlayPass::new(
-        device,
-        Arc::clone(perf),
-        config.surface_format,
-    );
+    let mut perf_overlay_pass =
+        PerfOverlayPass::new(device, Arc::clone(perf), config.surface_format);
     perf_overlay_pass.set_mode(convert_perf_mode(config.perf_overlay_mode));
     graph.add_pass(Box::new(perf_overlay_pass));
 
@@ -278,7 +281,18 @@ pub fn build_default_graph(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay, None)
+    build_default_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        true,
+        debug_overlay,
+        None,
+    )
 }
 
 pub fn build_default_graph_with_user_effects(
@@ -292,7 +306,18 @@ pub fn build_default_graph_with_user_effects(
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
     user_effects: &'static str,
 ) -> RenderGraph {
-    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay, Some(user_effects))
+    build_default_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        true,
+        debug_overlay,
+        Some(user_effects),
+    )
 }
 
 pub fn build_default_graph_external(
@@ -305,7 +330,18 @@ pub fn build_default_graph_external(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, false, debug_overlay, None)
+    build_default_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        false,
+        debug_overlay,
+        None,
+    )
 }
 
 fn build_default_graph_internal(
@@ -326,7 +362,15 @@ fn build_default_graph_internal(
     let mut graph = new_graph(device, queue, owns_device);
 
     let perf = add_common_early_passes(
-        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, iw, ih,
+        &mut graph,
+        device,
+        scene,
+        &config,
+        debug_state.clone(),
+        debug_camera_buf,
+        cull_stats_buf,
+        iw,
+        ih,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
@@ -334,9 +378,8 @@ fn build_default_graph_internal(
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
     let camera_buf = scene.gpu_scene().camera.buffer();
-    let mut deferred_light_pass = DeferredLightPass::new(
-        device, queue, camera_buf, config.surface_format,
-    );
+    let mut deferred_light_pass =
+        DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
     graph.add_pass(Box::new(deferred_light_pass));
@@ -353,18 +396,45 @@ fn build_default_graph_internal(
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
-        device, queue, config.width, config.height, config.surface_format, user_effects,
+        device,
+        queue,
+        config.width,
+        config.height,
+        config.surface_format,
+        user_effects,
     )));
 
-    add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
+    add_final_passes(
+        &mut graph,
+        device,
+        queue,
+        &config,
+        &perf,
+        debug_state,
+        debug_camera_buf,
+        debug_overlay,
+    );
 
     graph.lock(iw, ih);
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let effect_snippet = user_effects;
-    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
-        build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref(), effect_snippet)
-    });
+    let rebuilder: GraphRebuilder = Arc::new(
+        move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+            build_default_graph_internal(
+                device,
+                queue,
+                scene,
+                config,
+                debug_state,
+                debug_camera_buf,
+                cull_stats_buf,
+                owns_device,
+                overlay_owned.as_ref(),
+                effect_snippet,
+            )
+        },
+    );
     graph.set_graph_data(rebuilder);
 
     graph
@@ -462,11 +532,21 @@ fn build_fxaa_graph_internal(
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, iw, ih);
 
     graph.add_pass(Box::new(TaaPass::new(
-        device, iw, ih, config.width, config.height, config.surface_format,
+        device,
+        iw,
+        ih,
+        config.width,
+        config.height,
+        config.surface_format,
     )));
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
-        device, queue, config.width, config.height, config.surface_format, None,
+        device,
+        queue,
+        config.width,
+        config.height,
+        config.surface_format,
+        None,
     )));
 
     add_final_passes(
@@ -483,9 +563,21 @@ fn build_fxaa_graph_internal(
     graph.lock(iw, ih);
 
     let overlay_owned = debug_overlay.map(Arc::clone);
-    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
-        build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref())
-    });
+    let rebuilder: GraphRebuilder = Arc::new(
+        move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+            build_fxaa_graph_internal(
+                device,
+                queue,
+                scene,
+                config,
+                debug_state,
+                debug_camera_buf,
+                cull_stats_buf,
+                owns_device,
+                overlay_owned.as_ref(),
+            )
+        },
+    );
     graph.set_graph_data(rebuilder);
 
     graph
@@ -508,7 +600,15 @@ fn build_hlfs_graph_internal(
     let mut graph = new_graph(device, queue, owns_device);
 
     let perf = add_common_early_passes(
-        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, iw, ih,
+        &mut graph,
+        device,
+        scene,
+        &config,
+        debug_state.clone(),
+        debug_camera_buf,
+        cull_stats_buf,
+        iw,
+        ih,
     );
 
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
@@ -520,21 +620,52 @@ fn build_hlfs_graph_internal(
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, iw, ih);
 
     graph.add_pass(Box::new(TaaPass::new(
-        device, iw, ih, config.width, config.height, config.surface_format,
+        device,
+        iw,
+        ih,
+        config.width,
+        config.height,
+        config.surface_format,
     )));
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
-        device, queue, config.width, config.height, config.surface_format, None,
+        device,
+        queue,
+        config.width,
+        config.height,
+        config.surface_format,
+        None,
     )));
 
-    add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
+    add_final_passes(
+        &mut graph,
+        device,
+        queue,
+        &config,
+        &perf,
+        debug_state,
+        debug_camera_buf,
+        debug_overlay,
+    );
 
     graph.lock(iw, ih);
 
     let overlay_owned = debug_overlay.map(Arc::clone);
-    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
-        build_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref())
-    });
+    let rebuilder: GraphRebuilder = Arc::new(
+        move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+            build_hlfs_graph_internal(
+                device,
+                queue,
+                scene,
+                config,
+                debug_state,
+                debug_camera_buf,
+                cull_stats_buf,
+                owns_device,
+                overlay_owned.as_ref(),
+            )
+        },
+    );
     graph.set_graph_data(rebuilder);
 
     graph
@@ -550,7 +681,17 @@ pub fn build_hlfs_graph(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay)
+    build_hlfs_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        true,
+        debug_overlay,
+    )
 }
 
 pub fn build_fxaa_hlfs_graph(
@@ -563,7 +704,17 @@ pub fn build_fxaa_hlfs_graph(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_fxaa_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay)
+    build_fxaa_hlfs_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        true,
+        debug_overlay,
+    )
 }
 
 pub fn build_fxaa_hlfs_graph_external(
@@ -576,7 +727,17 @@ pub fn build_fxaa_hlfs_graph_external(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_fxaa_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, false, debug_overlay)
+    build_fxaa_hlfs_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        false,
+        debug_overlay,
+    )
 }
 
 fn build_fxaa_hlfs_graph_internal(
@@ -596,7 +757,15 @@ fn build_fxaa_hlfs_graph_internal(
     let mut graph = new_graph(device, queue, owns_device);
 
     let perf = add_common_early_passes(
-        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, w, h,
+        &mut graph,
+        device,
+        scene,
+        &config,
+        debug_state.clone(),
+        debug_camera_buf,
+        cull_stats_buf,
+        w,
+        h,
     );
 
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
@@ -610,17 +779,43 @@ fn build_fxaa_hlfs_graph_internal(
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
-        device, queue, config.width, config.height, config.surface_format, None,
+        device,
+        queue,
+        config.width,
+        config.height,
+        config.surface_format,
+        None,
     )));
 
-    add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
+    add_final_passes(
+        &mut graph,
+        device,
+        queue,
+        &config,
+        &perf,
+        debug_state,
+        debug_camera_buf,
+        debug_overlay,
+    );
 
     graph.lock(w, h);
 
     let overlay_owned = debug_overlay.map(Arc::clone);
-    let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
-        build_fxaa_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref())
-    });
+    let rebuilder: GraphRebuilder = Arc::new(
+        move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
+            build_fxaa_hlfs_graph_internal(
+                device,
+                queue,
+                scene,
+                config,
+                debug_state,
+                debug_camera_buf,
+                cull_stats_buf,
+                owns_device,
+                overlay_owned.as_ref(),
+            )
+        },
+    );
     graph.set_graph_data(rebuilder);
 
     graph
@@ -634,11 +829,13 @@ pub fn build_simple_graph(
     let mut graph = RenderGraph::new(device, queue);
     graph.add_pass(Box::new(SimpleCubePass::new(device, surface_format)));
 
-    let rebuilder: GraphRebuilder = Arc::new(move |device, _queue, _scene, _config, _debug_state, _debug_camera_buf, _cull_stats_buf| {
-        let mut g = RenderGraph::new(device, _queue);
-        g.add_pass(Box::new(SimpleCubePass::new(device, surface_format)));
-        g
-    });
+    let rebuilder: GraphRebuilder = Arc::new(
+        move |device, _queue, _scene, _config, _debug_state, _debug_camera_buf, _cull_stats_buf| {
+            let mut g = RenderGraph::new(device, _queue);
+            g.add_pass(Box::new(SimpleCubePass::new(device, surface_format)));
+            g
+        },
+    );
     graph.set_graph_data(rebuilder);
 
     graph

@@ -12,14 +12,21 @@ impl RadiantTemplate {
     /// passthrough to keep the default PBR evaluation.
     pub fn build_shader_source(&self, graph_wgsl: &str, max_textures: usize) -> String {
         let max_tex_str = max_textures.to_string();
-        let src = self.wgsl_source
-            .replace("binding_array<texture_2d<f32>, 256>", &format!("binding_array<texture_2d<f32>, {max_tex_str}>"))
-            .replace("binding_array<sampler, 256>", &format!("binding_array<sampler, {max_tex_str}>"));
+        let src = self
+            .wgsl_source
+            .replace(
+                "binding_array<texture_2d<f32>, 256>",
+                &format!("binding_array<texture_2d<f32>, {max_tex_str}>"),
+            )
+            .replace(
+                "binding_array<sampler, 256>",
+                &format!("binding_array<sampler, {max_tex_str}>"),
+            );
 
         if graph_wgsl.is_empty() {
             // No graph: remove the override markers, leaving the default code
             src.replace("// RADIANT_OVERRIDE_SURFACE\n", "")
-               .replace("// RADIANT_OVERRIDE_END\n", "")
+                .replace("// RADIANT_OVERRIDE_END\n", "")
         } else {
             // Graph present: replace everything from OVERRIDE_SURFACE to OVERRIDE_END
             // with the graph's override code
@@ -45,44 +52,7 @@ impl RadiantTemplate {
     /// texture/sampler bindings plus an explicit switch retain all material slots
     /// without requiring a native-only feature.
     pub fn apply_webgpu_fixups(src: &str, max_textures: usize) -> String {
-        let mut declarations = String::new();
-        for index in 0..max_textures {
-            declarations.push_str(&format!(
-                "@group(1) @binding({}) var scene_texture_{index}: texture_2d<f32>;\n",
-                2 + index,
-            ));
-        }
-        for index in 0..max_textures {
-            declarations.push_str(&format!(
-                "@group(1) @binding({}) var scene_sampler_{index}: sampler;\n",
-                2 + max_textures + index,
-            ));
-        }
-
-        let mut source = String::with_capacity(src.len() + declarations.len());
-        for line in src.lines() {
-            if line.contains("scene_textures:") && line.contains("binding_array<texture_2d") {
-                source.push_str(&declarations);
-            } else if line.contains("scene_samplers:") && line.contains("binding_array<sampler") {
-                // Both binding tables were emitted in place of scene_textures.
-            } else {
-                source.push_str(line);
-                source.push('\n');
-            }
-        }
-
-        let mut sample_switch = String::from("switch slot.texture_index {\n");
-        for index in 0..max_textures {
-            sample_switch.push_str(&format!(
-                "        case {index}u: {{ return textureSampleLevel(scene_texture_{index}, scene_sampler_{index}, uv, 0.0); }}\n",
-            ));
-        }
-        sample_switch.push_str("        default: { return fallback; }\n    }");
-
-        source.replace(
-            "return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);",
-            &sample_switch,
-        )
+        libhelio::shader::apply_webgpu_material_bindings(src, max_textures)
     }
 }
 
@@ -98,13 +68,16 @@ impl RadiantTemplateRegistry {
             templates: HashMap::new(),
             next_id: 1,
         };
-        reg.templates.insert(0, RadiantTemplate {
-            name: "default_pbr",
-            wgsl_source: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../helio-pass-gbuffer/shaders/gbuffer.wgsl"
-            )),
-        });
+        reg.templates.insert(
+            0,
+            RadiantTemplate {
+                name: "default_pbr",
+                wgsl_source: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../helio-pass-gbuffer/shaders/gbuffer.wgsl"
+                )),
+            },
+        );
         reg
     }
 
@@ -122,7 +95,9 @@ impl RadiantTemplateRegistry {
     pub fn load_from_file(&mut self, path: &std::path::Path) -> std::io::Result<u32> {
         let source = std::fs::read_to_string(path)?;
         Ok(self.register_str(
-            path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown"),
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown"),
             source,
         ))
     }
@@ -131,10 +106,13 @@ impl RadiantTemplateRegistry {
     pub fn register_str(&mut self, name: &str, wgsl_source: String) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
-        self.templates.insert(id, RadiantTemplate {
-            name: Box::leak(format!("Radiant:{}", name).into_boxed_str()),
-            wgsl_source: Box::leak(wgsl_source.into_boxed_str()),
-        });
+        self.templates.insert(
+            id,
+            RadiantTemplate {
+                name: Box::leak(format!("Radiant:{}", name).into_boxed_str()),
+                wgsl_source: Box::leak(wgsl_source.into_boxed_str()),
+            },
+        );
         id
     }
 

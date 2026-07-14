@@ -13,14 +13,12 @@ pub enum PerfOverlayMode {
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     #[cfg(not(target_arch = "wasm32"))]
-    let required =
-        wgpu::Features::TEXTURE_BINDING_ARRAY |
-        wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING |
-        wgpu::Features::INDIRECT_FIRST_INSTANCE;
+    let required = wgpu::Features::TEXTURE_BINDING_ARRAY
+        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+        | wgpu::Features::INDIRECT_FIRST_INSTANCE;
     #[cfg(target_arch = "wasm32")]
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
-    let optional =
-        wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
+    let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
         wgpu::Features::VERTEX_WRITABLE_STORAGE;
@@ -33,10 +31,8 @@ mod tests {
 
     #[test]
     fn indirect_first_instance_is_required_even_when_adapter_does_not_report_it() {
-        assert!(
-            required_wgpu_features(wgpu::Features::empty())
-                .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
-        );
+        assert!(required_wgpu_features(wgpu::Features::empty())
+            .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE));
     }
 
     #[test]

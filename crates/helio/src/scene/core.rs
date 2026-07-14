@@ -12,16 +12,16 @@ use helio_core::GpuScene;
 use helio_voxel_core::VoxelEdit;
 use wgpu::util::DeviceExt;
 
+use super::types::VoxelVolumeDescriptor;
+use super::voxel::VoxelVolumeRecord;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
     LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, SectionedInstanceId,
-    TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId, VoxelVolumeId,
+    TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
-use crate::radiant::RadiantGraphRegistry;
-use super::voxel::VoxelVolumeRecord;
-use super::types::VoxelVolumeDescriptor;
 use crate::mesh::{MeshPool, MultiMeshRecord};
+use crate::radiant::RadiantGraphRegistry;
 use crate::scene::multi_mesh::SectionedInstanceRecord;
 use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
@@ -333,11 +333,14 @@ impl Scene {
         self.shadow_face_capacity = capacity.clamp(1, 256);
     }
 
-    pub fn insert_voxel_volume(&mut self, descriptor: VoxelVolumeDescriptor) -> Result<VoxelVolumeId> {
+    pub fn insert_voxel_volume(
+        &mut self,
+        descriptor: VoxelVolumeDescriptor,
+    ) -> Result<VoxelVolumeId> {
         let gpu_slot = self.voxel_volumes.len() as u32;
-        let id = self.voxel_volumes.insert_with(|id| {
-            VoxelVolumeRecord::new(id, gpu_slot, &descriptor)
-        });
+        let id = self
+            .voxel_volumes
+            .insert_with(|id| VoxelVolumeRecord::new(id, gpu_slot, &descriptor));
 
         if let Some(record) = self.voxel_volumes.get(id) {
             record.upload_to_gpu(&mut self.gpu_scene, gpu_slot);
@@ -379,7 +382,11 @@ impl Scene {
     }
 
     /// Update only the class_params of a material (no texture revalidation).
-    pub fn update_material_class_params(&mut self, material_id: MaterialId, params: [f32; 4]) -> Result<()> {
+    pub fn update_material_class_params(
+        &mut self,
+        material_id: MaterialId,
+        params: [f32; 4],
+    ) -> Result<()> {
         let Some((slot, record)) = self.materials.get_mut_with_slot(material_id) else {
             return Err(invalid("material"));
         };
