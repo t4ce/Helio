@@ -1108,7 +1108,7 @@ impl MaterialProfiler {
         }
         let buffer_slice = self.resolve_buffer.slice(..);
         buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
         let data = buffer_slice
             .get_mapped_range()

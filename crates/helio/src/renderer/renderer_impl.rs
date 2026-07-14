@@ -89,6 +89,7 @@ pub struct Renderer {
     pub(crate) clear_color: [f32; 4],
     pub(crate) gi_config: GiConfig,
     pub(crate) shadow_quality: libhelio::ShadowQuality,
+    pub(crate) shadow_atlas_size: u32,
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,

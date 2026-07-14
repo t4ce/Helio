@@ -15,7 +15,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use helio::{Camera, DebugDrawState, Renderer, RendererConfig, Scene};
+use helio::{DebugDrawState, Renderer, RendererConfig, Scene};
 
 use crate::{HelioWasmApp, InputState};
 
@@ -459,7 +459,9 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
     state.mouse_left_just_pressed  = false;
     state.mouse_left_just_released = false;
 
+    let viewport = state.window.inner_size();
     let input = InputState {
+        viewport_size: (viewport.width, viewport.height),
         keys: state.keys.clone(),
         mouse_delta: delta,
         cursor_grabbed: state.cursor_grabbed,
@@ -641,16 +643,18 @@ pub fn launch<T: HelioWasmApp>() {
     let event_loop = EventLoop::new().expect("helio-wasm: failed to create EventLoop");
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
-    let mut runner = WasmRunner::<T>::new();
-
     #[cfg(not(target_arch = "wasm32"))]
-    event_loop
-        .run_app(&mut runner)
-        .expect("helio-wasm: event loop error");
+    {
+        let mut runner = WasmRunner::<T>::new();
+        event_loop
+            .run_app(&mut runner)
+            .expect("helio-wasm: event loop error");
+    }
 
     #[cfg(target_arch = "wasm32")]
     {
         use winit::platform::web::EventLoopExtWebSys;
+        let runner = WasmRunner::<T>::new();
         event_loop.spawn_app(runner);
     }
 }

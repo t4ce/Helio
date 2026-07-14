@@ -80,6 +80,7 @@ fn add_common_early_passes(
         camera_buf,
         &shadow_dirty_buf,
         &shadow_hashes_buf,
+        config.shadow_atlas_size,
     )));
 
     let shadow_dirty_pass = ShadowDirtyPass::new(device);
@@ -641,5 +642,4 @@ pub fn build_simple_graph(
 
     graph
 }
-
 

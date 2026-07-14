@@ -31,7 +31,7 @@ use crate::{
 /// over equivalent CPU implementations.
 pub struct AcousticBaker;
 
-#[async_trait]
+#[async_trait(?Send)]
 impl BakePass for AcousticBaker {
     type Input  = AcousticConfig;
     type Output = AcousticOutput;

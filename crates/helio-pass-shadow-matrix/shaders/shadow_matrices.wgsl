@@ -13,7 +13,6 @@
 const FACES_PER_LIGHT: u32 = 6u;
 const CSM_SPLITS: vec4f = vec4f(16.0, 80.0, 300.0, 1400.0);
 const SCENE_DEPTH: f32 = 4000.0;
-const ATLAS_TEXELS: f32 = 2048.0;
 
 // Light types (must match LightType in libhelio/src/light.rs)
 const LIGHT_TYPE_DIRECTIONAL: u32 = 0u;
@@ -53,7 +52,7 @@ struct CameraUniforms {
 
 struct ShadowMatrixParams {
     light_count: u32,
-    camera_moved: u32,  // Boolean: 1 if camera moved (triggers CSM recompute)
+    shadow_atlas_size: u32,
     _pad0: u32,
     _pad1: u32,
 }
@@ -209,7 +208,7 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
         }
 
         // Snap radius to texel boundaries
-        let texel_size = (2.0 * radius) / ATLAS_TEXELS;
+        let texel_size = (2.0 * radius) / f32(max(params.shadow_atlas_size, 1u));
         let radius_snap = ceil(radius / texel_size) * texel_size;
 
         // Texel-snapped light view

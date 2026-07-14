@@ -18,7 +18,7 @@ pub trait BakeOutput: Send + Sync + 'static {
 /// ```rust,ignore
 /// let output = LightmapBaker.execute(&scene, &LightmapConfig::default(), &ctx, &NullReporter).await?;
 /// ```
-#[async_trait]
+#[async_trait(?Send)]
 pub trait BakePass: Send + Sync {
     type Input:  BakeInput;
     type Output: BakeOutput;

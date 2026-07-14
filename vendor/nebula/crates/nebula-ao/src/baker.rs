@@ -9,7 +9,7 @@ use crate::{config::AoConfig, output::AoOutput};
 #[derive(Default)]
 pub struct AoBaker;
 
-#[async_trait]
+#[async_trait(?Send)]
 impl BakePass for AoBaker {
     type Input  = AoConfig;
     type Output = AoOutput;
@@ -145,4 +145,3 @@ fn bgl_uniform(b: u32) -> wgpu::BindGroupLayoutEntry {
 fn bgl_storage_ro(b: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry { binding: b, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None }
 }
-

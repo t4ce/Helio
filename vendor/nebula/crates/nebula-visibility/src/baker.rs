@@ -26,7 +26,7 @@ use crate::{config::PvsConfig, output::PvsOutput};
 ///    packed `Vec<u64>` bitfield.
 pub struct PvsBaker;
 
-#[async_trait]
+#[async_trait(?Send)]
 impl BakePass for PvsBaker {
     type Input  = PvsConfig;
     type Output = PvsOutput;

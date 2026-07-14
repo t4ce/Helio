@@ -39,7 +39,7 @@ use crate::{
 /// for runtime A* or navmesh pathfinding.
 pub struct NavBaker;
 
-#[async_trait]
+#[async_trait(?Send)]
 impl BakePass for NavBaker {
     type Input  = NavConfig;
     type Output = NavOutput;

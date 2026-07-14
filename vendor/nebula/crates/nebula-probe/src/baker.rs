@@ -53,7 +53,7 @@ impl ProbeBaker {
 
 // ── BakePass impl (bakes at origin; real usage goes through bake_at) ─────────
 
-#[async_trait]
+#[async_trait(?Send)]
 impl BakePass for ProbeBaker {
     type Input  = ProbeConfig;
     type Output = ReflectionOutput;

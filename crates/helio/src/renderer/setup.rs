@@ -147,6 +147,7 @@ impl Renderer {
             clear_color: [0.02, 0.02, 0.03, 1.0],
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,
+            shadow_atlas_size: config.shadow_atlas_size,
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,

@@ -12,7 +12,7 @@ use crate::{config::LightmapConfig, output::{AtlasRegion, LightmapOutput}};
 #[derive(Default)]
 pub struct LightmapBaker;
 
-#[async_trait]
+#[async_trait(?Send)]
 impl BakePass for LightmapBaker {
     type Input  = LightmapConfig;
     type Output = LightmapOutput;
@@ -385,4 +385,3 @@ fn storage_ro() -> wgpu::BindingType {
         min_binding_size:   None,
     }
 }
-

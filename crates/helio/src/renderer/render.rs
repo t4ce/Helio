@@ -418,7 +418,7 @@ impl Renderer {
         if self.owns_device {
             let staging_slice = self.cull_stats_staging.slice(..);
             staging_slice.map_async(wgpu::MapMode::Read, |_| {});
-            self.device.poll(wgpu::PollType::wait_indefinitely());
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
             {
                 let mapped = staging_slice
                     .get_mapped_range()
