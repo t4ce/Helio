@@ -50,7 +50,7 @@ members = [
     # Offline / tooling crates (no window required)
     "crates_other/helio-snapshot",
 ]
-exclude = ["vendor/wgpu"]
+exclude = ["vendor/nebula", "vendor/wgpu"]
 resolver = "2"
 
 [workspace.dependencies]
