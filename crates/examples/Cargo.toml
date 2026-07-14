@@ -162,7 +162,6 @@ helio-pass-terra-forge = { path = "../helio-pass-terra-forge" }
 helio-pass-taa = { workspace = true }
 helio-pass-corona = { workspace = true }
 rapier3d = "0.24"
-rapier_testbed3d = "0.24"
 image = { workspace = true, features = ["png"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }

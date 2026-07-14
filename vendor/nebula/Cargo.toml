@@ -32,7 +32,7 @@ nebula-audio      = { path = "crates/nebula-audio" }
 nebula-visibility = { path = "crates/nebula-visibility" }
 nebula-nav        = { path = "crates/nebula-nav" }
 
-# ── GPU (same fork as Helio for device/queue interop) ─────────────────────────
+# ── GPU (same vendored version as Helio for device/queue interop) ─────────────────────────
 wgpu = { version = "30.0.0", path = "../wgpu/wgpu", default-features = false, features = ["wgsl", "dx12", "metal", "vulkan"] }
 
 # ── Math + data ───────────────────────────────────────────────────────────────
