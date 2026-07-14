@@ -22,7 +22,8 @@ pub fn make_material(
         tex_occlusion: GpuMaterial::NO_TEXTURE,
         workflow: 0,
         flags: 0,
-        _pad: 0,
+        material_class: 0,
+        class_params: [0.0; 4],
     }
 }
 

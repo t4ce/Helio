@@ -229,6 +229,22 @@ pub struct GpuScene {
     pub voxel_volume_count: u32,
     pub voxel_volumes_generation: u64,
     pub voxel_ring_write_index: u32,
+
+    /// Material class ranges for the GBuffer pass: [(class, graph_hash, start, count), ...]
+    /// Each range is uniform in both material_class and graph_hash so a single
+    /// PSO works for all indirect entries it covers.
+    /// Built during `rebuild_instance_buffers_*`.
+    pub material_class_ranges: Vec<(u32, u64, u32, u32)>,
+
+    /// Graph hashes for each material slot (indexed by material buffer slot).
+    /// Populated by [`Scene`](helio::Scene) during flush.
+    /// Used by the GBuffer pass for PSO selection.
+    pub material_graph_hashes: Vec<u64>,
+
+    /// Compiled graph WGSL snippets keyed by content hash.
+    /// Populated from Scene's [`RadiantGraphRegistry`](helio::radiant::RadiantGraphRegistry)
+    /// during flush.  The GBuffer pass looks up WGSL by hash when building PSOs.
+    pub graph_wgsl_snippets: std::collections::HashMap<u64, String>,
 }
 
 impl GpuScene {
@@ -324,6 +340,9 @@ impl GpuScene {
             voxel_volume_count: 0,
             voxel_volumes_generation: 0,
             voxel_ring_write_index: 0,
+            material_class_ranges: Vec::new(),
+            material_graph_hashes: Vec::new(),
+            graph_wgsl_snippets: std::collections::HashMap::new(),
         }
     }
 
@@ -384,6 +403,9 @@ impl GpuScene {
             voxel_data_pool: &self.voxel_data_pool,
             voxel_volume_count: self.voxel_volume_count,
             voxel_volumes_generation: self.voxel_volumes_generation,
+            material_class_ranges: &self.material_class_ranges,
+            material_graph_hashes: &self.material_graph_hashes,
+            graph_wgsl_snippets: &self.graph_wgsl_snippets,
         }
     }
 

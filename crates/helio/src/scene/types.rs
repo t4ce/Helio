@@ -129,6 +129,11 @@ pub(crate) struct MaterialRecord {
 
     /// Number of objects currently using this material.
     pub ref_count: u32,
+
+    /// Graph-compiled WGSL hash (0 = no override). Copied to
+    /// [`GpuScene::material_graph_hashes`](helio_core::GpuScene::material_graph_hashes)
+    /// during flush for PSO selection in the GBuffer pass.
+    pub graph_hash: u64,
 }
 
 /// Internal record for a light.

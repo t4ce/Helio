@@ -18,6 +18,7 @@ use crate::handles::{
     LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, SectionedInstanceId,
     TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId, VoxelVolumeId,
 };
+use crate::radiant::RadiantGraphRegistry;
 use super::voxel::VoxelVolumeRecord;
 use super::types::VoxelVolumeDescriptor;
 use crate::mesh::{MeshPool, MultiMeshRecord};
@@ -125,6 +126,10 @@ pub struct Scene {
     /// Monotonically increasing counter forwarded to `VgFrameData::buffer_version`.
     /// The VG pass re-uploads GPU buffers only when this advances.
     pub(in crate::scene) vg_buffer_version: u64,
+
+    // ── Radiant material graph system ──────────────────────────────────────────
+    /// Registry of compiled graph WGSL snippets, keyed by content hash.
+    pub radiant_graphs: RadiantGraphRegistry,
 
     /// Transform-only changes accumulated until the next scene flush (end exclusive).
     pub(in crate::scene) vg_instance_dirty_range: Option<(usize, usize)>,
@@ -302,6 +307,7 @@ impl Scene {
             vg_cpu_instances: Vec::new(),
             vg_cpu_work_items: Vec::new(),
             vg_max_draw_count: 0,
+            radiant_graphs: RadiantGraphRegistry::new(),
             water_volumes: DenseArena::new(),
             water_volumes_dirty: false,
             water_volumes_dirty_range: None,
@@ -335,6 +341,41 @@ impl Scene {
     pub fn remove_voxel_volume(&mut self, id: VoxelVolumeId) -> Result<()> {
         self.voxel_volumes.remove(id);
         self.gpu_scene.voxel_volume_count = self.voxel_volumes.len() as u32;
+        Ok(())
+    }
+
+    /// Set the material class and graph hash for an existing material.
+    ///
+    /// `material_class` selects the surface archetype template (0 = default PBR).
+    /// `graph_hash` selects a WGSL snippet from the graph registry (0 = none).
+    /// `feature_flags` overrides the material's feature flags (pass `None` to keep existing).
+    pub fn set_material_class(
+        &mut self,
+        material_id: MaterialId,
+        material_class: u32,
+        graph_hash: u64,
+        feature_flags: Option<u32>,
+    ) -> Result<()> {
+        let Some((slot, record)) = self.materials.get_mut_with_slot(material_id) else {
+            return Err(invalid("material"));
+        };
+        record.gpu.material_class = material_class;
+        record.graph_hash = graph_hash;
+        if let Some(flags) = feature_flags {
+            record.gpu.flags = flags;
+        }
+        let updated = self.gpu_scene.materials.update(slot, record.gpu);
+        debug_assert!(updated);
+        Ok(())
+    }
+
+    /// Update only the class_params of a material (no texture revalidation).
+    pub fn update_material_class_params(&mut self, material_id: MaterialId, params: [f32; 4]) -> Result<()> {
+        let Some((slot, record)) = self.materials.get_mut_with_slot(material_id) else {
+            return Err(invalid("material"));
+        };
+        record.gpu.class_params = params;
+        self.gpu_scene.materials.update(slot, record.gpu);
         Ok(())
     }
 

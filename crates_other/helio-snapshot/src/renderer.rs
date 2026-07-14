@@ -199,7 +199,8 @@ async fn render_snapshot_async<P: AsRef<Path>>(
         tex_occlusion: GpuMaterial::NO_TEXTURE,
         workflow: 0,
         flags: 0,
-        _pad: 0,
+        material_class: 0,
+        class_params: [0.0; 4],
     });
 
     // ── 8. Place a renderable object for each uploaded mesh ───────────────────
@@ -536,7 +537,7 @@ impl SnapshotBatch {
             tex_roughness:  GpuMaterial::NO_TEXTURE,
             tex_emissive:   GpuMaterial::NO_TEXTURE,
             tex_occlusion:  GpuMaterial::NO_TEXTURE,
-            workflow: 0, flags: 0, _pad: 0,
+            workflow: 0, flags: 0, material_class: 0, class_params: [0.0; 4],
         });
 
         for (i, mesh) in scene.meshes.iter().enumerate() {

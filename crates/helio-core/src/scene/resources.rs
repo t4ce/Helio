@@ -164,4 +164,16 @@ pub struct SceneResources<'a> {
     pub voxel_data_pool: &'a wgpu::Buffer,
     pub voxel_volume_count: u32,
     pub voxel_volumes_generation: u64,
+
+    /// Material class ranges for the GBuffer pass: [(class, graph_hash, start, count), ...]
+    /// Each range is uniform in both material_class and graph_hash so a single
+    /// PSO works for all indirect entries it covers.
+    /// Built during scene flush.
+    pub material_class_ranges: &'a [(u32, u64, u32, u32)],
+
+    /// Graph hashes indexed by material slot. Populated during flush.
+    pub material_graph_hashes: &'a [u64],
+
+    /// Compiled graph WGSL snippets keyed by hash. Populated during flush.
+    pub graph_wgsl_snippets: &'a std::collections::HashMap<u64, String>,
 }
