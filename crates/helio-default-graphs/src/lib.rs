@@ -318,16 +318,16 @@ fn build_default_graph_internal(
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
     user_effects: Option<&'static str>,
 ) -> RenderGraph {
-    let w = config.width;
-    let h = config.height;
+    let iw = config.internal_width();
+    let ih = config.internal_height();
 
     let mut graph = new_graph(device, queue, owns_device);
 
     let perf = add_common_early_passes(
-        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, w, h,
+        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, iw, ih,
     );
 
-    graph.add_pass(Box::new(LightCullPass::new(device, w, h)));
+    graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
@@ -346,7 +346,7 @@ fn build_default_graph_internal(
     // (extract pass has zero dirty bricks → no geometry emitted).
     graph.add_pass(Box::new(VoxelMeshPass::new(device, config.surface_format)));
 
-    add_late_passes(&mut graph, device, queue, scene, &config, &perf, w, h);
+    add_late_passes(&mut graph, device, queue, scene, &config, &perf, iw, ih);
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
@@ -356,7 +356,7 @@ fn build_default_graph_internal(
 
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
 
-    graph.lock(w, h);
+    graph.lock(iw, ih);
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let effect_snippet = user_effects;
