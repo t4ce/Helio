@@ -109,6 +109,68 @@ renderer.render(&camera, &surface_view)?;
 - Reusable voxel terrain component shared by mesh and ray-march rendering
 - GPU-native scene with dirty-tracked uploads
 
+### Radiant — hybrid material templates
+
+Radiant is a material system that combines hand-authored surface templates with graph-generated WGSL snippets. The GBuffer pass evaluates materials through a shared `radiant_eval_surface()` function containing `// RADIANT_OVERRIDE_SURFACE` markers — external graph compilers inject code at these points without touching the engine.
+
+**How it works:**
+
+- Material class selects the surface archetype: `0` = default PBR, `1+` = custom template
+- Feature flags toggle warp-uniform branches (`HAS_NORMAL_MAP`, `HAS_CLEAR_COAT`, `HAS_SUBSURFACE`, `HAS_ANISOTROPY`, `HAS_ALPHA_TEST`, etc.) at zero runtime cost
+- `class_params = [f32; 4]` provides class-specific float parameters read by templates or graph overrides
+- `graph_hash` references a WGSL snippet from the graph registry that overrides surface outputs at the `RADIANT_OVERRIDE_SURFACE` marker
+
+**Three tiers, one cost model:**
+
+| Tier | Mechanism | PSOs | Use case |
+|------|-----------|------|----------|
+| Tier 1 | Feature flags on the built-in uber-shader | 1 | ~95 % of materials — just toggle flags |
+| Tier 2 | Hand-authored `.wgsl` template + optional graph snippet | Per template | Surface archetypes (clear coat, hair, skin, fabric) |
+| Tier 3 | Full custom WGSL via graph compiler | Per snippet | Unique surfaces that don't fit a template |
+
+The GBuffer pass sorts instances by `(material_class, graph_hash)` at flush time and issues one `multi_draw_indexed_indirect` per PSO. Shader modules are lazily compiled and cached by `(template_id, graph_hash, feature_flags)`. The lighting pass is never touched — all variants write the same GBuffer format.
+
+**External toolchain API:**
+
+```rust
+use helio::radiant::{RadiantGraphRegistry, RadiantTemplateRegistry};
+
+// 1. Register a compiled graph snippet (called by your graph compiler)
+scene.radiant_graphs.register(graph_hash, wgsl_source);
+
+// 2. Load a new surface template from disk
+let template_id = scene.gbuffer_template_registry
+    .load_from_file("templates/clear_coat.wgsl").unwrap();
+
+// 3. Set a material to use the template with a specific graph
+scene.set_material_class(material_id,
+    template_id,             // material_class → selects the template
+    graph_hash,              // → selects the graph snippet (0 = none)
+    Some(flags),              // → overrides feature flags (None = keep existing)
+);
+
+// Or — Tier 1 — just toggle flags on the built-in PBR template:
+scene.set_material_class(material_id,
+    0,                       // class 0 = default PBR uber-shader
+    0,                       // no graph snippet
+    Some(FLAG_HAS_NORMAL_MAP | FLAG_ALPHA_TEST),
+);
+```
+
+**Registering templates at runtime:**
+
+```rust
+// From disk — useful for engine integrators shipping custom surface types
+let id = scene.gbuffer_template_registry
+    .load_from_file("paths/characters/skin.wgsl").unwrap();
+
+// From a string — useful for embedded or generated templates
+let id = scene.gbuffer_template_registry
+    .register_str("my_surface", wgsl_source);
+```
+
+The `gbuffer_template_registry` lives on the `Scene` and is wired into the GBuffer pass at graph construction time. Templates are full WGSL files with `// RADIANT_OVERRIDE_SURFACE` and `// RADIANT_OVERRIDE_END` markers — the graph snippet replaces everything between them.
+
 ### Pass system
 - 30+ pass crates, each independently versioned
 - Render graph automatically rebuilds on resize (no explicit rebuilder needed)
