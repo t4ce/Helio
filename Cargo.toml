@@ -4,6 +4,7 @@ members = [
 ]
 exclude = [
     "crates/examples",
+    "vendor/nebula",
     "vendor/wgpu",
 ]
 resolver = "2"

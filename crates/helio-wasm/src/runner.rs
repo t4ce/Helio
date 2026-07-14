@@ -225,6 +225,7 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
                         format: state.surface_format,
                         width: new_size.width,
                         height: new_size.height,
+                        color_space: wgpu::SurfaceColorSpace::Auto,
                         present_mode: wgpu::PresentMode::Fifo,
                         desired_maximum_frame_latency: 2,
                         alpha_mode: wgpu::CompositeAlphaMode::Auto,
@@ -278,29 +279,48 @@ async fn init_wgpu<T: HelioWasmApp>(
     window: Arc<Window>,
     state_cell: Rc<RefCell<Option<RunnerState<T>>>>,
 ) {
+    if let Some(message) = browser_webgpu_preflight_error() {
+        show_startup_error(&message);
+        return;
+    }
+
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        #[cfg(not(target_arch = "wasm32"))]
-        backends: wgpu::Backends::all(),
-        #[cfg(target_arch = "wasm32")]
-        backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+        backends: wgpu::Backends::BROWSER_WEBGPU,
         flags: wgpu::InstanceFlags::empty(),
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()))
     });
 
-    let surface = instance
-        .create_surface(window.clone())
-        .expect("helio-wasm: failed to create surface");
+    let surface = match instance.create_surface(window.clone()) {
+        Ok(surface) => surface,
+        Err(error) => {
+            show_startup_error(&format!(
+                "Helio could not create a browser WebGPU canvas surface.\n\n{error}"
+            ));
+            return;
+        }
+    };
 
-    let adapter = instance
+    let adapter = match instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         })
         .await
-        .expect("helio-wasm: no suitable wgpu adapter");
+    {
+        Ok(adapter) => adapter,
+        Err(error) => {
+            show_startup_error(&format!(
+                "Helio could not obtain a browser WebGPU adapter.\n\n\
+                 navigator.gpu is present, but the browser returned no adapter. The GPU, \
+                 driver, or browser configuration may be unsupported or blocklisted.\n\n{error}"
+            ));
+            return;
+        }
+    };
 
-    let (device, queue) = adapter
+    let (device, queue) = match adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("helio-wasm device"),
             required_features: helio::required_wgpu_features(adapter.features()),
@@ -308,7 +328,16 @@ async fn init_wgpu<T: HelioWasmApp>(
             ..Default::default()
         })
         .await
-        .expect("helio-wasm: failed to create device");
+    {
+        Ok(device) => device,
+        Err(error) => {
+            show_startup_error(&format!(
+                "Helio found a WebGPU adapter but could not create the required device.\n\n\
+                 This adapter may not expose Helio's required indirect-draw feature or limits.\n\n{error}"
+            ));
+            return;
+        }
+    };
 
     device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
         log::error!("[GPU uncaptured error] {:?}", e);
@@ -333,6 +362,7 @@ async fn init_wgpu<T: HelioWasmApp>(
             format: surface_format,
             width: size.width,
             height: size.height,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             present_mode: wgpu::PresentMode::Fifo,
             desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
@@ -410,6 +440,7 @@ async fn init_wgpu<T: HelioWasmApp>(
         start_time: now,
         last_time: now,
     });
+    hide_loading_overlay();
 }
 
 // ── Per-frame render helper ───────────────────────────────────────────────────
@@ -440,9 +471,10 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
     let camera = state.demo.update(&mut state.renderer, dt, elapsed, &input);
 
     let output = match state.surface.get_current_texture() {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("helio-wasm: surface error: {:?}", e);
+        wgpu::CurrentSurfaceTexture::Success(texture)
+        | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+        error => {
+            log::warn!("helio-wasm: surface error: {:?}", error);
             return;
         }
     };
@@ -453,7 +485,7 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
     if let Err(e) = state.renderer.render(&camera, &view) {
         log::error!("helio-wasm: render error: {:?}", e);
     }
-    output.present();
+    state.queue.present(output);
 }
 
 // ── Canvas helper (WASM only) ─────────────────────────────────────────────────
@@ -493,6 +525,99 @@ fn attach_canvas_to_body(window: &Window) {
     let _ = body.append_child(&web_sys::Element::from(canvas));
 }
 
+#[cfg(target_arch = "wasm32")]
+fn browser_webgpu_preflight_error() -> Option<String> {
+    let window = web_sys::window()?;
+    let location = window.location();
+    let href = location
+        .href()
+        .unwrap_or_else(|_| "the current page".to_string());
+
+    if !window.is_secure_context() {
+        if location.hostname().as_deref() == Ok("0.0.0.0") {
+            let redirect = href.replacen("://0.0.0.0", "://127.0.0.1", 1);
+            if location.replace(&redirect).is_ok() {
+                return Some(format!(
+                    "Redirecting the server bind address to a WebGPU-capable loopback origin:\n{redirect}"
+                ));
+            }
+        }
+
+        return Some(format!(
+            "Helio requires browser WebGPU, but this page is not a secure context:\n{href}\n\n\
+             Open the demo through http://localhost or http://127.0.0.1 instead of \
+             http://0.0.0.0. Production deployments must use HTTPS."
+        ));
+    }
+
+    let navigator = window.navigator();
+    let gpu =
+        js_sys::Reflect::get(navigator.as_ref(), &wasm_bindgen::JsValue::from_str("gpu")).ok();
+    if gpu.is_none_or(|gpu| gpu.is_null() || gpu.is_undefined()) {
+        return Some(format!(
+            "Helio requires browser WebGPU, but navigator.gpu is unavailable at:\n{href}\n\n\
+             Use a WebGPU-capable browser and confirm that WebGPU is enabled for this GPU and driver."
+        ));
+    }
+
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn browser_webgpu_preflight_error() -> Option<String> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_startup_error(message: &str) {
+    log::error!("helio-wasm startup error: {message}");
+
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let panel = document
+        .get_element_by_id("loading")
+        .or_else(|| document.create_element("div").ok());
+    let Some(panel) = panel else {
+        return;
+    };
+
+    panel.set_id("helio-startup-error");
+    panel.set_class_name("");
+    panel.set_text_content(Some(message));
+    let _ = panel.set_attribute(
+        "style",
+        "position:fixed;inset:0;z-index:1000;display:flex;align-items:center;\
+         justify-content:center;padding:clamp(24px,8vw,96px);background:#09090b;\
+         color:#e88;font:14px/1.6 system-ui,sans-serif;white-space:pre-wrap;\
+         text-align:left;",
+    );
+
+    if panel.parent_node().is_none() {
+        if let Some(body) = document.body() {
+            let _ = body.append_child(&panel);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn show_startup_error(message: &str) {
+    log::error!("helio-wasm startup error: {message}");
+}
+
+#[cfg(target_arch = "wasm32")]
+fn hide_loading_overlay() {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    if let Some(overlay) = document.get_element_by_id("loading") {
+        overlay.set_class_name("hidden");
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn hide_loading_overlay() {}
+
 // ── Public launch function ────────────────────────────────────────────────────
 
 /// Launch the demo.  Works on both native (blocking) and WASM (non-blocking).
@@ -529,4 +654,3 @@ pub fn launch<T: HelioWasmApp>() {
         event_loop.spawn_app(runner);
     }
 }
-

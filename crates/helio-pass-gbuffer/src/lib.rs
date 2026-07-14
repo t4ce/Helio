@@ -590,7 +590,7 @@ impl GBufferPass {
                     //   offset 24 — tex_coords1   Float32x2  location 5  (UV1: lightmap)
                     //   offset 32 — normal        Uint32     location 3
                     //   offset 36 — tangent       Uint32     location 4
-                    buffers: &[wgpu::VertexBufferLayout {
+                    buffers: &[Some(wgpu::VertexBufferLayout {
                         array_stride: 40,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[
@@ -625,7 +625,7 @@ impl GBufferPass {
                                 shader_location: 4,
                             },
                         ],
-                    }],
+                    })],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module,
@@ -740,4 +740,3 @@ fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         ],
     })
 }
-

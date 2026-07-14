@@ -16,7 +16,8 @@
 ///   5. Updates `prev_positions[i]` with the current position for next frame.
 ///
 /// The zeroing of `face_dirty` and `face_geom_count` each frame is done by
-/// thread 0 at workgroup 0 before the main loop.
+/// command-encoder buffer clears before this dispatch. This is intentionally
+/// not done by invocation 0: WGSL has no device-wide workgroup barrier.
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -126,20 +127,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let movable_count = uniforms.movable_draw_count;
     let face_count    = min(uniforms.face_count, MAX_FACES);
     let force_all     = uniforms.force_dirty_all;
-
-    // ── Initialisation: thread 0 zeroes the output arrays ──────────────────
-    // Only workgroup-global thread 0 does this to avoid races.
-    // The zeroing of face_dirty/face_geom_count happens BEFORE the position
-    // comparison below (no barrier needed within a single workgroup-0 thread).
-    if tid == 0u {
-        for (var f = 0u; f < face_count; f++) {
-            atomicStore(&face_dirty[f], 0u);
-            face_geom_count[f] = 0u;
-        }
-    }
-
-    // Ensure all threads see the zeroed arrays before writing dirty flags.
-    storageBarrier();
 
     // force_dirty_all: topology changed (movable count changed) — dirty every face.
     if force_all != 0u {

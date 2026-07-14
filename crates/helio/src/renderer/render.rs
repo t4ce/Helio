@@ -420,7 +420,9 @@ impl Renderer {
             staging_slice.map_async(wgpu::MapMode::Read, |_| {});
             self.device.poll(wgpu::PollType::wait_indefinitely());
             {
-                let mapped = staging_slice.get_mapped_range();
+                let mapped = staging_slice
+                    .get_mapped_range()
+                    .expect("cull statistics staging buffer should be mapped");
                 if mapped.len() >= 32 {
                     let ptr = mapped.as_ptr() as *const u32;
                     self.cull_stats = unsafe { std::ptr::read_unaligned(ptr.cast()) };

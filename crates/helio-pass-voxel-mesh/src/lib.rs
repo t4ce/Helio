@@ -342,7 +342,7 @@ impl VoxelMeshPass {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[
-                    wgpu::VertexBufferLayout {
+                    Some(wgpu::VertexBufferLayout {
                         array_stride: 16,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[wgpu::VertexAttribute {
@@ -350,8 +350,8 @@ impl VoxelMeshPass {
                             offset: 0,
                             shader_location: 0,
                         }],
-                    },
-                    wgpu::VertexBufferLayout {
+                    }),
+                    Some(wgpu::VertexBufferLayout {
                         array_stride: 16,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[wgpu::VertexAttribute {
@@ -359,7 +359,7 @@ impl VoxelMeshPass {
                             offset: 0,
                             shader_location: 1,
                         }],
-                    },
+                    }),
                 ],
             },
             fragment: Some(wgpu::FragmentState {

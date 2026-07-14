@@ -219,11 +219,15 @@ impl ShadowDirtyPass {
             mapped_at_creation: false,
         });
 
-        // face_dirty: one atomic<u32> per shadow face.  Zeroed by the shader each frame.
+        // face_dirty: one atomic<u32> per shadow face. Cleared by the command
+        // encoder before the compute dispatch, which provides ordering across
+        // every workgroup (a shader workgroup barrier cannot do that).
         let face_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ShadowDirty/FaceDirty"),
             size: (MAX_SHADOW_FACES * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
 
@@ -231,7 +235,9 @@ impl ShadowDirtyPass {
         let face_geom_count_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ShadowDirty/FaceGeomCount"),
             size: (MAX_SHADOW_FACES * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
 
@@ -342,13 +348,20 @@ impl RenderPass for ShadowDirtyPass {
 
         let bg = self.bind_group.as_ref().unwrap();
 
+        // Reset the complete output arrays before dispatch. Doing this as
+        // encoder commands avoids the cross-workgroup race that occurs when
+        // invocation zero clears storage while other workgroups write it.
+        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        encoder.clear_buffer(&self.face_dirty_buf, 0, None);
+        encoder.clear_buffer(&self.face_geom_count_buf, 0, None);
+
         // Dispatch enough threads to cover all movable draw calls.
-        // Thread 0 also zeroes face_dirty / face_geom_count, so dispatch at least 1.
+        // Dispatch at least one thread so topology changes with an empty
+        // movable set still pass through the force-dirty path.
         let thread_count = movable_draw_count.max(1);
         let workgroups = thread_count.div_ceil(WORKGROUP_SIZE);
 
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ShadowDirty"),
                 timestamp_writes: None,
             });
