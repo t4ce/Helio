@@ -138,8 +138,11 @@ use helio::radiant::{RadiantGraphRegistry, RadiantTemplateRegistry};
 // 1. Register a compiled graph snippet (called by your graph compiler)
 scene.radiant_graphs.register(graph_hash, wgsl_source);
 
-// 2. Load a new surface template from disk
-let template_id = scene.gbuffer_template_registry
+// 2. Load a new surface template — get the pass reference from the renderer
+let template_registry = renderer.find_pass_mut::<GBufferPass>()
+    .map(|p| p.template_registry_mut()).unwrap();
+
+let template_id = template_registry
     .load_from_file("templates/clear_coat.wgsl").unwrap();
 
 // 3. Set a material to use the template with a specific graph
@@ -160,16 +163,17 @@ scene.set_material_class(material_id,
 **Registering templates at runtime:**
 
 ```rust
-// From disk — useful for engine integrators shipping custom surface types
-let id = scene.gbuffer_template_registry
-    .load_from_file("paths/characters/skin.wgsl").unwrap();
+let reg = renderer.find_pass_mut::<GBufferPass>()
+    .map(|p| p.template_registry_mut()).unwrap();
 
-// From a string — useful for embedded or generated templates
-let id = scene.gbuffer_template_registry
-    .register_str("my_surface", wgsl_source);
+// From disk — for engine integrators shipping custom surface types
+let id = reg.load_from_file("paths/characters/skin.wgsl").unwrap();
+
+// From a string — for embedded or generated templates
+let id = reg.register_str("my_surface", wgsl_source);
 ```
 
-The `gbuffer_template_registry` lives on the `Scene` and is wired into the GBuffer pass at graph construction time. Templates are full WGSL files with `// RADIANT_OVERRIDE_SURFACE` and `// RADIANT_OVERRIDE_END` markers — the graph snippet replaces everything between them.
+Templates are full WGSL files with `// RADIANT_OVERRIDE_SURFACE` and `// RADIANT_OVERRIDE_END` markers. The graph snippet replaces everything between them. When no graph is present, the markers are removed and the template runs as-authored.
 
 ### Pass system
 - 30+ pass crates, each independently versioned
