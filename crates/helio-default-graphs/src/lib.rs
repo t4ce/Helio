@@ -52,6 +52,7 @@ fn new_graph(
 fn add_common_early_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
     scene: &Scene,
     config: &RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
@@ -63,7 +64,7 @@ fn add_common_early_passes(
     let gpu_scene = scene.gpu_scene();
     let camera_buf = gpu_scene.camera.buffer();
 
-    let hiz_pass = HiZBuildPass::new(device, w, h);
+    let hiz_pass = HiZBuildPass::new(device, queue, w, h);
     let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
 
     let shadow_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -103,6 +104,7 @@ fn add_common_early_passes(
 
     graph.add_pass(Box::new(ShadowPass::new(
         device,
+        queue,
         face_dirty_buf,
         face_geom_count_buf,
         face_cull_indirect,
@@ -364,6 +366,7 @@ fn build_default_graph_internal(
     let perf = add_common_early_passes(
         &mut graph,
         device,
+        queue,
         scene,
         &config,
         debug_state.clone(),
@@ -389,7 +392,11 @@ fn build_default_graph_internal(
     // Voxel mesh pass — real triangles with depth testing, composited over
     // deferred lighting. When no voxel volumes are present the pass is a no-op
     // (extract pass has zero dirty bricks → no geometry emitted).
-    graph.add_pass(Box::new(VoxelMeshPass::new(device, config.surface_format)));
+    graph.add_pass(Box::new(VoxelMeshPass::new(
+        device,
+        queue,
+        config.surface_format,
+    )));
 
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, iw, ih);
 
@@ -505,6 +512,7 @@ fn build_fxaa_graph_internal(
     let perf = add_common_early_passes(
         &mut graph,
         device,
+        queue,
         scene,
         &config,
         debug_state.clone(),
@@ -602,6 +610,7 @@ fn build_hlfs_graph_internal(
     let perf = add_common_early_passes(
         &mut graph,
         device,
+        queue,
         scene,
         &config,
         debug_state.clone(),
@@ -759,6 +768,7 @@ fn build_fxaa_hlfs_graph_internal(
     let perf = add_common_early_passes(
         &mut graph,
         device,
+        queue,
         scene,
         &config,
         debug_state.clone(),

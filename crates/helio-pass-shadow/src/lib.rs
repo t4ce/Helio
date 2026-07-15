@@ -147,6 +147,7 @@ impl ShadowPass {
     /// which writes them each frame; they arrive via `Arc`.
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         face_dirty_buf: Arc<wgpu::Buffer>,
         face_geom_count_buf: Arc<wgpu::Buffer>,
         face_cull_indirect: Arc<wgpu::Buffer>,
@@ -310,50 +311,38 @@ impl ShadowPass {
         //                                  first_vertex: 0, first_instance: 0 }
         // `multi_draw_indirect_count` uses `face_dirty_buf[face]` as the GPU draw count
         // (0 no clear, 1 clear), with indirect_offset = face * 16.
+        let mut clear_indirect_data = vec![[0u32; 4]; MAX_SHADOW_FACES];
+        for command in &mut clear_indirect_data {
+            command[0] = 3;
+            command[1] = 1;
+        }
+        // Avoid mappedAtCreation here and below: browser WebGPU may reject the
+        // active mapping synchronously even for a small, otherwise valid buffer.
         let clear_indirect_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow/ClearIndirect"),
             size: MAX_SHADOW_FACES as u64 * 16,
-            usage: wgpu::BufferUsages::INDIRECT,
-            mapped_at_creation: true,
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        {
-            let mut map = clear_indirect_buf
-                .slice(..)
-                .get_mapped_range_mut()
-                .expect("shadow indirect buffer should be mapped");
-            for i in 0..MAX_SHADOW_FACES {
-                let off = i * 16;
-                // vertex_count = 3
-                map.slice(off..off + 4).copy_from_slice(&3u32.to_ne_bytes());
-                // instance_count = 1
-                map.slice(off + 4..off + 8)
-                    .copy_from_slice(&1u32.to_ne_bytes());
-                // first_vertex = 0, first_instance = 0 (already zero from wgpu init)
-            }
-        }
-        clear_indirect_buf.unmap();
+        queue.write_buffer(
+            &clear_indirect_buf,
+            0,
+            bytemuck::cast_slice(&clear_indirect_data),
+        );
         // One u32 per face at FACE_BUF_STRIDE byte intervals.
         // The CPU never touches this buffer after construction.
+        let mut face_idx_data = vec![0u8; MAX_SHADOW_FACES * FACE_BUF_STRIDE as usize];
+        for i in 0..MAX_SHADOW_FACES {
+            let offset = i * FACE_BUF_STRIDE as usize;
+            face_idx_data[offset..offset + 4].copy_from_slice(&(i as u32).to_ne_bytes());
+        }
         let face_idx_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow/FaceIdx"),
             size: MAX_SHADOW_FACES as u64 * FACE_BUF_STRIDE,
-            usage: wgpu::BufferUsages::UNIFORM,
-            mapped_at_creation: true,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        {
-            let mut map = face_idx_buf
-                .slice(..)
-                .get_mapped_range_mut()
-                .expect("shadow face index buffer should be mapped");
-            for i in 0..MAX_SHADOW_FACES {
-                let offset = i * FACE_BUF_STRIDE as usize;
-                // Write the face index as a little-endian u32; the rest of the 256-byte
-                // slot is zero-initialised by wgpu (mapped buffers are zeroed).
-                map.slice(offset..offset + 4)
-                    .copy_from_slice(&(i as u32).to_ne_bytes());
-            }
-        }
-        face_idx_buf.unmap();
+        queue.write_buffer(&face_idx_buf, 0, &face_idx_data);
 
         // ── Face views (lazily initialized from graph-owned textures) ──────────
         let face_views = Box::default();
