@@ -31,7 +31,6 @@ nebula-probe      = { path = "crates/nebula-probe" }
 nebula-audio      = { path = "crates/nebula-audio" }
 nebula-visibility = { path = "crates/nebula-visibility" }
 nebula-nav        = { path = "crates/nebula-nav" }
-
 # ── GPU (Helio's direct browser WebGPU runtime) ────────────────────────────
 wgpu = { package = "helio-webgpu", path = "../../crates/helio-webgpu", default-features = false, features = ["webgpu", "wgsl"] }
 

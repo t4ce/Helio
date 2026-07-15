@@ -275,6 +275,31 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
 
 // ── One-shot async wgpu initialisation ────────────────────────────────────────
 
+#[cfg(target_arch = "wasm32")]
+fn create_browser_surface(
+    instance: &wgpu::Instance,
+    window: &Window,
+) -> Result<wgpu::Surface<'static>, String> {
+    use winit::platform::web::WindowExtWebSys;
+
+    window
+        .canvas()
+        .ok_or_else(|| "winit did not create an HTML canvas".to_string())
+        .and_then(|canvas| {
+            instance
+                .create_surface(canvas)
+                .map_err(|error| error.to_string())
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn create_browser_surface(
+    _instance: &wgpu::Instance,
+    _window: &Window,
+) -> Result<wgpu::Surface<'static>, String> {
+    Err("Helio's direct WebGPU runtime requires a wasm32 browser target".to_string())
+}
+
 async fn init_wgpu<T: HelioWasmApp>(
     window: Arc<Window>,
     state_cell: Rc<RefCell<Option<RunnerState<T>>>>,
@@ -290,15 +315,7 @@ async fn init_wgpu<T: HelioWasmApp>(
         ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()))
     });
 
-    use winit::platform::web::WindowExtWebSys;
-    let surface = match window
-        .canvas()
-        .ok_or_else(|| "winit did not create an HTML canvas".to_string())
-        .and_then(|canvas| {
-            instance
-                .create_surface(canvas)
-                .map_err(|error| error.to_string())
-        }) {
+    let surface = match create_browser_surface(&instance, &window) {
         Ok(surface) => surface,
         Err(error) => {
             show_startup_error(&format!(

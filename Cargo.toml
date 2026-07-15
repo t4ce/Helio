@@ -1,3 +1,17 @@
+[package]
+name = "helio-workspace"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Workspace root"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "web"
+path = "src/bin/web.rs"
+
 [workspace]
 members = [
     "crates/*"
@@ -5,7 +19,6 @@ members = [
 exclude = [
     "crates/examples",
     "vendor/nebula",
-    "vendor/wgpu",
 ]
 resolver = "2"
 
@@ -17,7 +30,7 @@ blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd1
 blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
-winit = { version = "0.30.12", default-features = false, features = ["rwh_06"] }
+winit = { version = "0.30.12", default-features = false, features = ["rwh_06", "x11"] }
 env_logger = "0.11"
 log = "0.4"
 
@@ -43,3 +56,6 @@ helio-asset-compat = { path = "crates/helio-asset-compat" }
 helio-voxel-core = { path = "crates/helio-voxel-core" }
 helio-pass-corona = { path = "crates/helio-pass-corona" }
 helio-pass-sdf = { path = "crates/helio-pass-sdf" }
+
+[dependencies]
+tiny_http = "0.12"
