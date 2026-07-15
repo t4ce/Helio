@@ -392,6 +392,10 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
 impl RenderPass for TaaPass {
     fn name(&self) -> &'static str { "TAA" }
 
+    fn requires_camera_jitter(&self) -> bool {
+        true
+    }
+
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,

@@ -332,11 +332,11 @@ impl Renderer {
         self.shadow_quality = quality;
     }
 
-    /// Enables/disables per-frame TAA-style subpixel camera jitter (on by
-    /// default). Turn this off for graphs that have no temporal-accumulation
-    /// pass (e.g. an FXAA-only or raymarch graph without TaaPass) — otherwise
-    /// the jittered projection never gets resolved and the image visibly
-    /// shimmers every frame.
+    /// Overrides the graph-derived per-frame camera-jitter setting.
+    ///
+    /// Graphs containing a temporal reconstruction pass enable jitter
+    /// automatically. FXAA and other non-temporal graphs leave it disabled so
+    /// the final image remains pixel-stable.
     pub fn set_jitter_enabled(&mut self, enabled: bool) {
         self.enable_jitter = enabled;
     }

@@ -127,6 +127,11 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Camera jitter is only valid when a temporal pass reconstructs it.
+        // Applying it to FXAA/non-temporal graphs shifts the final image every
+        // frame and presents as whole-scene shimmer.
+        let enable_jitter = graph.requires_camera_jitter();
+
         // Extract the rebuilder that was stored in the graph by the builder function
         let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
 
@@ -179,7 +184,7 @@ impl Renderer {
             jitter_matrices,
             jitter_cache_width: internal_w,
             jitter_cache_height: internal_h,
-            enable_jitter: true,
+            enable_jitter,
             #[cfg(feature = "bake")]
             bake_pending: None,
             #[cfg(feature = "bake")]
