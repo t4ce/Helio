@@ -1,14 +1,14 @@
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
 use std::sync::{mpsc, OnceLock};
 
 #[cfg(debug_assertions)]
 static FRAME_UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
 static REPORTER: OnceLock<mpsc::Sender<u64>> = OnceLock::new();
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
 fn reporter() -> &'static mpsc::Sender<u64> {
     REPORTER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<u64>();
@@ -67,7 +67,9 @@ pub fn finish_frame() {
     #[cfg(debug_assertions)]
     {
         let frame_bytes = FRAME_UPLOAD_BYTES.swap(0, Ordering::Relaxed);
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = reporter().send(frame_bytes);
+        #[cfg(target_arch = "wasm32")]
+        let _ = frame_bytes;
     }
 }
-

@@ -1,0 +1,28 @@
+[package]
+name = "helio-webgpu"
+version = "0.1.0"
+edition = "2021"
+description = "Helio's direct browser WebGPU runtime"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bitflags = "2"
+js-sys = "0.3"
+raw-window-handle = { version = "0.6", features = ["alloc"] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "HtmlCanvasElement",
+    "Navigator",
+    "NodeList",
+    "OffscreenCanvas",
+    "Window",
+    "WorkerGlobalScope",
+] }
+
+[features]
+default = ["std", "webgpu", "wgsl"]
+std = []
+webgpu = []
+wgsl = []

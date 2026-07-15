@@ -463,15 +463,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "document-features"
-version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
-dependencies = [
- "litrs",
-]
-
-[[package]]
 name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -695,6 +686,7 @@ dependencies = [
  "helio-core",
  "helio-pass-postprocess",
  "helio-voxel-core",
+ "helio-webgpu",
  "image",
  "libhelio",
  "log",
@@ -704,7 +696,6 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "web-time",
- "wgpu",
  "windows",
 ]
 
@@ -715,6 +706,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.0",
  "helio",
+ "helio-webgpu",
  "image",
  "libhelio",
  "log",
@@ -724,7 +716,6 @@ dependencies = [
  "solid-rs",
  "solid-usd",
  "thiserror 2.0.18",
- "wgpu",
 ]
 
 [[package]]
@@ -737,13 +728,13 @@ dependencies = [
  "glam 0.33.0",
  "half",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
  "log",
  "nebula",
  "pollster 0.4.0",
  "serde",
  "thiserror 2.0.18",
- "wgpu",
 ]
 
 [[package]]
@@ -753,10 +744,10 @@ dependencies = [
  "bytemuck",
  "glam 0.33.0",
  "helio-voxel-core",
+ "helio-webgpu",
  "libhelio",
  "pollster 0.4.0",
  "thiserror 2.0.18",
- "wgpu",
 ]
 
 [[package]]
@@ -790,8 +781,8 @@ dependencies = [
  "helio-pass-virtual-geometry",
  "helio-pass-voxel-mesh",
  "helio-pass-water-sim",
+ "helio-webgpu",
  "image",
- "wgpu",
 ]
 
 [[package]]
@@ -800,8 +791,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -810,8 +801,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -820,8 +811,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -830,8 +821,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -840,8 +831,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -850,9 +841,9 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
  "log",
- "wgpu",
 ]
 
 [[package]]
@@ -861,8 +852,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -872,9 +863,9 @@ dependencies = [
  "bytemuck",
  "helio",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
  "log",
- "wgpu",
 ]
 
 [[package]]
@@ -883,9 +874,9 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
  "log",
- "wgpu",
 ]
 
 [[package]]
@@ -895,8 +886,8 @@ dependencies = [
  "bytemuck",
  "glam 0.33.0",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -905,8 +896,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -915,8 +906,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -925,8 +916,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -935,8 +926,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -945,8 +936,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -955,8 +946,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -966,9 +957,9 @@ dependencies = [
  "bytemuck",
  "glam 0.33.0",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
  "log",
- "wgpu",
 ]
 
 [[package]]
@@ -977,9 +968,9 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
  "log",
- "wgpu",
 ]
 
 [[package]]
@@ -988,8 +979,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -998,8 +989,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1008,8 +999,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1018,9 +1009,9 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
  "log",
- "wgpu",
 ]
 
 [[package]]
@@ -1029,8 +1020,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1039,8 +1030,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1049,8 +1040,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1059,8 +1050,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1069,8 +1060,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1079,8 +1070,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1088,8 +1079,8 @@ name = "helio-pass-underwater"
 version = "0.1.0"
 dependencies = [
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1098,10 +1089,10 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
  "log",
  "naga",
- "wgpu",
 ]
 
 [[package]]
@@ -1112,9 +1103,9 @@ dependencies = [
  "glam 0.33.0",
  "helio-core",
  "helio-voxel-core",
+ "helio-webgpu",
  "libhelio",
  "log",
- "wgpu",
 ]
 
 [[package]]
@@ -1125,9 +1116,9 @@ dependencies = [
  "glam 0.33.0",
  "helio-core",
  "helio-voxel-core",
+ "helio-webgpu",
  "libhelio",
  "log",
- "wgpu",
 ]
 
 [[package]]
@@ -1135,8 +1126,8 @@ name = "helio-pass-water-caustics"
 version = "0.1.0"
 dependencies = [
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1145,8 +1136,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1154,8 +1145,8 @@ name = "helio-pass-water-surface"
 version = "0.1.0"
 dependencies = [
  "helio-core",
+ "helio-webgpu",
  "libhelio",
- "wgpu",
 ]
 
 [[package]]
@@ -1176,13 +1167,13 @@ dependencies = [
  "glam 0.33.0",
  "helio",
  "helio-default-graphs",
+ "helio-webgpu",
  "js-sys",
  "log",
  "pollster 0.4.0",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "wgpu",
  "winit",
 ]
 
@@ -1200,9 +1191,21 @@ dependencies = [
  "helio-default-graphs",
  "helio-pass-sdf",
  "helio-wasm",
+ "helio-webgpu",
  "log",
  "wasm-bindgen",
- "wgpu",
+]
+
+[[package]]
+name = "helio-webgpu"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.11.0",
+ "js-sys",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -1327,7 +1330,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.0",
- "wgpu",
+ "helio-webgpu",
 ]
 
 [[package]]
@@ -1369,12 +1372,6 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
-
-[[package]]
-name = "litrs"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "log"
@@ -1457,6 +1454,8 @@ dependencies = [
 [[package]]
 name = "naga-types"
 version = "30.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "658200ddc25c6c7b860747516d132d1b284c0fafb7a380233acee9a72fb30e11"
 dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
@@ -1514,6 +1513,7 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "glam 0.33.0",
+ "helio-webgpu",
  "log",
  "nebula-core",
  "nebula-gpu",
@@ -1521,7 +1521,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "wgpu",
 ]
 
 [[package]]
@@ -1532,12 +1531,12 @@ dependencies = [
  "bitflags 2.11.0",
  "bytemuck",
  "glam 0.33.0",
+ "helio-webgpu",
  "log",
  "pollster 0.3.0",
  "serde",
  "thiserror 1.0.69",
  "uuid",
- "wgpu",
 ]
 
 [[package]]
@@ -1546,10 +1545,10 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.0",
+ "helio-webgpu",
  "log",
  "nebula-core",
  "thiserror 1.0.69",
- "wgpu",
 ]
 
 [[package]]
@@ -1559,6 +1558,7 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "glam 0.33.0",
+ "helio-webgpu",
  "log",
  "nebula-core",
  "nebula-gpu",
@@ -1568,7 +1568,6 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "uuid",
- "wgpu",
 ]
 
 [[package]]
@@ -1579,6 +1578,7 @@ dependencies = [
  "bincode 2.0.1",
  "bytemuck",
  "glam 0.33.0",
+ "helio-webgpu",
  "log",
  "nebula-core",
  "nebula-gpu",
@@ -1586,7 +1586,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "wgpu",
 ]
 
 [[package]]
@@ -1610,6 +1609,7 @@ dependencies = [
  "bincode 2.0.1",
  "bytemuck",
  "glam 0.33.0",
+ "helio-webgpu",
  "log",
  "nebula-core",
  "nebula-gpu",
@@ -1618,7 +1618,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "wgpu",
 ]
 
 [[package]]
@@ -1989,12 +1988,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "profiling"
-version = "1.0.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eb8486b569e12e2c32ad3e204dbaba5e4b5b216e9367044f25f1dba42341773"
-
-[[package]]
 name = "pxfm"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2278,12 +2271,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2530,42 +2517,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "wgpu"
-version = "30.0.0"
-dependencies = [
- "arrayvec",
- "bitflags 2.11.0",
- "bytemuck",
- "cfg-if",
- "document-features",
- "hashbrown 0.17.1",
- "js-sys",
- "log",
- "portable-atomic",
- "profiling",
- "raw-window-handle",
- "static_assertions",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "wgpu-types",
-]
-
-[[package]]
-name = "wgpu-types"
-version = "30.0.0"
-dependencies = [
- "bitflags 2.11.0",
- "bytemuck",
- "js-sys",
- "log",
- "naga-types",
- "raw-window-handle",
- "static_assertions",
- "web-sys",
 ]
 
 [[package]]

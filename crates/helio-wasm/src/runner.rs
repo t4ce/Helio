@@ -290,7 +290,15 @@ async fn init_wgpu<T: HelioWasmApp>(
         ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()))
     });
 
-    let surface = match instance.create_surface(window.clone()) {
+    use winit::platform::web::WindowExtWebSys;
+    let surface = match window
+        .canvas()
+        .ok_or_else(|| "winit did not create an HTML canvas".to_string())
+        .and_then(|canvas| {
+            instance
+                .create_surface(canvas)
+                .map_err(|error| error.to_string())
+        }) {
         Ok(surface) => surface,
         Err(error) => {
             show_startup_error(&format!(

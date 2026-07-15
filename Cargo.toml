@@ -9,12 +9,10 @@ exclude = [
 ]
 resolver = "2"
 
-[patch.crates-io]
-# Keep Naga's shared WebGPU types on the same vendored package used by wgpu.
-naga-types = { path = "vendor/wgpu/naga-types" }
-
 [workspace.dependencies]
-wgpu = { version = "30.0.0", path = "vendor/wgpu/wgpu", default-features = false, features = ["webgpu", "wgsl"] }
+# Keep the established `wgpu::` source paths while resolving them to Helio's
+# browser-only WebGPU runtime instead of the upstream wgpu package.
+wgpu = { package = "helio-webgpu", path = "crates/helio-webgpu", default-features = false, features = ["webgpu", "wgsl"] }
 blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 bytemuck = { version = "1", features = ["derive"] }

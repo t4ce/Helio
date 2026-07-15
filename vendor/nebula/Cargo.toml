@@ -32,8 +32,8 @@ nebula-audio      = { path = "crates/nebula-audio" }
 nebula-visibility = { path = "crates/nebula-visibility" }
 nebula-nav        = { path = "crates/nebula-nav" }
 
-# ── GPU (same fork as Helio for device/queue interop) ─────────────────────────
-wgpu = { version = "30.0.0", path = "../wgpu/wgpu", default-features = false, features = ["webgpu", "wgsl"] }
+# ── GPU (Helio's direct browser WebGPU runtime) ────────────────────────────
+wgpu = { package = "helio-webgpu", path = "../../crates/helio-webgpu", default-features = false, features = ["webgpu", "wgsl"] }
 
 # ── Math + data ───────────────────────────────────────────────────────────────
 glam      = { version = "0.33", features = ["bytemuck", "serde"] }
