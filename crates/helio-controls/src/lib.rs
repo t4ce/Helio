@@ -186,7 +186,10 @@ impl Default for FlyCameraConfig {
             pitch_max: 1.5,
             movement: FlyMovement::ViewPlane,
             normalize_movement: false,
-            max_delta_seconds: 0.1,
+            // Desktop demos use a tighter cap so a focus change, window drag,
+            // or debugger stop cannot visibly jump the camera through a scene.
+            // This is the standard Helio/Linux flycam policy.
+            max_delta_seconds: 0.05,
         }
     }
 }
