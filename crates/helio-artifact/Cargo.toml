@@ -1,0 +1,15 @@
+[package]
+name = "helio-artifact"
+version = "0.1.0"
+edition = "2021"
+description = "Versioned build artifact contract between Helio captures and target runtimes"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["std"]
+std = ["serde/std", "serde_json/std"]
+
+[dependencies]
+crc32fast = { version = "1.5", default-features = false }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }

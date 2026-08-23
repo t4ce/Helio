@@ -1,0 +1,30 @@
+[package]
+name = "helio-asset-compat"
+version = "0.1.0"
+edition = "2021"
+description = "SolidRS integration layer for Helio renderer - asset loading and conversion"
+
+[dependencies]
+# Helio renderer facade
+helio = { workspace = true }
+libhelio = { workspace = true }
+
+# SolidRS - 3D asset loading
+solid-rs = { workspace = true, features = ["configurator"] }
+solid-gltf = { workspace = true, features = ["configurator"] }
+solid-fbx = { workspace = true, features = ["configurator"] }
+solid-obj = { workspace = true, features = ["configurator"] }
+solid-usd = { workspace = true, features = ["configurator"] }
+solid-unreal = { workspace = true }
+
+# Math and utilities
+glam.workspace = true
+log.workspace = true
+thiserror = { workspace = true }
+
+# GPU
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+
+# Image decoding
+image = { workspace = true, features = ["png", "jpeg"] }

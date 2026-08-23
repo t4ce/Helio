@@ -1,0 +1,55 @@
+[package]
+name = "helio-default-graphs"
+version = "0.1.0"
+edition = "2021"
+description = "Default render graph builders for Helio — depends on all pass crates"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio = { path = "../helio" }
+helio-core = { workspace = true }
+image = { workspace = true, features = ["png"] }
+wgpu = { workspace = true }
+helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }
+helio-pass-corona = { path = "../passes/3d/helio-pass-corona" }
+helio-pass-flare = { path = "../passes/3d/helio-pass-flare" }
+helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
+helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
+helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
+helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
+helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
+helio-foliage-core = { workspace = true }
+helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
+helio-pass-foliage-place = { path = "../passes/3d/helio-pass-foliage-place" }
+helio-pass-foliage-gbuffer = { path = "../passes/3d/helio-pass-foliage-gbuffer" }
+helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
+helio-pass-hlfs = { path = "../passes/3d/helio-pass-hlfs" }
+helio-pass-indirect-dispatch = { path = "../passes/3d/helio-pass-indirect-dispatch" }
+helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
+helio-pass-occlusion-cull = { path = "../passes/3d/helio-pass-occlusion-cull" }
+helio-pass-portal-cull = { path = "../passes/3d/helio-pass-portal-cull" }
+helio-pass-portal-instances = { path = "../passes/3d/helio-pass-portal-instances" }
+helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
+helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflection" }
+helio-pass-planetary-voxel = { path = "../passes/3d/helio-pass-planetary-voxel" }
+helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
+helio-pass-shadow = { path = "../passes/3d/helio-pass-shadow" }
+helio-pass-shadow-cull = { path = "../passes/3d/helio-pass-shadow-cull" }
+helio-pass-shadow-dirty = { path = "../passes/3d/helio-pass-shadow-dirty" }
+helio-pass-shadow-matrix = { path = "../passes/3d/helio-pass-shadow-matrix" }
+helio-pass-simple-cube = { path = "../passes/3d/helio-pass-simple-cube" }
+helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }
+helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
+helio-pass-sky-lut = { path = "../passes/3d/helio-pass-sky-lut" }
+helio-pass-tsr = { workspace = true }
+helio-pass-radiance-cascades = { path = "../passes/3d/helio-pass-radiance-cascades" }
+helio-pass-volumetric-fog = { workspace = true }
+helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
+helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
+helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
+helio-pass-voxel-mesh = { path = "../passes/3d/helio-pass-voxel-mesh" }
+helio-pass-dof = { path = "../passes/3d/helio-pass-dof" }
+
+[dev-dependencies]
+pollster = { workspace = true }
+glam = { workspace = true }

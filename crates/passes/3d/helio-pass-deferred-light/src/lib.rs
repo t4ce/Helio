@@ -1,0 +1,1632 @@
+use bytemuck::{Pod, Zeroable};
+use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use std::borrow::Cow;
+
+/// Maximum sampled textures visible to either deferred-light fragment entry point.
+///
+/// Base lighting uses nine G-buffer inputs and seven scene textures. Reflection
+/// composition uses six G-buffer inputs and four reflection textures.
+pub const BASE_SAMPLED_TEXTURE_COUNT: u32 = 16;
+pub const REFLECTION_SAMPLED_TEXTURE_COUNT: u32 = 10;
+/// Base lighting exposes exactly eight fragment storage bindings: camera,
+/// canonical lights, shadow matrices, canonical water, light projections,
+/// water projections, and the two tiled-light buffers. This intentionally
+/// consumes the full WebGPU 8-binding tier; the downlevel 4-binding tier is not
+/// supported by this pass and new storage bindings require an ABI redesign.
+pub const BASE_FRAGMENT_STORAGE_BINDING_COUNT: u32 = 8;
+pub const REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE: u32 = 8;
+const _: () = assert!(BASE_SAMPLED_TEXTURE_COUNT == 16);
+const _: () = assert!(REFLECTION_SAMPLED_TEXTURE_COUNT <= 16);
+const _: () = assert!(BASE_FRAGMENT_STORAGE_BINDING_COUNT == REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE);
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DeferredGlobals {
+    frame: u32,
+    delta_time: f32,
+    light_count: u32,
+    ambient_intensity: f32,
+    ambient_color: [f32; 4],
+    rc_world_min: [f32; 4],
+    rc_world_max: [f32; 4],
+    csm_splits: [f32; 4],
+    debug_mode: u32,
+    /// 1 if a real HLFS-produced radiance-cascade texture is bound this frame,
+    /// 0 if it fell back to the dummy placeholder (e.g. FXAA/simple/default
+    /// pipelines, which never run the HLFS inject/propagate passes). Lets the
+    /// shader skip `sample_rc_irradiance()` entirely instead of paying for its
+    /// ~128 texture loads per pixel against data that was never written.
+    has_rc_gi: u32,
+    /// Number of tiles in the X dimension for tiled light culling.
+    num_tiles_x: u32,
+    /// Number of reflection captures in the capture storage buffer. Zero means
+    /// the shader skips capture blending and falls straight through to the
+    /// skylight cubemap.
+    reflection_capture_count: u32,
+    /// 0 on targets where `helio_core::REFLECTIONS_SUPPORTED` is false. Makes
+    /// the shader skip the reflection-capture cube array along with the SSR and
+    /// planar composites, so no reflection path contributes to indirect
+    /// specular. Direct light, ambient and RC GI are unaffected.
+    enable_reflections: u32,
+    /// 0 disables the environment-cubemap indirect specular term specifically.
+    ///
+    /// The cubemap is the *base* reflection layer — SSR and planar reflections
+    /// only composite on top of it — so gating those two passes does not remove
+    /// reflections from the image. This is the switch that does.
+    enable_env_reflections: u32,
+    /// Active compact water membership. Matching scans the shared canonical
+    /// projection order used by the other water consumers.
+    water_volume_count: u32,
+    /// Stable simulation slots whose current generation was already produced
+    /// by WaterSim in an earlier frame. Deferred runs before WaterSim because
+    /// the latter composites onto `pre_aa`, so a changed slot must be suppressed
+    /// for one frame instead of sampling the removed occupant's history.
+    water_ready_mask: u32,
+}
+
+fn advance_water_slot_readiness(
+    observed_generations: &mut [u64; helio_core::WATER_SIM_SLOT_COUNT],
+    projections: &[[u32; 2]],
+    current_generations: &[u64; helio_core::WATER_SIM_SLOT_COUNT],
+) -> u32 {
+    let mut ready_mask = 0u32;
+    for projection in projections.iter().take(helio_core::WATER_SIM_SLOT_COUNT) {
+        let Ok(slot) = usize::try_from(projection[1]) else {
+            continue;
+        };
+        let (Some(observed), Some(current)) = (
+            observed_generations.get_mut(slot),
+            current_generations.get(slot),
+        ) else {
+            continue;
+        };
+        if *observed == *current {
+            ready_mask |= 1u32 << slot;
+        } else {
+            *observed = *current;
+        }
+    }
+    ready_mask
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeferredSceneBindKey {
+    resources: [usize; 17],
+    water_volume_epoch: Option<u64>,
+    water_projection_epoch: u64,
+}
+
+pub struct DeferredLightPass {
+    pipeline: wgpu::RenderPipeline,
+    reflection_pipeline: wgpu::RenderPipeline,
+    reflection_debug_pipeline: wgpu::RenderPipeline,
+    globals_buf: wgpu::Buffer,
+    shadow_config_buf: wgpu::Buffer,
+    bgl_1: wgpu::BindGroupLayout,
+    bgl_2: wgpu::BindGroupLayout,
+    bgl_3: wgpu::BindGroupLayout,
+    reflection_bgl_1: wgpu::BindGroupLayout,
+    reflection_bgl_2: wgpu::BindGroupLayout,
+    bind_group_0: wgpu::BindGroup,
+    bind_group_1: Option<wgpu::BindGroup>,
+    bind_group_2: Option<wgpu::BindGroup>,
+    bind_group_3: Option<wgpu::BindGroup>,
+    reflection_bind_group_1: Option<wgpu::BindGroup>,
+    reflection_bind_group_2: Option<wgpu::BindGroup>,
+    bind_group_1_key: Option<[usize; 9]>,
+    bind_group_2_key: Option<DeferredSceneBindKey>,
+    bind_group_3_key: Option<(usize, usize)>,
+    reflection_bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    reflection_bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
+    fallback_tile_lists: wgpu::Buffer,
+    fallback_tile_counts: wgpu::Buffer,
+    pre_aa_format: wgpu::TextureFormat,
+    fallback_shadow_view: wgpu::TextureView,
+    fallback_static_shadow_view: wgpu::TextureView,
+    fallback_shadow_sampler: wgpu::Sampler,
+    shadow_depth_sampler: wgpu::Sampler,
+    fallback_env_view: wgpu::TextureView,
+    fallback_env_sampler: wgpu::Sampler,
+    fallback_rc_view: wgpu::TextureView,
+    fallback_caustics_view: wgpu::TextureView,
+    fallback_water_sim_view: wgpu::TextureView,
+    caustics_sampler: wgpu::Sampler,
+    /// 1×1 white R8Unorm fallback used when neither SSAO nor baked AO is available.
+    fallback_ao_view: wgpu::TextureView,
+    fallback_ao_sampler: wgpu::Sampler,
+    /// 1×1 black Rgba16Float fallback used when baked lightmap is not available.
+    fallback_lightmap_view: wgpu::TextureView,
+    fallback_lightmap_sampler: wgpu::Sampler,
+    /// 1×1 black Rg16Float fallback for lightmap UVs when not available.
+    fallback_lightmap_uv_view: wgpu::TextureView,
+    /// 1×1 black Rgba16Float fallback for SSR when not available.
+    fallback_ssr_view: wgpu::TextureView,
+    /// 1×1 black Rgba16Float fallback for planar reflections when not available.
+    fallback_planar_view: wgpu::TextureView,
+    fallback_ies_view: wgpu::TextureView,
+    ies_sampler: wgpu::Sampler,
+    /// Last generation presented to Deferred for each stable water slot. A
+    /// mismatch is withheld for one frame, during which WaterSim clears and
+    /// repopulates that layer later in the graph.
+    water_sim_slot_generations: [u64; helio_core::WATER_SIM_SLOT_COUNT],
+    pub debug_mode: u32,
+    /// Whether the environment cubemap contributes indirect specular.
+    pub enable_env_reflections: bool,
+}
+
+impl DeferredLightPass {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera_buf: &wgpu::Buffer,
+        pre_aa_format: wgpu::TextureFormat,
+    ) -> Self {
+        assert!(
+            device.limits().max_storage_buffers_per_shader_stage
+                >= REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE,
+            "DeferredLightPass requires the WebGPU 8-storage-buffer tier (all eight fragment \
+             bindings are active); the downlevel four-binding tier requires a packed \
+             camera/tile/shadow projection ABI"
+        );
+        assert!(
+            device.limits().max_sampled_textures_per_shader_stage
+                >= BASE_SAMPLED_TEXTURE_COUNT,
+            "DeferredLightPass requires the WebGPU 16-sampled-texture tier (all sixteen \
+             base fragment bindings are active); adding another sampled input requires \
+             splitting the base lighting draw"
+        );
+
+        // Fallback 1-entry storage buffers used when LightCullPass is absent.
+        let fallback_tile_lists = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Deferred Fallback TileLists"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let fallback_tile_counts = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Deferred Fallback TileCounts"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let raw_src = include_str!("../shaders/deferred_lighting.wgsl");
+        let src = if raw_src.contains("//!use pbr_eval") {
+            let mut resolved = String::with_capacity(
+                raw_src.len() + libhelio::shader::PBR_EVAL.len(),
+            );
+            resolved.push_str(libhelio::shader::PBR_EVAL);
+            resolved.push('\n');
+            resolved.push_str(raw_src);
+            Cow::Owned(resolved)
+        } else {
+            Cow::Borrowed(raw_src)
+        };
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Deferred Lighting Shader"),
+            source: wgpu::ShaderSource::Wgsl(src),
+        });
+
+        let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Deferred Globals"),
+            size: std::mem::size_of::<DeferredGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let shadow_config_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow Config"),
+            size: std::mem::size_of::<libhelio::ShadowConfig>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &shadow_config_buf,
+            0,
+            bytemuck::bytes_of(&libhelio::ShadowConfig::from_quality(
+                libhelio::ShadowQuality::Medium,
+            )),
+        );
+
+        let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("DeferredLight BGL0"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("DeferredLight BGL1"),
+            entries: &[
+                texture_entry(0, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Screen-space AO (SSAO result or pre-baked AO). Filterable so the
+                // bilinear sampler can soften the AO at the edges of the screen.
+                texture_entry(5, wgpu::TextureSampleType::Float { filterable: true }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Lightmap UVs from GBuffer (binding 7, Rg16Float)
+                texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                // SSS data: subsurface_color.rgb + subsurface_radius (Rgba16Float)
+                texture_entry(8, wgpu::TextureSampleType::Float { filterable: false }),
+                // Extra surface data: roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(flags) (Rgba16Float)
+                texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
+            ],
+        });
+        let bgl_2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("DeferredLight BGL2"),
+            entries: &[
+                storage_entry(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                storage_entry(4),
+                texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Water caustics array, addressed by stable water sim slot.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Caustics sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Water volumes buffer
+                storage_entry(10),
+                // Static shadow atlas (cached, rendered only when Static/Stationary topology changes)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Baked lightmap atlas texture
+                texture_entry(12, wgpu::TextureSampleType::Float { filterable: true }),
+                // Baked lightmap sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // IES texture array (binding 18)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 18,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // IES sampler (binding 19)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 19,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Compact realtime slot -> canonical row + assigned shadow slice.
+                storage_entry(20),
+                // Compact deterministic water membership -> canonical row +
+                // stable simulation/caustics layer. This is storage binding
+                // eight of eight across the base fragment pipeline layout.
+                storage_entry(22),
+                // Consolidated water simulation array. This is sampled texture
+                // 16 of 16 for the base fragment pipeline; another sampled
+                // texture requires splitting the pass again.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 23,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // Group 3: tiled light culling results (tile_light_lists, tile_light_counts).
+        // These are storage buffers written by LightCullPass and consumed here.
+        let bgl_3 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("DeferredLight BGL3"),
+            entries: &[
+                storage_entry(0), // tile_light_lists
+                storage_entry(1), // tile_light_counts
+            ],
+        });
+
+        // Reflection composition is a second draw in the same render pass. Its
+        // deliberately narrow layouts keep this fragment stage at ten sampled
+        // textures while base deferred lighting remains at sixteen.
+        let reflection_bgl_1 = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("DeferredReflection BGL1"),
+                entries: &[
+                    texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    texture_entry(5, wgpu::TextureSampleType::Float { filterable: true }),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                ],
+            },
+        );
+        let reflection_bgl_2 = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("DeferredReflection BGL2"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::CubeArray,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }),
+                    storage_entry(15),
+                    storage_entry(21),
+                    texture_entry(16, wgpu::TextureSampleType::Float { filterable: true }),
+                ],
+            },
+        );
+
+        let bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("DeferredLight BG0"),
+            layout: &bgl_0,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: globals_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: shadow_config_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("DeferredLight PL"),
+            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(&bgl_2), Some(&bgl_3)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("DeferredLight Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: pre_aa_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let reflection_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("DeferredReflection PL"),
+                bind_group_layouts: &[
+                    Some(&bgl_0),
+                    Some(&reflection_bgl_1),
+                    Some(&reflection_bgl_2),
+                ],
+                immediate_size: 0,
+            });
+        let reflection_pipeline = device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("DeferredReflection Additive Pipeline"),
+                layout: Some(&reflection_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_reflection"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: pre_aa_format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
+        let reflection_debug_pipeline = device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("DeferredReflection Debug Pipeline"),
+                layout: Some(&reflection_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_reflection"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: pre_aa_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
+
+        let (_fallback_shadow_tex, fallback_shadow_view) = fallback_shadow_texture(device);
+        let (_fallback_static_shadow_tex, fallback_static_shadow_view) = fallback_shadow_texture(device);
+        let fallback_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Deferred Fallback Shadow Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let shadow_depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Depth Sampler (PCSS)"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: None, // No comparison - returns actual depth values for PCSS blocker search
+            ..Default::default()
+        });
+        let (_fallback_env_texture, fallback_env_view) = black_cube_texture(device, queue);
+        let fallback_env_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Deferred Env Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let (_fallback_rc_texture, fallback_rc_view) =
+            black_2d_texture(device, queue, "Deferred Fallback RC");
+
+        // Fallback caustics array (black 1x1, one stable sim-slot layer).
+        let (_fallback_caustics_texture, fallback_caustics_view) =
+            black_2d_array_texture(
+                device,
+                queue,
+                "Deferred Fallback Caustics",
+                helio_core::WATER_SIM_SLOT_COUNT as u32,
+            );
+        let (_fallback_water_sim_texture, fallback_water_sim_view) =
+            black_2d_array_texture(
+                device,
+                queue,
+                "Deferred Fallback Water Simulation",
+                (helio_core::WATER_SIM_SLOT_COUNT * 3) as u32,
+            );
+
+        // Caustics sampler
+        let caustics_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Caustics Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // IES fallback: 32×32, 2 layers.
+        // Layer 0 = spotlight gradient (bright centre, gaussian falloff) — for IES profiles
+        // Layer 1 = checkerboard grid — for gobo/cookie projection
+        const IES_FALLBACK_SIZE: u32 = 32;
+        let mut ies_data = Vec::with_capacity((IES_FALLBACK_SIZE * IES_FALLBACK_SIZE * 2) as usize);
+        // Layer 0: gaussian spotlight
+        for y in 0..IES_FALLBACK_SIZE {
+            for x in 0..IES_FALLBACK_SIZE {
+                let u = (x as f32 + 0.5) / IES_FALLBACK_SIZE as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / IES_FALLBACK_SIZE as f32 * 2.0 - 1.0;
+                let dist = (u * u + v * v).sqrt();
+                let gaussian = (-dist * dist * 4.0).exp();
+                ies_data.push((gaussian.clamp(0.0, 1.0) * 255.0) as u8);
+            }
+        }
+        // Layer 1: checkerboard gobo (alternating 4px squares)
+        for y in 0..IES_FALLBACK_SIZE {
+            for x in 0..IES_FALLBACK_SIZE {
+                let tile = ((x / 4) + (y / 4)) & 1;
+                ies_data.push(if tile == 0 { 255u8 } else { 40u8 });
+            }
+        }
+        let fallback_ies_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("DeferredLight IES Fallback"),
+            size: wgpu::Extent3d { width: IES_FALLBACK_SIZE, height: IES_FALLBACK_SIZE, depth_or_array_layers: 2 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        // Write layer 0 (IES spotlight)
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &fallback_ies_texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 0 }, aspect: wgpu::TextureAspect::All },
+            &ies_data[..(IES_FALLBACK_SIZE * IES_FALLBACK_SIZE) as usize],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_FALLBACK_SIZE), rows_per_image: Some(IES_FALLBACK_SIZE) },
+            wgpu::Extent3d { width: IES_FALLBACK_SIZE, height: IES_FALLBACK_SIZE, depth_or_array_layers: 1 },
+        );
+        // Write layer 1 (gobo checkerboard)
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &fallback_ies_texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 1 }, aspect: wgpu::TextureAspect::All },
+            &ies_data[(IES_FALLBACK_SIZE * IES_FALLBACK_SIZE) as usize..],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_FALLBACK_SIZE), rows_per_image: Some(IES_FALLBACK_SIZE) },
+            wgpu::Extent3d { width: IES_FALLBACK_SIZE, height: IES_FALLBACK_SIZE, depth_or_array_layers: 1 },
+        );
+        let fallback_ies_view = fallback_ies_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        let ies_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("DeferredLight IES Sampler"),
+            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+
+        // Fallback 1×1 white R8Unorm AO texture.
+        // Used when neither SSAO nor pre-baked AO is available so the shader sees
+        // AO = 1.0 (fully unoccluded) rather than undefined data.
+        let fallback_ao_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Deferred Fallback AO"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &fallback_ao_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[255u8], // white = AO 1.0
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(1), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_ao_view = fallback_ao_tex.create_view(&Default::default());
+        let fallback_ao_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Deferred Fallback AO Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // Fallback 1×1 black Rgba16Float lightmap texture.
+        // Used when baked lightmap is not available (no indirect lighting).
+        let (_fallback_lightmap_tex, fallback_lightmap_view) =
+            black_2d_texture(device, queue, "Deferred Fallback Lightmap");
+        let fallback_lightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Deferred Fallback Lightmap Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // Fallback 1×1 black Rgba16Float SSR texture (no SSR available).
+        let (_fallback_ssr_texture, fallback_ssr_view) =
+            black_2d_texture(device, queue, "Deferred Fallback SSR");
+
+        // Fallback 1×1 black Rgba16Float planar reflection texture.
+        let (_fallback_planar_texture, fallback_planar_view) =
+            black_2d_texture(device, queue, "Deferred Fallback Planar");
+
+        // Fallback 1×1 zero Rg16Float lightmap UV texture.
+        // Used when lightmap UVs are not available from GBuffer.
+        let fallback_lightmap_uv_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Deferred Fallback Lightmap UV"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &fallback_lightmap_uv_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[0u8; 4], // (0.0, 0.0) UV coords
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_lightmap_uv_view = fallback_lightmap_uv_tex.create_view(&Default::default());
+
+        Self {
+            pipeline,
+            reflection_pipeline,
+            reflection_debug_pipeline,
+            globals_buf,
+            shadow_config_buf,
+            bgl_1,
+            bgl_2,
+            bgl_3,
+            reflection_bgl_1,
+            reflection_bgl_2,
+            bind_group_0,
+            bind_group_1: None,
+            bind_group_2: None,
+            bind_group_3: None,
+            reflection_bind_group_1: None,
+            reflection_bind_group_2: None,
+            bind_group_1_key: None,
+            bind_group_2_key: None,
+            bind_group_3_key: None,
+            reflection_bind_group_1_key: None,
+            reflection_bind_group_2_key: None,
+            fallback_tile_lists,
+            fallback_tile_counts,
+            pre_aa_format,
+            fallback_shadow_view,
+            fallback_static_shadow_view,
+            fallback_shadow_sampler,
+            shadow_depth_sampler,
+            fallback_env_view,
+            fallback_env_sampler,
+            fallback_rc_view,
+            fallback_caustics_view,
+            fallback_water_sim_view,
+            caustics_sampler,
+            fallback_ao_view,
+            fallback_ao_sampler,
+            fallback_lightmap_view,
+            fallback_lightmap_sampler,
+            fallback_lightmap_uv_view,
+            fallback_ssr_view,
+            fallback_planar_view,
+            fallback_ies_view,
+            ies_sampler,
+            water_sim_slot_generations: [u64::MAX; helio_core::WATER_SIM_SLOT_COUNT],
+            debug_mode: 0,
+            enable_env_reflections: false,
+        }
+    }
+
+    /// Set the debug visualisation mode:
+    /// - 0  = normal PBR lighting
+    /// - 10 = shadow factor greyscale (white=lit, black=shadowed)
+    /// - 11 = raw shadow atlas depth slice 0 (unmipped, linear)
+    ///
+    /// Enable/disable the environment-cubemap indirect specular term.
+    pub fn set_env_reflections(&mut self, enabled: bool) {
+        self.enable_env_reflections = enabled;
+    }
+
+    pub fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_mode = mode;
+    }
+
+    /// Set shadow quality at runtime (zero CPU cost per frame, one-time buffer write).
+    pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality, queue: &wgpu::Queue) {
+        let config = libhelio::ShadowConfig::from_quality(quality);
+        queue.write_buffer(&self.shadow_config_buf, 0, bytemuck::bytes_of(&config));
+    }
+}
+
+impl RenderPass for DeferredLightPass {
+    fn name(&self) -> &'static str {
+        "DeferredLight"
+    }
+
+    fn reads(&self) -> &'static [&'static str] {
+        &[
+            "gbuffer",
+            "gbuffer_lightmap_uv",
+            "gbuffer_sss",
+            "gbuffer_extra",
+            "depth",
+            "shadow_atlas",
+            "static_shadow_atlas",
+            "shadow_sampler",
+            "ssao",
+            "sky_lut",
+            "tile_light_lists",
+            "tile_light_counts",
+            "main_scene",
+            "water_caustics",
+            "water_sim_texture",
+            "pre_aa",
+            "rc_view",
+            "baked_lightmap",
+            "baked_lightmap_sampler",
+            "ssr_trace",
+            "planar_reflection",
+            "ies_textures",
+        ]
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        &["pre_aa"]
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("pre_aa", self.pre_aa_format, ResourceSize::MatchSurface);
+        builder.read("ies_textures");
+    }
+
+    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+        // Every graph-owned texture view is reallocated before this callback.
+        // Pointer-shaped cache keys are only an identity within one allocation
+        // epoch, so drop every bind group that captures graph resources.
+        self.bind_group_1 = None;
+        self.bind_group_1_key = None;
+        self.bind_group_2 = None;
+        self.bind_group_2_key = None;
+        self.bind_group_3 = None;
+        self.bind_group_3_key = None;
+        self.reflection_bind_group_1 = None;
+        self.reflection_bind_group_1_key = None;
+        self.reflection_bind_group_2 = None;
+        self.reflection_bind_group_2_key = None;
+    }
+
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let main_scene_opt = ctx.frame_resources.main_scene.get();
+        let main_scene = main_scene_opt.as_ref();
+        let (ambient_color, ambient_intensity) = if let Some(main_scene) = main_scene {
+            (main_scene.ambient_color, main_scene.ambient_intensity)
+        } else {
+            ([0.5, 0.5, 0.6], 1.0) // Brighter fallback ambient: sky-blue tint
+        };
+        // Get RC bounds from frame resources (dual-tier GI: RC near, ambient far)
+        let (rc_min, rc_max) = if let Some(main) = main_scene {
+            (main.rc_world_min, main.rc_world_max)
+        } else {
+            ([0.0; 3], [0.0; 3]) // Fallback: RC disabled
+        };
+        // rc_world_min/max are always a non-degenerate camera-centred volume
+        // (set unconditionally by the renderer's GiConfig default), regardless
+        // of whether this pipeline actually runs HLFS. Only the presence of a
+        // real rc_view texture tells us whether there's anything to sample.
+        let has_rc_gi = ctx.frame_resources.rc_view.get().is_some();
+
+        let water_volume_count = ctx
+            .scene
+            .water_volume_projections
+            .len()
+            .min(helio_core::WATER_SIM_SLOT_COUNT);
+        let water_ready_mask = advance_water_slot_readiness(
+            &mut self.water_sim_slot_generations,
+            &ctx.scene.water_volume_projections.as_slice()[..water_volume_count],
+            &ctx.scene.water_sim_slot_generations,
+        );
+
+        let globals = DeferredGlobals {
+            frame: ctx.frame_num as u32,
+            delta_time: ctx.delta_time,
+            light_count: ctx.scene.movable_light_count, // Only movable lights (static/stationary are baked)
+            ambient_intensity,
+            ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
+            rc_world_min: [rc_min[0], rc_min[1], rc_min[2], 0.0],
+            rc_world_max: [rc_max[0], rc_max[1], rc_max[2], 0.0],
+            // Must match CSM_SPLITS constant in shadow_matrices.wgsl ([16,80,300,1400]).
+            // The shadow matrices are computed for these distances, so cascade selection
+            // must use the same values or shadow maps will be sampled outside their valid range.
+            csm_splits: libhelio::CSM_SPLITS,
+            debug_mode: self.debug_mode,
+            has_rc_gi: has_rc_gi as u32,
+            num_tiles_x: ctx.width.div_ceil(16),
+            reflection_capture_count: ctx.scene.reflection_capture_projections.len() as u32,
+            enable_reflections: helio_core::REFLECTIONS_SUPPORTED as u32,
+            enable_env_reflections: self.enable_env_reflections as u32,
+            water_volume_count: water_volume_count as u32,
+            water_ready_mask,
+        };
+        ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        Ok(())
+    }
+
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let pre_aa_view = resources.pre_aa.read("DeferredLight")?;
+        let load_op = if resources.sky_lut.is_some() {
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+        };
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: pre_aa_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: load_op,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("DeferredLight"),
+            color_attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        let gbuffer_opt = ctx.resources.gbuffer.read("DeferredLight");
+        let gbuffer = gbuffer_opt.as_ref().ok_or_else(|| {
+            helio_core::Error::InvalidPassConfig(
+                "DeferredLight requires published gbuffer resources".to_string(),
+            )
+        })?;
+
+        // Screen-space AO: use baked AO (via frame.ssao, which SsaoPass publishes as override
+        // when a baked AO texture is present) or fall back to the 1×1 white texture.
+        let ao_view = ctx.resources.ssao.get().unwrap_or(&self.fallback_ao_view);
+
+        // Lightmap UVs from GBuffer
+        let lightmap_uv_view = ctx.resources.gbuffer_lightmap_uv.get().unwrap_or(&self.fallback_lightmap_uv_view);
+
+        // SSS/Extra data from GBuffer
+        let sss_view = ctx.resources.gbuffer_sss.get().unwrap_or(&self.fallback_lightmap_uv_view);
+        let extra_view = ctx.resources.gbuffer_extra.get().unwrap_or(&self.fallback_lightmap_uv_view);
+
+        let gbuffer_key = [
+            gbuffer.albedo as *const _ as usize,
+            gbuffer.normal as *const _ as usize,
+            gbuffer.orm as *const _ as usize,
+            gbuffer.emissive as *const _ as usize,
+            ctx.depth as *const _ as usize,
+            ao_view as *const _ as usize,
+            lightmap_uv_view as *const _ as usize,
+            sss_view as *const _ as usize,
+            extra_view as *const _ as usize,
+        ];
+        if self.bind_group_1_key != Some(gbuffer_key) {
+            self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("DeferredLight BG1"),
+                layout: &self.bgl_1,
+                entries: &[
+                    texture_view_entry(0, gbuffer.albedo),
+                    texture_view_entry(1, gbuffer.normal),
+                    texture_view_entry(2, gbuffer.orm),
+                    texture_view_entry(3, gbuffer.emissive),
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(ctx.depth),
+                    },
+                    // Screen-space AO (binding 5): SSAO or pre-baked AO from SsaoPass.publish()
+                    texture_view_entry(5, ao_view),
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&self.fallback_ao_sampler),
+                    },
+                    // Lightmap UVs from GBuffer (binding 7)
+                    texture_view_entry(7, lightmap_uv_view),
+                    // SSS data (binding 8)
+                    texture_view_entry(8, sss_view),
+                    // Extra surface data (binding 9)
+                    texture_view_entry(9, extra_view),
+                ],
+            }));
+            self.bind_group_1_key = Some(gbuffer_key);
+        }
+
+        let reflection_gbuffer_key = (
+            gbuffer.normal as *const _ as usize,
+            gbuffer.orm as *const _ as usize,
+            gbuffer.emissive as *const _ as usize,
+            ctx.depth as *const _ as usize,
+            ao_view as *const _ as usize,
+            lightmap_uv_view as *const _ as usize,
+        );
+        if self.reflection_bind_group_1_key != Some(reflection_gbuffer_key) {
+            self.reflection_bind_group_1 = Some(ctx.device.create_bind_group(
+                &wgpu::BindGroupDescriptor {
+                    label: Some("DeferredReflection BG1"),
+                    layout: &self.reflection_bgl_1,
+                    entries: &[
+                        texture_view_entry(1, gbuffer.normal),
+                        texture_view_entry(2, gbuffer.orm),
+                        texture_view_entry(3, gbuffer.emissive),
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(ctx.depth),
+                        },
+                        texture_view_entry(5, ao_view),
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::Sampler(&self.fallback_ao_sampler),
+                        },
+                        texture_view_entry(7, lightmap_uv_view),
+                    ],
+                },
+            ));
+            self.reflection_bind_group_1_key = Some(reflection_gbuffer_key);
+        }
+
+        let shadow_view = ctx.resources.shadow_atlas.get().unwrap_or(&self.fallback_shadow_view);
+        let static_shadow_view = ctx.resources.static_shadow_atlas.get().unwrap_or(&self.fallback_static_shadow_view);
+        let shadow_sampler = ctx
+            .resources
+            .shadow_sampler
+            .get().unwrap_or(&self.fallback_shadow_sampler);
+        let rc_view = ctx.resources.rc_view.get().unwrap_or(&self.fallback_rc_view);
+        // Baked reflection cube array from the probe bake. Falls back to a 1×1
+        // black cube array when nothing has been baked, which reads as "no
+        // environment" rather than failing to bind.
+        let env_view = ctx
+            .resources
+            .baked_reflection
+            .get()
+            .unwrap_or(&self.fallback_env_view);
+        let env_sampler = ctx
+            .resources
+            .baked_reflection_sampler
+            .get()
+            .unwrap_or(&self.fallback_env_sampler);
+
+        // Baked lightmap atlas from bake inject pass
+        let lightmap_view = ctx.resources.baked_lightmap.get().unwrap_or(&self.fallback_lightmap_view);
+        let lightmap_sampler = ctx.resources.baked_lightmap_sampler.get().unwrap_or(&self.fallback_lightmap_sampler);
+
+        let caustics_view = ctx
+            .resources
+            .water_caustics
+            .get()
+            .unwrap_or(&self.fallback_caustics_view);
+        let water_volumes = ctx.scene.water_volumes;
+        let water_volume_projections = ctx.scene.water_volume_projections;
+        let water_sim_view = ctx
+            .resources
+            .water_sim_texture
+            .get()
+            .unwrap_or(&self.fallback_water_sim_view);
+        let ies_view = ctx
+            .resources
+            .ies_textures
+            .get()
+            .unwrap_or(&self.fallback_ies_view);
+
+        // SSR texture from SsrPass
+        let ssr_view = ctx.resources.ssr_trace.get().unwrap_or(&self.fallback_ssr_view);
+        // Planar reflection texture from PlanarReflectionPass
+        let planar_view = ctx.resources.planar_reflection.get().unwrap_or(&self.fallback_planar_view);
+
+        let scene_key = DeferredSceneBindKey {
+            resources: [
+                ctx.scene.lights as *const _ as usize,
+                shadow_view as *const _ as usize,
+                shadow_sampler as *const _ as usize,
+                ctx.scene.shadow_matrices as *const _ as usize,
+                rc_view as *const _ as usize,
+                &self.shadow_depth_sampler as *const _ as usize,
+                caustics_view as *const _ as usize,
+                &self.caustics_sampler as *const _ as usize,
+                water_volumes as *const _ as usize,
+                static_shadow_view as *const _ as usize,
+                lightmap_view as *const _ as usize,
+                lightmap_sampler as *const _ as usize,
+                ies_view as *const _ as usize,
+                &self.ies_sampler as *const _ as usize,
+                ctx.scene.light_projections as *const _ as usize,
+                water_volume_projections as *const _ as usize,
+                water_sim_view as *const _ as usize,
+            ],
+            water_volume_epoch: ctx.scene.water_volume_buffer_epoch,
+            water_projection_epoch: ctx.scene.water_volume_projection_epoch,
+        };
+        if self.bind_group_2_key != Some(scene_key) {
+            self.bind_group_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("DeferredLight BG2"),
+                layout: &self.bgl_2,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.lights.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(shadow_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: ctx.scene.shadow_matrices.as_entire_binding(),
+                    },
+                    texture_view_entry(5, rc_view),
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_depth_sampler),
+                    },
+                    // Water caustics texture (binding 8)
+                    texture_view_entry(8, caustics_view),
+                    // Caustics sampler (binding 9)
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::Sampler(&self.caustics_sampler),
+                    },
+                    // Water volumes buffer (binding 10)
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: water_volumes.as_entire_binding(),
+                    },
+                    // Static shadow atlas (binding 11) — cached, only changes with Static topology
+                    texture_view_entry(11, static_shadow_view),
+                    // Baked lightmap atlas (binding 12)
+                    texture_view_entry(12, lightmap_view),
+                    // Baked lightmap sampler (binding 13)
+                    wgpu::BindGroupEntry {
+                        binding: 13,
+                        resource: wgpu::BindingResource::Sampler(lightmap_sampler),
+                    },
+                    // IES textures (binding 18) — from frame resources, fallback to identity
+                    wgpu::BindGroupEntry {
+                        binding: 18,
+                        resource: wgpu::BindingResource::TextureView(
+                            ies_view
+                        ),
+                    },
+                    // IES sampler (binding 19)
+                    wgpu::BindGroupEntry {
+                        binding: 19,
+                        resource: wgpu::BindingResource::Sampler(&self.ies_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 20,
+                        resource: ctx.scene.light_projections.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 22,
+                        resource: water_volume_projections.as_entire_binding(),
+                    },
+                    texture_view_entry(23, water_sim_view),
+                ],
+            }));
+            self.bind_group_2_key = Some(scene_key);
+        }
+
+        let reflection_scene_key = (
+            env_view as *const _ as usize,
+            rc_view as *const _ as usize,
+            env_sampler as *const _ as usize,
+            ssr_view as *const _ as usize,
+            ctx.scene.reflection_captures as *const _ as usize,
+            ctx.scene.reflection_capture_projections as *const _ as usize,
+            planar_view as *const _ as usize,
+        );
+        if self.reflection_bind_group_2_key != Some(reflection_scene_key) {
+            self.reflection_bind_group_2 = Some(ctx.device.create_bind_group(
+                &wgpu::BindGroupDescriptor {
+                    label: Some("DeferredReflection BG2"),
+                    layout: &self.reflection_bgl_2,
+                    entries: &[
+                        texture_view_entry(3, env_view),
+                        texture_view_entry(5, rc_view),
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::Sampler(env_sampler),
+                        },
+                        texture_view_entry(14, ssr_view),
+                        wgpu::BindGroupEntry {
+                            binding: 15,
+                            resource: ctx.scene.reflection_captures.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 21,
+                            resource: ctx
+                                .scene
+                                .reflection_capture_projections
+                                .as_entire_binding(),
+                        },
+                        texture_view_entry(16, planar_view),
+                    ],
+                },
+            ));
+            self.reflection_bind_group_2_key = Some(reflection_scene_key);
+        }
+
+        // ── Bind group 3: tile light culling results ──────────────────────────
+        let tile_lists   = ctx.resources.tile_light_lists.get().unwrap_or(&self.fallback_tile_lists);
+        let tile_counts  = ctx.resources.tile_light_counts.get().unwrap_or(&self.fallback_tile_counts);
+        let tile_key = (tile_lists as *const _ as usize, tile_counts as *const _ as usize);
+        if self.bind_group_3_key != Some(tile_key) {
+            self.bind_group_3 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("DeferredLight BG3"),
+                layout: &self.bgl_3,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: tile_lists.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: tile_counts.as_entire_binding() },
+                ],
+            }));
+            self.bind_group_3_key = Some(tile_key);
+        }
+
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        rp.set_pipeline(&self.pipeline);
+        rp.set_bind_group(0, &self.bind_group_0, &[]);
+        rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
+        rp.set_bind_group(2, self.bind_group_2.as_ref().unwrap(), &[]);
+        rp.set_bind_group(3, self.bind_group_3.as_ref().unwrap(), &[]);
+        rp.draw(0..3, 0..1);
+
+        let reflection_pipeline = if matches!(self.debug_mode, 30 | 31) {
+            &self.reflection_debug_pipeline
+        } else {
+            &self.reflection_pipeline
+        };
+        rp.set_pipeline(reflection_pipeline);
+        rp.set_bind_group(0, &self.bind_group_0, &[]);
+        rp.set_bind_group(1, self.reflection_bind_group_1.as_ref().unwrap(), &[]);
+        rp.set_bind_group(2, self.reflection_bind_group_2.as_ref().unwrap(), &[]);
+        rp.draw(0..3, 0..1);
+        Ok(())
+    }
+
+    fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_mode = mode;
+    }
+
+    fn debug_views(&self) -> &'static [DebugViewDescriptor] {
+        static VIEWS: &[DebugViewDescriptor] = &[
+            DebugViewDescriptor {
+                name: "Albedo Only",
+                debug_mode: 4,
+                description: "G-buffer albedo without lighting",
+            },
+            DebugViewDescriptor {
+                name: "World Normals",
+                debug_mode: 5,
+                description: "World-space normals remapped to RGB",
+            },
+            DebugViewDescriptor {
+                name: "Shadow Heatmap",
+                debug_mode: 10,
+                description: "Shadow factor: white=lit, black=shadowed",
+            },
+            DebugViewDescriptor {
+                name: "Light Depth",
+                debug_mode: 11,
+                description: "Light-space depth projection",
+            },
+        ];
+        VIEWS
+    }
+}
+
+fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn texture_view_entry<'a>(binding: u32, view: &'a wgpu::TextureView) -> wgpu::BindGroupEntry<'a> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: wgpu::BindingResource::TextureView(view),
+    }
+}
+
+fn fallback_shadow_texture(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Deferred Fallback Shadow"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    (texture, view)
+}
+
+fn black_2d_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let zero = [0u8; 8];
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &zero,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+fn black_2d_array_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    layers: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let layers = layers.max(1);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: layers,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let zero = vec![0u8; 8 * layers as usize];
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &zero,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: layers,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        array_layer_count: Some(layers),
+        ..Default::default()
+    });
+    (texture, view)
+}
+
+/// A 1×1×6 black cube *array* of a single layer, bound when no baked
+/// reflection array is resident. The view dimension has to match BGL2's
+/// `CubeArray` or bind group creation fails, so this cannot be a plain Cube.
+fn black_cube_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Deferred Fallback Env Cube Array"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 6,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let zero = [0u8; 8 * 6];
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &zero,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 6,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::CubeArray),
+        ..Default::default()
+    });
+    (texture, view)
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    #[test]
+    fn water_bind_key_tracks_both_canonical_allocation_epochs() {
+        let base = DeferredSceneBindKey {
+            resources: [0; 17],
+            water_volume_epoch: Some(4),
+            water_projection_epoch: 9,
+        };
+        assert_ne!(
+            base,
+            DeferredSceneBindKey {
+                water_volume_epoch: Some(5),
+                ..base
+            }
+        );
+        assert_ne!(
+            base,
+            DeferredSceneBindKey {
+                water_projection_epoch: 10,
+                ..base
+            }
+        );
+        assert_eq!(BASE_FRAGMENT_STORAGE_BINDING_COUNT, 8);
+        assert_eq!(BASE_SAMPLED_TEXTURE_COUNT, 16);
+    }
+
+    #[test]
+    fn changed_water_slot_is_withheld_until_water_sim_has_run_once() {
+        let projections = [[41, 2], [97, 6]];
+        let mut observed = [u64::MAX; helio_core::WATER_SIM_SLOT_COUNT];
+        let mut current = [0; helio_core::WATER_SIM_SLOT_COUNT];
+        current[2] = 4;
+        current[6] = 9;
+
+        assert_eq!(
+            advance_water_slot_readiness(&mut observed, &projections, &current),
+            0
+        );
+        assert_eq!(
+            advance_water_slot_readiness(&mut observed, &projections, &current),
+            (1 << 2) | (1 << 6)
+        );
+
+        current[2] += 1;
+        assert_eq!(
+            advance_water_slot_readiness(&mut observed, &projections, &current),
+            1 << 6
+        );
+        assert_eq!(
+            advance_water_slot_readiness(&mut observed, &projections, &current),
+            (1 << 2) | (1 << 6)
+        );
+    }
+}

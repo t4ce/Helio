@@ -1,0 +1,1620 @@
+//! Hierarchical Light-Field Sampling (HLFS) Pass
+//!
+//! Implements a camera-centric hierarchical radiance field that achieves O(1) shading cost
+//! relative to light count. Combines Unreal's Megalights-style importance sampling with
+//! a persistent radiance cascade structure.
+//!
+//! Architecture:
+//! 1. Light importance sampling (K samples per pixel)
+//! 2. Radiance injection into hierarchical clip-stack
+//! 3. Hierarchical propagation (mip-like filtering)
+//! 4. Final shading using field + direct samples
+
+use bytemuck::{Pod, Zeroable};
+use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+
+mod clip_stack;
+mod globals;
+use clip_stack::{ClipStack, HLFS_LEVELS, HLFS_RES, HLFS_NEAR_FIELD, HLFS_CASCADE_SCALE};
+use globals::HlfsGlobals;
+
+const CLIP_STACK_LEVELS: usize = HLFS_LEVELS as usize;
+const VOXEL_RESOLUTION: u32 = HLFS_RES; // 128^3 per level
+const SAMPLES_PER_PIXEL: u32 = 8; // K samples for importance sampling
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LegacyGlobals {
+    frame: u32,
+    sample_count: u32,
+    light_count: u32,
+    screen_width: u32,
+    screen_height: u32,
+    near_field_size: f32,
+    cascade_scale: f32,
+    temporal_blend: f32,
+    camera_position: [f32; 3],
+    _pad0: u32,
+    camera_forward: [f32; 3],
+    _pad1: u32,
+    csm_splits: [f32; 4],
+}
+
+pub struct HlfsPass {
+    // Compute pipelines
+    importance_sample_pipeline: wgpu::ComputePipeline,
+    radiance_inject_pipeline: wgpu::ComputePipeline,
+    hierarchical_propagate_pipeline: wgpu::ComputePipeline,
+    final_shade_pipeline: wgpu::RenderPipeline,
+
+    // Resources
+    globals_buf: wgpu::Buffer,
+    fallback_shadow_sampler: wgpu::Sampler,
+
+    // Clip-stack: 4 levels of 3D textures (128^3 RGBA16F each)
+    clip_stack: ClipStack,
+    clip_stack_sampler: wgpu::Sampler,
+
+    // HLFS-specific globals uniform (new layout with clip_origins, voxel_sizes, etc.)
+    hlfs_globals_buf: wgpu::Buffer,
+
+    // Intermediate buffers
+    sample_buffer: wgpu::Buffer, // Stores K samples per pixel
+
+    // Bind groups
+    bgl_compute_importance: wgpu::BindGroupLayout,
+    bgl_compute_inject: wgpu::BindGroupLayout,
+    bgl_compute_propagate: wgpu::BindGroupLayout,
+    bgl_shade_group0: wgpu::BindGroupLayout,
+    bgl_shade_group1: wgpu::BindGroupLayout,
+    bind_group_compute_importance: Option<wgpu::BindGroup>,
+    bind_group_compute_inject: Option<wgpu::BindGroup>,
+    bind_group_compute_propagate: Option<wgpu::BindGroup>,
+    /// Cached shade bind group 0 (clip-stack, pre_aa, lights, shadow, camera).
+    bind_group_shade0: [Option<wgpu::BindGroup>; 2],
+    /// Raw-pointer key for lazy rebuild of shade BG0, independently cached
+    /// for both clip-stack ping-pong sides.
+    bind_group_shade0_key: [Option<(usize, usize, usize, usize, usize, usize, usize)>; 2],
+    /// Cached shade bind group 1 (GBuffer + depth).
+    bind_group_shade1: Option<wgpu::BindGroup>,
+    /// Raw-pointer key for lazy rebuild of shade BG1.
+    bind_group_shade1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+
+    fallback_lightmap_uv_tex: wgpu::Texture,
+    fallback_lightmap_uv_view: wgpu::TextureView,
+
+    width: u32,
+    height: u32,
+
+    // Output texture
+    output_texture: wgpu::Texture,
+    output_view: wgpu::TextureView,
+    output_format: wgpu::TextureFormat,
+
+    shadow_config_buf: wgpu::Buffer,
+    shadow_quality: libhelio::ShadowQuality,
+
+    // RT path
+    use_rt: bool,
+    rt_pipeline: Option<wgpu::RenderPipeline>,
+    bgl_shade0_rt: Option<wgpu::BindGroupLayout>,
+    bind_group_shade0_rt: [Option<wgpu::BindGroup>; 2],
+    bind_group_shade0_rt_key:
+        [Option<(usize, usize, usize, usize, usize, usize, usize, usize)>; 2],
+}
+
+impl HlfsPass {
+    #[allow(unused)]
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        output_format: wgpu::TextureFormat,
+    ) -> Self {
+        let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("HLFS Globals"),
+            size: std::mem::size_of::<HlfsGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let shadow_config_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("HLFS Shadow Config"),
+            size: std::mem::size_of::<libhelio::ShadowConfig>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create clip-stack (double-buffered, 4 levels of 128^3 RGBA16F 3D textures)
+        let clip_stack = ClipStack::new(device, wgpu::TextureFormat::Rgba16Float);
+
+        // HLFS-specific globals uniform buffer (new layout with clip_origins, voxel_sizes, etc.)
+        let hlfs_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("HLFS Globals (New)"),
+            size: std::mem::size_of::<HlfsGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Sample buffer: stores K samples per pixel (position, direction, radiance)
+        let sample_count = (width * height * SAMPLES_PER_PIXEL) as u64;
+        let sample_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("HLFS Sample Buffer"),
+            size: sample_count * 32, // 32 bytes per sample (vec3 pos, vec3 dir, vec4 radiance)
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        // Load shaders
+        let importance_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("HLFS Importance Sampling"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/hlfs_importance.wgsl").into(),
+            ),
+        });
+        let inject_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("HLFS Radiance Injection"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hlfs_inject.wgsl").into()),
+        });
+        let propagate_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("HLFS Hierarchical Propagation"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hlfs_propagate.wgsl").into()),
+        });
+        let shade_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("HLFS Final Shading"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hlfs_shade.wgsl").into()),
+        });
+
+        // Bind group layouts
+        let bgl_compute_importance =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("HLFS Compute BGL Importance"),
+                entries: &[
+                    // 0: camera storage
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 1: globals uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 2: lights storage
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 3: sample buffer
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 4: clip-stack level 0 texture read
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // 5: gbuffer normal
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // 6: gbuffer depth
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // 7: clip-stack sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // 8: compact movable-light row + shadow-slot projection
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let bgl_compute_inject =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("HLFS Compute BGL Inject"),
+                entries: &[
+                    // 0: camera storage
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 1: globals uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 3: sample buffer
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 8-11: clip-stack storage textures (write-only)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let bgl_compute_propagate =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("HLFS Compute BGL Propagate"),
+                entries: &[
+                    // 1: globals uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 4: clip-stack level0 read texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // 8-10: result write textures for level1-3
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let bgl_shade_group0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("HLFS Shade BGL Group 0"),
+            entries: &[
+                // Clip-stack level 0
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Clip-stack level 1
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Clip-stack level 2
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Clip-stack level 3
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Sampler for clip stack
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // pre_aa texture (sky + debug layers)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // global uniforms for shading
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // camera storage (view/proj/inv)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // light list (GPU-side)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // shadow config
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // shadow atlas + sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                // shadow matrices (light-space matrices for atlas layers)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // compact movable-light row + shadow-slot projection
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let bgl_shade_group1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("HLFS Shade BGL Group 1 (GBuffer)"),
+            entries: &[
+                // gbuf_albedo
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // gbuf_normal
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // gbuf_orm
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // gbuf_emissive
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // gbuf_depth
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // gbuf_lightmap_uv
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // Create pipelines
+        let importance_compute_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("HLFS Compute PL Importance"),
+                bind_group_layouts: &[Some(&bgl_compute_importance)],
+                immediate_size: 0,
+            });
+        let inject_compute_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("HLFS Compute PL Inject"),
+                bind_group_layouts: &[Some(&bgl_compute_inject)],
+                immediate_size: 0,
+            });
+        let propagate_compute_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("HLFS Compute PL Propagate"),
+                bind_group_layouts: &[Some(&bgl_compute_propagate)],
+                immediate_size: 0,
+            });
+
+        let importance_sample_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("HLFS Importance Sample Pipeline"),
+                layout: Some(&importance_compute_layout),
+                module: &importance_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let radiance_inject_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("HLFS Radiance Inject Pipeline"),
+                layout: Some(&inject_compute_layout),
+                module: &inject_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let hierarchical_propagate_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("HLFS Hierarchical Propagate Pipeline"),
+                layout: Some(&propagate_compute_layout),
+                module: &propagate_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let shade_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("HLFS Shade PL"),
+            bind_group_layouts: &[Some(&bgl_shade_group0), Some(&bgl_shade_group1)],
+            immediate_size: 0,
+        });
+
+        let final_shade_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("HLFS Final Shade Pipeline"),
+            layout: Some(&shade_layout),
+            vertex: wgpu::VertexState {
+                module: &shade_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shade_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: output_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // ── RT pipeline (ray query shadow path) ─────────────────────────────
+        let use_rt = device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+
+        let (rt_pipeline, bgl_shade0_rt) = if use_rt {
+            let rt_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("HLFS RT Shading"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../shaders/hlfs_shade_rt.wgsl").into(),
+                ),
+            });
+
+            // RT BGL: same as bgl_shade_group0, with TLAS at 13 and the
+            // compact light projection shifted to 14.
+            let rt_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("HLFS Shade BGL Group 0 RT"),
+                entries: &[
+                    // 0-3: clip-stack levels
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // 4: sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // 5: pre_aa texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // 6: globals uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 7: camera storage
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 8: light list
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 9: shadow config
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 10: shadow atlas
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // 11: shadow sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                    // 12: shadow matrices
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 12,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 13: TLAS
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 13,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::AccelerationStructure {
+                            vertex_return: false,
+                        },
+                        count: None,
+                    },
+                    // 14: compact movable-light row + shadow-slot projection
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 14,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+            let rt_shade_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("HLFS RT Shade PL"),
+                bind_group_layouts: &[Some(&rt_bgl), Some(&bgl_shade_group1)],
+                immediate_size: 0,
+            });
+
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("HLFS RT Final Shade Pipeline"),
+                layout: Some(&rt_shade_layout),
+                vertex: wgpu::VertexState {
+                    module: &rt_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &rt_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: output_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+            (Some(pipeline), Some(rt_bgl))
+        } else {
+            (None, None)
+        };
+
+        let (output_texture, output_view) =
+            create_output_texture(device, width, height, output_format);
+
+        // Create sampler for clip-stack sampling
+        let clip_stack_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("HLFS Clip-Stack Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // Fallback 1x1 RG16Float texture for lightmap UVs (when gbuffer_lightmap_uv is not available).
+        let fallback_lightmap_uv_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("HLFS Fallback Lightmap UV"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &fallback_lightmap_uv_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[0u8; 4], // (0.0, 0.0) UV coords
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_lightmap_uv_view = fallback_lightmap_uv_tex.create_view(&Default::default());
+
+        let fallback_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("HLFS Fallback Shadow Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+
+        Self {
+            importance_sample_pipeline,
+            radiance_inject_pipeline,
+            hierarchical_propagate_pipeline,
+            final_shade_pipeline,
+            globals_buf,
+            hlfs_globals_buf,
+            fallback_shadow_sampler,
+            clip_stack,
+            clip_stack_sampler,
+            sample_buffer,
+            bgl_compute_importance,
+            bgl_compute_inject,
+            bgl_compute_propagate,
+            bgl_shade_group0,
+            bgl_shade_group1,
+            bind_group_compute_importance: None,
+            bind_group_compute_inject: None,
+            bind_group_compute_propagate: None,
+            bind_group_shade0: [None, None],
+            bind_group_shade0_key: [None, None],
+            bind_group_shade1: None,
+            bind_group_shade1_key: None,
+            fallback_lightmap_uv_tex,
+            fallback_lightmap_uv_view,
+            width,
+            height,
+            output_texture,
+            output_view,
+            output_format,
+            shadow_config_buf,
+            shadow_quality: libhelio::ShadowQuality::High,
+            use_rt,
+            rt_pipeline,
+            bgl_shade0_rt,
+            bind_group_shade0_rt: [None, None],
+            bind_group_shade0_rt_key: [None, None],
+        }
+    }
+
+    pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality, queue: &wgpu::Queue) {
+        self.shadow_quality = quality;
+        let config = libhelio::ShadowConfig::from_quality(quality);
+        queue.write_buffer(&self.shadow_config_buf, 0, bytemuck::bytes_of(&config));
+    }
+
+    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        let (texture, view) = create_output_texture(device, width, height, self.output_format);
+        self.output_texture = texture;
+        self.output_view = view;
+        // External views (depth, gbuffer) will be new objects after a resize — invalidate
+        // all cached bind groups that reference them so they are rebuilt on next execute().
+        self.bind_group_compute_importance = None;
+        self.bind_group_shade0 = [None, None];
+        self.bind_group_shade0_key = [None, None];
+        self.bind_group_shade0_rt = [None, None];
+        self.bind_group_shade0_rt_key = [None, None];
+        self.bind_group_shade1 = None;
+        self.bind_group_shade1_key = None;
+    }
+}
+
+impl RenderPass for HlfsPass {
+    fn name(&self) -> &'static str {
+        "HLFS"
+    }
+
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
+    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+        // Publish output as pre_aa for downstream passes (always overwrite)
+        frame.pre_aa.write(&self.output_view, "HLFS");
+
+        // Publish clip-stack read views so the shade pass can sample the accumulated field
+        frame.hlfs_clip_stack = Some([
+            &self.clip_stack.read[0],
+            &self.clip_stack.read[1],
+            &self.clip_stack.read[2],
+            &self.clip_stack.read[3],
+        ]);
+
+        // Publish HLFS globals buffer for downstream passes
+        frame.hlfs_globals = Some(&self.hlfs_globals_buf);
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        &["pre_aa", "hlfs_clip_stack", "hlfs_globals"]
+    }
+
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_color_raw("pre_aa", self.output_format, ResourceSize::MatchSurface);
+    }
+
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let camera_pos = ctx.scene.camera.position();
+
+        // Write legacy globals for existing shaders
+        let legacy = LegacyGlobals {
+            frame: ctx.frame_num as u32,
+            sample_count: SAMPLES_PER_PIXEL,
+            light_count: ctx.scene.movable_light_count,
+            screen_width: self.width,
+            screen_height: self.height,
+            near_field_size: 50.0,
+            cascade_scale: 2.0,
+            temporal_blend: 0.95,
+            camera_position: camera_pos,
+            _pad0: 0,
+            camera_forward: [0.0_f32, 0.0_f32, -1.0_f32],
+            _pad1: 0,
+            csm_splits: libhelio::CSM_SPLITS,
+        };
+        ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&legacy));
+
+        // Write new HLFS globals with clip-stack state
+        let hlfs = HlfsGlobals {
+            clip_origins: [
+                [self.clip_stack.levels[0].origin[0], self.clip_stack.levels[0].origin[1], self.clip_stack.levels[0].origin[2], 0],
+                [self.clip_stack.levels[1].origin[0], self.clip_stack.levels[1].origin[1], self.clip_stack.levels[1].origin[2], 0],
+                [self.clip_stack.levels[2].origin[0], self.clip_stack.levels[2].origin[1], self.clip_stack.levels[2].origin[2], 0],
+                [self.clip_stack.levels[3].origin[0], self.clip_stack.levels[3].origin[1], self.clip_stack.levels[3].origin[2], 0],
+            ],
+            voxel_sizes: [
+                self.clip_stack.levels[0].voxel_size,
+                self.clip_stack.levels[1].voxel_size,
+                self.clip_stack.levels[2].voxel_size,
+                self.clip_stack.levels[3].voxel_size,
+            ],
+            frame_time: ctx.delta_time,
+            temporal_decay: [0.95; 4],
+            near_field_size: HLFS_NEAR_FIELD,
+            cascade_scale: HLFS_CASCADE_SCALE,
+            screen_size: [self.width, self.height],
+            sample_count: SAMPLES_PER_PIXEL,
+            light_count: ctx.scene.movable_light_count,
+            dissipation_mode: 0,
+        };
+        ctx.write_buffer(&self.hlfs_globals_buf, 0, bytemuck::bytes_of(&hlfs));
+
+        let shadow_config = libhelio::ShadowConfig::from_quality(self.shadow_quality);
+        ctx.write_buffer(
+            &self.shadow_config_buf,
+            0,
+            bytemuck::bytes_of(&shadow_config),
+        );
+
+        Ok(())
+    }
+
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        // Shade bind group 0 (clip-stack, pre_aa, lights, shadow, camera).
+        // Lazily rebuilt only when any referenced pointer changes (resize, scene realloc).
+        let pre_aa = ctx.resources.pre_aa.get().ok_or_else(|| {
+            helio_core::Error::InvalidPassConfig(
+                "HLFS requires pre_aa (sky + debug layers)".to_string(),
+            )
+        })?;
+
+        let shadow_view = ctx.resources.shadow_atlas.get().ok_or_else(|| {
+            helio_core::Error::InvalidPassConfig(
+                "HLFS requires shadow_atlas (shadow pass must run first)".to_string(),
+            )
+        })?;
+        let shadow_sampler = ctx.resources.shadow_sampler.get().unwrap_or(&self.fallback_shadow_sampler);
+
+        let shade0_key = (
+            pre_aa as *const _ as usize,
+            shadow_view as *const _ as usize,
+            shadow_sampler as *const _ as usize,
+            ctx.scene.camera as *const _ as usize,
+            ctx.scene.lights as *const _ as usize,
+            ctx.scene.light_projections as *const _ as usize,
+            ctx.scene.shadow_matrices as *const _ as usize,
+        );
+        let clip_side = self.clip_stack.read_side;
+        if self.bind_group_shade0_key[clip_side] != Some(shade0_key) {
+            self.bind_group_shade0[clip_side] =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("HLFS Shade BG Group 0"),
+                    layout: &self.bgl_shade_group0,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[0]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[1]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[2]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[3]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Sampler(&self.clip_stack_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(pre_aa),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self.globals_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: ctx.scene.camera.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: ctx.scene.lights.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: self.shadow_config_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::TextureView(shadow_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 12,
+                            resource: ctx.scene.shadow_matrices.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 13,
+                            resource: ctx.scene.light_projections.as_entire_binding(),
+                        },
+                    ],
+                }));
+            self.bind_group_shade0_key[clip_side] = Some(shade0_key);
+        }
+
+        // RT shade bind group 0 (TLAS at 13, light projection at 14).
+        // Lazily rebuilt when any pointer changes (including TLAS).
+        if self.use_rt {
+            let main_scene = ctx.resources.main_scene.read("HLFS");
+            let tlas_binding = main_scene.and_then(|ms| ms.tlas);
+
+            if let Some(tlas) = tlas_binding {
+                let rt_key = (
+                    pre_aa as *const _ as usize,
+                    shadow_view as *const _ as usize,
+                    shadow_sampler as *const _ as usize,
+                    ctx.scene.camera as *const _ as usize,
+                    ctx.scene.lights as *const _ as usize,
+                    ctx.scene.light_projections as *const _ as usize,
+                    ctx.scene.shadow_matrices as *const _ as usize,
+                    tlas as *const _ as usize,
+                );
+
+                if self.bind_group_shade0_rt_key[clip_side] != Some(rt_key) {
+                    self.bind_group_shade0_rt[clip_side] =
+                        Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("HLFS RT Shade BG Group 0"),
+                            layout: self.bgl_shade0_rt.as_ref().unwrap(),
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[0]),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[1]),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[2]),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 3,
+                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[3]),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 4,
+                                    resource: wgpu::BindingResource::Sampler(&self.clip_stack_sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 5,
+                                    resource: wgpu::BindingResource::TextureView(pre_aa),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 6,
+                                    resource: self.globals_buf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 7,
+                                    resource: ctx.scene.camera.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 8,
+                                    resource: ctx.scene.lights.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 9,
+                                    resource: self.shadow_config_buf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 10,
+                                    resource: wgpu::BindingResource::TextureView(shadow_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 11,
+                                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 12,
+                                    resource: ctx.scene.shadow_matrices.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 13,
+                                    resource: tlas.as_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 14,
+                                    resource: ctx.scene.light_projections.as_entire_binding(),
+                                },
+                            ],
+                        }));
+                    self.bind_group_shade0_rt_key[clip_side] = Some(rt_key);
+                }
+            }
+        }
+
+        // Shade bind group 1 (GBuffer + depth).
+        // Lazily rebuilt only when gbuffer or depth pointers change (resize).
+        let gbuffer_opt = ctx.resources.gbuffer.read("HLFS");
+        let gbuffer = gbuffer_opt.as_ref().ok_or_else(|| {
+            helio_core::Error::InvalidPassConfig(
+                "HLFS requires published gbuffer resources".to_string(),
+            )
+        })?;
+
+        let lightmap_uv_view = ctx.resources.gbuffer_lightmap_uv.get().unwrap_or(&self.fallback_lightmap_uv_view);
+
+        let shade1_key = (
+            gbuffer.albedo as *const _ as usize,
+            gbuffer.normal as *const _ as usize,
+            gbuffer.orm as *const _ as usize,
+            gbuffer.emissive as *const _ as usize,
+            ctx.depth as *const _ as usize,
+            lightmap_uv_view as *const _ as usize,
+        );
+        if self.bind_group_shade1_key != Some(shade1_key) {
+            self.bind_group_shade1 =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("HLFS Shade BG Group 1 (GBuffer)"),
+                    layout: &self.bgl_shade_group1,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(gbuffer.albedo),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(gbuffer.normal),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(gbuffer.orm),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(gbuffer.emissive),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(ctx.depth),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(lightmap_uv_view),
+                        },
+                    ],
+                }));
+            self.bind_group_shade1_key = Some(shade1_key);
+        }
+
+        // Create compute bind groups (a few extra resources are reused in all stages)
+        if self.bind_group_compute_importance.is_none() {
+            self.bind_group_compute_importance =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("HLFS Compute BG Importance"),
+                    layout: &self.bgl_compute_importance,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: ctx.scene.camera.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.globals_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: ctx.scene.lights.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.sample_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[0]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(gbuffer.normal),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(ctx.depth),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Sampler(&self.clip_stack_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: ctx.scene.light_projections.as_entire_binding(),
+                        },
+                    ],
+                }));
+        }
+
+        if self.bind_group_compute_inject.is_none() {
+            self.bind_group_compute_inject =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("HLFS Compute BG Inject"),
+                    layout: &self.bgl_compute_inject,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: ctx.scene.camera.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.globals_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.sample_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[0]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[1]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[2]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[3]),
+                        },
+                    ],
+                }));
+        }
+
+        if self.bind_group_compute_propagate.is_none() {
+            self.bind_group_compute_propagate =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("HLFS Compute BG Propagate"),
+                    layout: &self.bgl_compute_propagate,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.globals_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[0]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[1]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[2]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[3]),
+                        },
+                    ],
+                }));
+        }
+
+        // Step 1: Toroidal shift — update clip-stack origins and recycle voxels
+        {
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("HLFS Toroidal Shift"),
+                    timestamp_writes: None,
+                });
+            // Phase 1: no-op dispatch (placeholder for compute-based ring-buffer update)
+        }
+
+        // Step 2: Importance sampling (compute)
+        let workgroups_x = self.width.div_ceil(8);
+        let workgroups_y = self.height.div_ceil(8);
+
+        {
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("HLFS Importance Sampling"),
+                    timestamp_writes: None,
+                });
+            pass.set_pipeline(&self.importance_sample_pipeline);
+            pass.set_bind_group(0, self.bind_group_compute_importance.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+        }
+
+        // Step 2: Radiance injection (compute)
+        {
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("HLFS Radiance Injection"),
+                    timestamp_writes: None,
+                });
+            pass.set_pipeline(&self.radiance_inject_pipeline);
+            pass.set_bind_group(0, self.bind_group_compute_inject.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
+        }
+
+        // Step 3: Hierarchical propagation (compute)
+        {
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("HLFS Hierarchical Propagation"),
+                    timestamp_writes: None,
+                });
+            pass.set_pipeline(&self.hierarchical_propagate_pipeline);
+            pass.set_bind_group(0, self.bind_group_compute_propagate.as_ref().unwrap(), &[]);
+            let workgroups = VOXEL_RESOLUTION.div_ceil(8);
+            pass.dispatch_workgroups(workgroups, workgroups, workgroups);
+        }
+
+        // Step 4: Final shading (render pass)
+        let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+            view: &self.output_view,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })];
+
+        let render_pass_desc = wgpu::RenderPassDescriptor {
+            label: Some("HLFS Final Shading"),
+            color_attachments: &color_attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        };
+
+        // Decide between RT and software shadow path
+        let use_rt_path = self.use_rt
+            && self.rt_pipeline.is_some()
+            && self.bind_group_shade0_rt[clip_side].is_some();
+
+        if use_rt_path {
+            let mut pass = ctx.begin_render_pass(&render_pass_desc);
+            pass.set_pipeline(self.rt_pipeline.as_ref().unwrap());
+            pass.set_bind_group(0, self.bind_group_shade0_rt[clip_side].as_ref().unwrap(), &[]);
+            pass.set_bind_group(1, self.bind_group_shade1.as_ref().unwrap(), &[]);
+            pass.draw(0..3, 0..1);
+        } else {
+            let mut pass = ctx.begin_render_pass(&render_pass_desc);
+            pass.set_pipeline(&self.final_shade_pipeline);
+            pass.set_bind_group(0, self.bind_group_shade0[clip_side].as_ref().unwrap(), &[]);
+            pass.set_bind_group(1, self.bind_group_shade1.as_ref().unwrap(), &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Step 5: Swap clip-stack read/write buffers for next frame
+        self.clip_stack.swap_buffers();
+
+        // Invalidate compute bind groups after buffer swap (they hold references to
+        // clip-stack read/write views that become stale).
+        self.bind_group_compute_importance = None;
+        self.bind_group_compute_inject = None;
+        self.bind_group_compute_propagate = None;
+
+        Ok(())
+    }
+}
+
+fn create_output_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("HLFS Output"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}

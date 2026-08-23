@@ -1,0 +1,12 @@
+[package]
+name = "helio-pass-debug-overlay"
+version = "0.1.0"
+edition = "2021"
+authors = ["Helio Contributors"]
+description = "On-screen textual debug overlay (Minecraft F3-style) for Helio renderer"
+
+[dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+helio-core = { path = "../../../helio-core" }
+libhelio = { path = "../../../libhelio" }
+wgpu = { workspace = true }

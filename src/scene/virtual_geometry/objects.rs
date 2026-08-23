@@ -1,0 +1,446 @@
+//! Virtual object instancing and transform updates.
+//!
+//! Provides methods for creating instances of virtual meshes and updating their transforms.
+
+use glam::Mat4;
+use helio_core::GpuInstanceData;
+use helio_scenedb::SceneMaterial;
+
+use crate::handles::{entity_from_handle, VirtualObjectId};
+use crate::vg::VirtualObjectDescriptor;
+
+use super::super::errors::{invalid, Result};
+use super::super::helpers::normal_matrix;
+use super::super::types::VirtualObjectRecord;
+
+fn include_dirty_instance(range: &mut Option<(usize, usize)>, index: usize) {
+    *range = Some(match *range {
+        Some((start, end)) => (start.min(index), end.max(index + 1)),
+        None => (index, index + 1),
+    });
+}
+
+impl super::super::Scene {
+    /// Place an instance of a virtual mesh into the scene.
+    ///
+    /// Creates a new virtual object that references a virtual mesh with a world-space
+    /// transform and material.
+    ///
+    /// # Parameters
+    /// - `desc`: Virtual object descriptor containing:
+    ///   - `virtual_mesh`: Virtual mesh handle from [`insert_virtual_mesh`](crate::Scene::insert_virtual_mesh)
+    ///   - `transform`: World-space model matrix
+    ///   - `bounds`: Bounding sphere `[center.x, center.y, center.z, radius]`
+    ///   - `material_id`: generation-bearing canonical material handle
+    ///   - `flags`: Render flags (bit 0 = casts shadow, bit 1 = receives shadow)
+    ///   - `groups`: Group membership mask
+    ///
+    /// # Errors
+    /// - [`SceneError::InvalidHandle`](super::super::SceneError::InvalidHandle) if the virtual mesh ID is invalid
+    ///
+    /// # Returns
+    /// A [`VirtualObjectId`] handle that can be used to update or remove the virtual object.
+    ///
+    /// # Performance
+    /// - CPU cost: amortized O(1) insertion into SceneDB's virtual-geometry subsystem + marks VG dirty
+    /// - GPU cost: Deferred to next `flush()` when VG buffers are rebuilt
+    /// - Memory: subsystem storage may grow; reserve when a batch size is known
+    ///
+    /// # Reference Counting
+    ///
+    /// Increments the virtual mesh's reference count. The mesh cannot be removed
+    /// while this object exists.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use helio::{VirtualObjectDescriptor, GroupMask};
+    /// use glam::Mat4;
+    ///
+    /// let vg_obj_id = scene.insert_virtual_object(VirtualObjectDescriptor {
+    ///     virtual_mesh: vg_mesh_id,
+    ///     transform: Mat4::from_translation([10.0, 0.0, 5.0].into()),
+    ///     bounds: [10.0, 0.0, 5.0, 5.0], // Sphere at (10, 0, 5) with radius 5
+    ///     material_id,                   // Handle from insert_material
+    ///     flags: 0b11,                   // Casts and receives shadows
+    ///     groups: GroupMask::NONE,       // Always visible
+    /// })?;
+    /// ```
+    pub fn insert_virtual_object(
+        &mut self,
+        desc: VirtualObjectDescriptor,
+    ) -> Result<VirtualObjectId> {
+        let material_entity = entity_from_handle(desc.material_id);
+        let material_row = self
+            .authority
+            .gpu_row::<SceneMaterial>(material_entity)
+            .ok_or_else(|| invalid("material"))?;
+
+        let mesh_id = self
+            .virtual_geometry()
+            .meshes
+            .get(&desc.virtual_mesh)
+            .ok_or_else(|| invalid("virtual_mesh"))?
+            .mesh_ids
+            .first()
+            .copied()
+            .ok_or_else(|| invalid("virtual_mesh_geometry"))?;
+        self.authority
+            .retain_material(material_entity)
+            .map_err(super::super::errors::scene_asset)?;
+        self.virtual_geometry_mut()
+            .meshes
+            .get_mut(&desc.virtual_mesh)
+            .expect("validated virtual mesh disappeared")
+            .ref_count += 1;
+
+        let instance = GpuInstanceData {
+            model: desc.transform.to_cols_array(),
+            normal_mat: normal_matrix(desc.transform),
+            bounds: desc.bounds,
+            prev_model: desc.transform.to_cols_array(),
+            mesh_id: mesh_id.slot(),
+            material_id: material_row,
+            flags: desc.flags,
+            lightmap_index: 0xFFFFFFFF,  // Virtual geometry doesn't use lightmaps
+        };
+        let (id, _) = self.virtual_geometry_mut().objects.insert(VirtualObjectRecord {
+            virtual_mesh: desc.virtual_mesh,
+            material: desc.material_id,
+            groups: desc.groups,
+            movability: desc.movability.unwrap_or_default(),
+            instance,
+        });
+        self.vg_objects_dirty = true;
+        Ok(id)
+    }
+
+    /// Update the world transform of a virtual object.
+    ///
+    /// Modifies the object's model matrix and recomputes the normal matrix.
+    /// The change is reflected by a bounded instance-buffer upload on next `flush()`.
+    ///
+    /// # Parameters
+    /// - `id`: Virtual object handle
+    /// - `transform`: New world-space model matrix
+    ///
+    /// # Errors
+    /// - [`SceneError::InvalidHandle`](super::super::SceneError::InvalidHandle) if the virtual object ID is invalid
+    ///
+    /// # Returns
+    /// `Ok(())` if the transform was successfully updated.
+    ///
+    /// # Performance
+    /// - CPU cost: O(1) - updates the record and expands one dirty range
+    /// - GPU cost: Uploads only the contiguous dirty instance range on next `flush()`
+    /// - Memory: No allocations
+    ///
+    /// # Deferred Updates
+    ///
+    /// Meshlet descriptors, object LOD ranges, and work spans remain immutable.
+    /// Insertions/removals still rebuild topology, but transform-only changes do not.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use glam::{Mat4, Vec3};
+    ///
+    /// // Move virtual object
+    /// let new_transform = Mat4::from_translation(Vec3::new(20.0, 0.0, 10.0));
+    /// scene.update_virtual_object_transform(vg_obj_id, new_transform)?;
+    ///
+    /// // Change takes effect on next flush()
+    /// scene.flush();
+    /// ```
+    pub fn update_virtual_object_transform(
+        &mut self,
+        id: VirtualObjectId,
+        transform: Mat4,
+    ) -> Result<()> {
+        let (dense_index, updated_instance) = {
+            let Some((dense_index, record)) = self
+                .virtual_geometry_mut()
+                .objects
+                .get_mut_with_index(id)
+            else {
+                return Err(invalid("virtual_object"));
+            };
+            // Enforce movability: Static objects cannot have transforms updated
+            if !record.movability.can_move() {
+                log::warn!(
+                    "Attempted to update transform on Static virtual object {:?}. Set movability to Movable to allow transform updates.",
+                    id
+                );
+                return Ok(()); // No-op instead of error
+            }
+            record.instance.model = transform.to_cols_array();
+            record.instance.normal_mat = normal_matrix(transform);
+            (dense_index, record.instance)
+        };
+
+        // Increment generation counter for movable objects (for shadow cache invalidation)
+        self.movable_objects_generation += 1;
+        self.gpu_scene.movable_objects_generation = self.movable_objects_generation;
+
+        // Topology rebuilds republish every instance. Otherwise keep the CPU
+        // mirror in place and publish only the affected range on the next flush.
+        if !self.vg_objects_dirty {
+            match self.vg_object_projection_slots.get(dense_index).copied() {
+                Some(u32::MAX) => {
+                    // Canonical but non-renderable source record; no GPU mirror exists.
+                }
+                Some(projection_slot) => {
+                    let projection_slot = projection_slot as usize;
+                    if let Some(instance) = self.vg_cpu_instances.get_mut(projection_slot) {
+                        *instance = updated_instance;
+                        include_dirty_instance(
+                            &mut self.vg_instance_dirty_range,
+                            projection_slot,
+                        );
+                    } else {
+                        self.vg_objects_dirty = true;
+                    }
+                }
+                None => {
+                    // A missing projection means topology has not been published yet.
+                    self.vg_objects_dirty = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a virtual object from the scene.
+    ///
+    /// Removes the virtual object from the dense arena and decrements the virtual
+    /// mesh's reference count.
+    ///
+    /// # Parameters
+    /// - `id`: Virtual object handle
+    ///
+    /// # Errors
+    /// - [`SceneError::InvalidHandle`](super::super::SceneError::InvalidHandle) if the virtual object ID is invalid
+    ///
+    /// # Returns
+    /// `Ok(())` if the virtual object was successfully removed.
+    ///
+    /// # Performance
+    /// - CPU cost: O(1) removal from dense arena + marks VG dirty
+    /// - GPU cost: Deferred to next `flush()` when VG buffers are rebuilt
+    ///
+    /// # Reference Counting
+    ///
+    /// Decrements the virtual mesh's reference count. If the count reaches zero,
+    /// the mesh can be removed with [`remove_virtual_mesh`](crate::Scene::remove_virtual_mesh).
+    ///
+    /// # Example
+    /// ```ignore
+    /// scene.remove_virtual_object(vg_obj_id)?;
+    ///
+    /// // If this was the last object using the mesh, it can now be removed
+    /// scene.remove_virtual_mesh(vg_mesh_id)?;
+    /// ```
+    pub fn remove_virtual_object(&mut self, id: VirtualObjectId) -> Result<()> {
+        let material_id = self
+            .virtual_geometry()
+            .objects
+            .get(id)
+            .map(|record| record.material)
+            .ok_or_else(|| invalid("virtual_object"))?;
+        let material_entity = entity_from_handle(material_id);
+        self.authority
+            .release_material(material_entity)
+            .map_err(super::super::errors::scene_asset)?;
+        {
+            let storage = self.virtual_geometry_mut();
+            let removed = storage
+                .objects
+                .remove(id)
+                .expect("validated virtual object disappeared");
+            if let Some(mesh_record) = storage.meshes.get_mut(&removed.removed.virtual_mesh) {
+                mesh_record.ref_count = mesh_record.ref_count.saturating_sub(1);
+            }
+        }
+        if self
+            .authority
+            .get::<SceneMaterial>(material_entity)
+            .is_some_and(|material| material.ref_count == 0)
+        {
+            let _ = self.remove_material(material_id);
+        }
+        self.vg_objects_dirty = true;
+        self.detach_actors_for_target(crate::scene::actor::SceneActorId::VirtualObject(id));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytemuck::Zeroable;
+    use glam::{Mat4, Vec3};
+    use libhelio::Movability;
+
+    use crate::{
+        groups::GroupMask,
+        material::{TextureSamplerDesc, TextureUpload},
+        mesh::PackedVertex,
+        vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor},
+        Scene,
+    };
+
+    use super::{include_dirty_instance, VirtualObjectRecord};
+
+    fn create_test_scene() -> Scene {
+        let (device, queue) = crate::test_support::test_gpu().expect("no test GPU adapter found");
+        Scene::new(device, queue)
+    }
+
+    #[test]
+    fn transform_dirty_range_is_end_exclusive_and_coalesced() {
+        let mut range = None;
+        include_dirty_instance(&mut range, 7);
+        assert_eq!(range, Some((7, 8)));
+        include_dirty_instance(&mut range, 3);
+        include_dirty_instance(&mut range, 11);
+        include_dirty_instance(&mut range, 5);
+        assert_eq!(range, Some((3, 12)));
+    }
+
+    #[test]
+    fn transform_only_flush_keeps_topology_version_and_publishes_one_instance() {
+        let mut scene = create_test_scene();
+        let vertices = vec![
+            PackedVertex::from_components(
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                1.0,
+            ),
+            PackedVertex::from_components(
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                1.0,
+            ),
+            PackedVertex::from_components(
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 0.0, 0.0],
+                1.0,
+            ),
+        ];
+        let mesh = scene.insert_virtual_mesh(VirtualMeshUpload {
+            vertices,
+            indices: vec![0, 1, 2],
+        });
+        let _texture = scene
+            .insert_texture(TextureUpload::rgba8(
+                "row-decoy",
+                1,
+                1,
+                false,
+                vec![255, 255, 255, 255],
+                TextureSamplerDesc::default(),
+            ))
+            .expect("insert decoy entity");
+        let mut material_gpu = libhelio::GpuMaterial::zeroed();
+        let material = scene.insert_material(material_gpu);
+        // A canonical but non-renderable source row must not shift the compact
+        // projection slot used by the valid object that follows it.
+        scene.virtual_geometry_mut().objects.insert(VirtualObjectRecord {
+            virtual_mesh: VirtualMeshId(u32::MAX),
+            material,
+            groups: GroupMask::NONE,
+            movability: Movability::Static,
+            instance: helio_core::GpuInstanceData::zeroed(),
+        });
+        scene.vg_objects_dirty = true;
+        let object = scene
+            .insert_virtual_object(VirtualObjectDescriptor {
+                virtual_mesh: mesh,
+                material_id: material,
+                transform: Mat4::IDENTITY,
+                bounds: [0.5, 0.0, 0.5, 1.0],
+                flags: 0,
+                groups: GroupMask::NONE,
+                movability: Some(Movability::Movable),
+            })
+            .expect("insert virtual object");
+        assert_ne!(material.slot(), 0, "decoy must separate Entity and material rows");
+        assert_eq!(
+            scene
+                .virtual_geometry()
+                .objects
+                .get(object)
+                .unwrap()
+                .instance
+                .material_id,
+            0,
+        );
+        scene.flush();
+        assert_eq!(scene.vg_object_projection_slots, [u32::MAX, 0]);
+
+        let topology_version = scene.vg_buffer_version;
+        let instance_version = scene.vg_instance_version;
+        let moved = Mat4::from_translation(Vec3::new(4.0, 5.0, 6.0));
+        scene
+            .update_virtual_object_transform(object, moved)
+            .expect("update virtual object transform");
+
+        assert!(!scene.vg_objects_dirty);
+        assert_eq!(scene.vg_instance_dirty_range, Some((0, 1)));
+        scene.flush();
+
+        assert_eq!(scene.vg_buffer_version, topology_version);
+        assert_eq!(scene.vg_instance_version, instance_version + 1);
+        assert_eq!(scene.vg_published_instance_dirty_range, Some((0, 1)));
+        assert_eq!(scene.vg_cpu_instances[0].model, moved.to_cols_array());
+        let frame = scene.vg_frame_data().expect("VG frame data");
+        assert_eq!(frame.instance_dirty_start, 0);
+        assert_eq!(frame.instance_dirty_count, 1);
+
+        let topology_version = scene.vg_buffer_version;
+        let instance_version = scene.vg_instance_version;
+        let cull_signature_version = scene.vg_cull_signature_version;
+
+        material_gpu.flags = libhelio::FLAG_HAS_NORMAL_MAP;
+        scene
+            .update_material(material, material_gpu)
+            .expect("update non-cull material feature");
+        assert_eq!(scene.vg_cull_signature_version, cull_signature_version);
+
+        material_gpu.flags |= libhelio::FLAG_ALPHA_TEST;
+        scene
+            .update_material(material, material_gpu)
+            .expect("hot-enable alpha test");
+        assert_eq!(scene.vg_cull_signature_version, cull_signature_version + 1);
+        assert_eq!(scene.vg_buffer_version, topology_version);
+        assert_eq!(scene.vg_instance_version, instance_version);
+        assert!(!scene.vg_objects_dirty);
+
+        scene.flush();
+        let frame = scene.vg_frame_data().expect("VG frame data after material edit");
+        assert_eq!(frame.cull_signature_version, cull_signature_version + 1);
+        assert_eq!(frame.buffer_version, topology_version);
+        assert_eq!(frame.instance_version, instance_version);
+
+        scene
+            .set_material_class(
+                material,
+                material_gpu.material_class,
+                0,
+                Some(libhelio::FLAG_HAS_NORMAL_MAP),
+            )
+            .expect("hot-disable alpha test through material-class API");
+        assert_eq!(scene.vg_cull_signature_version, cull_signature_version + 2);
+        assert!(!scene.objects_dirty);
+        scene.flush();
+        let frame = scene
+            .vg_frame_data()
+            .expect("VG frame data after material-class flag edit");
+        assert_eq!(frame.cull_signature_version, cull_signature_version + 2);
+        assert_eq!(frame.buffer_version, topology_version);
+        assert_eq!(frame.instance_version, instance_version);
+    }
+}

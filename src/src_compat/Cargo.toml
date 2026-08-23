@@ -1,0 +1,97 @@
+[package]
+name = "helio-workspace"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Workspace root"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "web"
+path = "src/bin/web.rs"
+
+[workspace]
+members = [
+    "crates/*",
+    "crates/passes/2d/*",
+    "crates/passes/3d/*",
+    "crates_other/*"
+]
+exclude = [
+    "vendor/nebula",
+    "vendor/wgpu",
+    # Bake output, not a crate. Lands here when a demo is run with `crates/` as
+    # the working directory, and the `crates/*` member glob would otherwise try
+    # to read it as a workspace member and fail.
+    "crates/bake_cache",
+]
+resolver = "2"
+
+[workspace.dependencies]
+wgpu = { path = "vendor/wgpu/wgpu", default-features = true, features = ["vulkan", "vulkan-portability", "metal", "dx12", "gles", "webgpu", "wgsl", "trace"] }
+blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
+blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
+bytemuck = { version = "1", features = ["derive"] }
+glam = { version = "0.33", features = ["bytemuck"] }
+winit = { version = "0.30.12", default-features = false, features = ["rwh_06"] }
+env_logger = "0.11"
+log = "0.4"
+
+# SolidRS - 3D asset loading library
+solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced" }
+solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced" }
+solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced" }
+solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced" }
+solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced" }
+solid-unreal = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced" }
+quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
+thiserror = "2.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+pollster = "0.4"
+pulsar_scenedb = { path = "../SceneDB/crates/pulsar_scenedb" }
+pulsar_scenedb_derive = { path = "../SceneDB/crates/pulsar_scenedb_derive" }
+helio-core = { path = "crates/helio-core" }
+helio-scenedb = { path = "crates/helio-scenedb" }
+helio-portal-core = { path = "crates/helio-portal-core" }
+helio-default-graphs = { path = "crates/helio-default-graphs"}
+wasm-bindgen = "0.2"
+helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
+helio-pass-portal-cull = { path = "crates/passes/3d/helio-pass-portal-cull" }
+helio-pass-portal-instances = { path = "crates/passes/3d/helio-pass-portal-instances" }
+helio-pass-postprocess = { path = "crates/passes/3d/helio-pass-postprocess" }
+helio-pass-volumetric-fog = { path = "crates/passes/3d/helio-pass-volumetric-fog" }
+helio = { path = "crates/helio" }
+helio-controls = { path = "crates/helio-controls" }
+libhelio = { path = "crates/libhelio" }
+helio-xr = { path = "crates/helio-xr" }
+helio-asset-compat = { path = "crates/helio-asset-compat" }
+helio-voxel-core = { path = "crates/helio-voxel-core" }
+helio-foliage-core = { path = "crates/helio-foliage-core" }
+helio-pass-foliage-place = { path = "crates/passes/3d/helio-pass-foliage-place" }
+helio-pass-foliage-gbuffer = { path = "crates/passes/3d/helio-pass-foliage-gbuffer" }
+helio-planet-voxel-core = { path = "crates/helio-planet-voxel-core" }
+helio-pass-planetary-voxel = { path = "crates/passes/3d/helio-pass-planetary-voxel" }
+helio-pass-corona = { path = "crates/passes/3d/helio-pass-corona" }
+helio-pass-flare = { path = "crates/passes/3d/helio-pass-flare" }
+helio-pass-decal = { path = "crates/passes/3d/helio-pass-decal" }
+helio-pass-sdf = { path = "crates/passes/3d/helio-pass-sdf" }
+helio-pass-voxel-mesh = { path = "crates/passes/3d/helio-pass-voxel-mesh" }
+helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
+helio-pass-dof = { path = "crates/passes/3d/helio-pass-dof" }
+helio-pass-sprite-batch = { path = "crates/passes/2d/helio-pass-sprite-batch" }
+helio-pass-sprite-cull = { path = "crates/passes/2d/helio-pass-sprite-cull" }
+helio-pass-sprite-simulate = { path = "crates/passes/2d/helio-pass-sprite-simulate" }
+helio-pass-radiance-cascades-2d = { path = "crates/passes/2d/helio-pass-radiance-cascades-2d" }
+
+[dependencies]
+tiny_http = "0.12"
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Every transitive wgpu 30 consumer (including the vendored Nebula bakers)
+# must share the exact same types and backend as Helio's renderer.
+[patch.crates-io]
+wgpu = { path = "vendor/wgpu/wgpu" }

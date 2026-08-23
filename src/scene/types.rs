@@ -1,0 +1,177 @@
+//! Public types and internal record structures for scene management.
+
+use glam::Mat4;
+use helio_core::GpuInstanceData;
+use libhelio::GpuMeshletEntry;
+
+use crate::groups::GroupMask;
+use crate::handles::{MaterialId, MeshId, ObjectId};
+use crate::vg::VirtualMeshId;
+
+/// Descriptor for creating a voxel volume in the scene
+#[derive(Debug, Clone)]
+pub struct VoxelVolumeDescriptor {
+    pub voxel_size: f32,
+    pub root_extent: f32,
+    pub local_to_world: glam::Mat4,
+    pub movability: Option<libhelio::Movability>,
+    pub mode: Option<super::voxel::VoxelMode>,
+    pub material_palette: Vec<helio_voxel_core::GpuVoxelMaterial>,
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Public Types
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Descriptor for creating a renderable object in the scene.
+///
+/// Objects are the primary renderable entities in Helio. Each object references
+/// a mesh and material, has a world-space transform, and can be assigned to
+/// visibility groups. Objects sharing the same mesh and material are automatically
+/// batched into instanced draw calls.
+///
+/// # Performance
+/// - `insert_object()` is O(1) CPU — GPU rebuild deferred to flush
+///
+/// # Example
+/// ```ignore
+/// let obj_id = scene.insert_object(ObjectDescriptor {
+///     mesh: mesh_id,
+///     material: material_id,
+///     transform: Mat4::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+///     bounds: [0.0, 1.5, 0.0, 1.6],  // sphere: center (xyz) + radius (w)
+///     flags: 0,                      // bit 0 = casts shadow, bit 1 = receives shadow
+///     groups: GroupMask::NONE,       // always visible
+/// })?;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectDescriptor {
+    /// Mesh handle returned by [`crate::Scene::insert_mesh`].
+    pub mesh: MeshId,
+
+    /// Material handle returned by [`crate::Scene::insert_material`].
+    pub material: MaterialId,
+
+    /// Object's model matrix (world transform, column-major).
+    ///
+    /// Transforms vertices from object-local space to world space.
+    pub transform: Mat4,
+
+    /// Bounding sphere in world space: `[center.x, center.y, center.z, radius]`.
+    ///
+    /// Used for GPU frustum culling. Must accurately enclose the mesh or the object
+    /// will be incorrectly culled.
+    ///
+    /// # Important
+    /// This sphere is stored alongside the model matrix and transformed through it
+    /// at cull time. The radius scales by the maximum scale component of the transform.
+    pub bounds: [f32; 4],
+
+    /// Render flags. See the `INSTANCE_FLAG_*` constants in `libhelio`:
+    /// bit 0 = casts shadow, bit 1 = receives shadow,
+    /// bit 2 = [`libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`] (skip GPU culling entirely).
+    ///
+    /// Reach for `ALWAYS_VISIBLE` when [`Self::bounds`] cannot describe the mesh
+    /// usefully — ground planes, skyboxes, a shell the camera sits inside — where a
+    /// single bounding sphere culls almost nothing and is easy to get wrong in the
+    /// direction that deletes visible geometry. It is an escape hatch, not a default:
+    /// flagged instances are submitted every frame regardless of where the camera looks.
+    pub flags: u32,
+
+    /// Group membership bitmask for batch visibility control.
+    ///
+    /// An object is hidden if **any** of its groups are currently hidden.
+    /// Use [`GroupMask::NONE`] for objects that are always visible.
+    pub groups: GroupMask,
+
+    /// Movability mode. Defaults to Static when None.
+    /// Set to Some(Movability::Movable) for objects that will update their transforms at runtime.
+    pub movability: Option<libhelio::Movability>,
+
+    /// Application-defined tag stored alongside the object on the CPU side.
+    ///
+    /// Helio does not interpret this value. Engines use it to associate a scene
+    /// object with an external identifier (e.g. a hashed scene-database ID)
+    /// so that [`crate::ScenePicker`] hits can be resolved back to the owning
+    /// entity without maintaining a separate reverse-lookup map.
+    ///
+    /// Defaults to `0` (no tag).
+    pub user_tag: u64,
+}
+
+/// A scene object exposed for CPU-side picking queries.
+///
+/// Returned by [`crate::Scene::iter_pickable_objects`].  The caller builds a
+/// [`crate::ScenePicker`] by registering meshes and then syncing instances.
+#[derive(Debug, Clone, Copy)]
+pub struct PickableObject {
+    /// Stable handle to the object.
+    pub id: ObjectId,
+
+    /// Mesh handle — used to look up the per-mesh BVH in [`crate::ScenePicker`].
+    pub mesh_id: MeshId,
+
+    /// Current world-space model matrix (updated by `update_object_transform`).
+    pub transform: Mat4,
+
+    /// Application-defined tag — see [`ObjectDescriptor::user_tag`].
+    pub user_tag: u64,
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Internal Record Types (pub(crate) - not part of public API)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Internal record for a virtual mesh (meshlet-based LOD mesh).
+///
+/// Stores mesh handles for each LOD level and precomputed meshlet descriptors.
+#[derive(Debug, Clone)]
+pub(crate) struct VirtualMeshRecord {
+    /// Mesh pool handles for each uploaded LOD level.
+    pub mesh_ids: Vec<MeshId>,
+
+    /// Precomputed meshlet descriptors for all LODs combined.
+    pub meshlets: Vec<GpuMeshletEntry>,
+
+    /// Conservative mesh-local sphere used for object culling and LOD distance.
+    pub local_bounds: [f32; 4],
+
+    /// Number of valid LOD ranges.
+    pub lod_count: u32,
+
+    /// Measured accumulated object-space simplification errors.
+    pub lod_errors: [f32; libhelio::VG_LOD_LEVELS],
+
+    /// Per-LOD offsets into `meshlets`, before the shared frame-buffer base is applied.
+    pub lod_first_meshlets: [u32; libhelio::VG_LOD_LEVELS],
+
+    /// Per-LOD meshlet counts.
+    pub lod_meshlet_counts: [u32; libhelio::VG_LOD_LEVELS],
+
+    /// Largest per-LOD meshlet count.
+    pub max_meshlet_count: u32,
+
+    /// Number of virtual objects currently using this mesh.
+    pub ref_count: u32,
+}
+
+/// Internal record for a virtual object instance.
+///
+/// References a virtual mesh and stores instance data for GPU-driven rendering.
+#[derive(Debug, Clone)]
+pub(crate) struct VirtualObjectRecord {
+    /// Virtual mesh handle.
+    pub virtual_mesh: VirtualMeshId,
+
+    /// Canonical generation-bearing material retained for this instance.
+    pub material: MaterialId,
+
+    /// Group membership bitmask.
+    pub groups: GroupMask,
+
+    /// Movability mode (Static, Stationary, Movable).
+    pub movability: libhelio::Movability,
+
+    /// GPU instance data (model matrix, normal matrix, bounds).
+    pub instance: GpuInstanceData,
+}

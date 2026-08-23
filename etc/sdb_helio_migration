@@ -1,0 +1,31 @@
+Result
+SceneDB is now the sole persistent authority for scene components and subsystems.
+#[gpu] fields use component-local, stable GPU partner rows with DirtyTracked or explicit Once semantics.
+Helio owns only compact projections, temporal history, culling outputs, render caches, residency metadata, and pass-derived buffers.
+Geometry uses the explicit named Once handoff while retaining CPU geometry needed for mesh shaders, picking, baking, and BLAS.
+Objects, materials/textures, lights, decals, water/environment, foliage/wind, coordinates/sublevels/portals, voxels/SDF, planetary voxels, sprites, planar reflections, VG, sky/presentation, visibility, and application extensions are mapped.
+Custom components and singleton/index payloads have a typed, closed extension boundary. Raw World, GPU store, built-in buffers, and phase hooks are inaccessible through high-level Scene.
+Key implementation points are in [Scene core (line 53)](/home/t4ce/Repos/Helio/crates/helio/src/scene/core.rs:53), [extension boundary (line 73)](/home/t4ce/Repos/Helio/crates/helio/src/scene/extension.rs:73), [canonical components (line 405)](/home/t4ce/Repos/Helio/crates/helio-scenedb/src/components.rs:405), [SceneAuthority (line 319)](/home/t4ce/Repos/Helio/crates/helio-scenedb/src/storage.rs:319), [World bulk mutation (line 864)](/home/t4ce/Repos/SceneDB/crates/pulsar_scenedb/src/world.rs:864), and [GPU partner contract (line 309)](/home/t4ce/Repos/SceneDB/crates/pulsar_scenedb/src/gpu/scene_store.rs:309).
+
+Validation
+Helio workspace, all targets/features: passed.
+Helio Scene tests: 99/99 passed in parallel.
+Helio extension compile-fail boundaries: passed.
+helio-scenedb full suite: passed.
+SceneDB workspace, all features: passed, including 257 core and 57 GPU asset tests.
+SceneDB no-default-feature build: passed.
+Native GPU graph, water, shadow, planar, sprite, voxel and authority regressions passed.
+Both worktrees pass git diff --check.
+Parallel GPU tests now share retained devices, eliminating Vulkan teardown crashes and device-OOM storms.
+
+Remaining alerts
+WaterSim remains monolithic after Deferred, so ordinary displacement/caustics have one-frame latency. Removing it requires splitting producer and composite passes.
+Only eight water volumes can be simulated concurrently; additional volumes remain canonical but explicitly unsimulated. Overlapping water has no authored priority.
+Foliage terrain density/exclusion authoring, terrain production, and interaction-field passes do not exist yet. SceneDB publication is ready, but those are absent renderer features.
+Deferred currently sits at 8/8 fragment storage buffers and 16/16 sampled textures. Post-process selects the best 256 volumes, reflection the best 64 resident probes, and Corona validates a 64-emitter ceiling.
+Calling Scene::flush() twice before rendering collapses temporal history; the contract remains one flush per rendered frame.
+Several render passes still use the older Box::leak attachment-descriptor pattern, causing a small CPU allocation leak per descriptor call. That is executor-lifetime cleanup, not SceneDB ownership.
+GPU-bearing generic SceneStore types remain deliberately rejected; concrete partnered types and CPU-only generics are supported. The derive currently requires the canonical pulsar_scenedb dependency name.
+A published custom wgpu::Buffer can only be read-only by contract—WGPU cannot capability-attenuate a cloned handle—but the facade cryptographically/type-wise prevents safe access to built-in buffers.
+SceneDB replication is documented as experimental and is not used by Helio’s render path.
+Intentional compatibility breaks include opaque custom actor IDs, typed generational sprite-atlas handles, Radiant registry accessor methods with fallible zero-rejecting registration, and the additive VG visibility projection field. These avoid recreating the secondary-authority paths we removed.

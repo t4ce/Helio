@@ -1,0 +1,1402 @@
+//!use pbr_eval
+
+//! Deferred lighting pass.
+//!
+//! Runs as a fullscreen triangle (no vertex buffer) over the G-buffer written
+//! by the gbuffer pass.  Performs the full Cook-Torrance PBR evaluation,
+//! PCF shadow sampling, Radiance-Cascades GI, environment IBL and tonemapping
+//! in a single screen-space draw — O(pixels) instead of O(pixels × lights).
+//!
+//! Feature override constants injected by PipelineCache:
+//!   override ENABLE_LIGHTING:   bool = false;
+//!   override LIGHT_COUNT:       u32  = 0u;
+//!   override ENABLE_SHADOWS:    bool = false;
+//!   override MAX_SHADOW_LIGHTS: u32  = 0u;
+
+// ── Uniforms ──────────────────────────────────────────────────────────────────
+
+const ENABLE_LIGHTING: bool = true;
+const ENABLE_SHADOWS: bool = true;
+const MAX_SHADOW_LIGHTS: u32 = 42u;
+
+struct Camera {
+    view:           mat4x4<f32>,
+    proj:           mat4x4<f32>,
+    view_proj:      mat4x4<f32>,
+    view_proj_inv:  mat4x4<f32>,
+    position_near:  vec4<f32>,
+    forward_far:    vec4<f32>,
+    jitter_frame:   vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
+}
+
+struct Globals {
+    frame:             u32,
+    delta_time:        f32,
+    light_count:       u32,
+    ambient_intensity: f32,
+    ambient_color:     vec4<f32>,
+    rc_world_min:      vec4<f32>,
+    rc_world_max:      vec4<f32>,
+    csm_splits:        vec4<f32>,
+    debug_mode:        u32,
+    // 1 if a real HLFS-produced radiance-cascade texture is bound this frame,
+    // 0 if it fell back to a 1x1 black dummy (FXAA/simple/default pipelines,
+    // which never run the HLFS inject/propagate passes that write rc_cascade0).
+    // rc_world_min/max are always a non-degenerate camera-centred volume
+    // regardless of pipeline, so they can't be used to detect this — has_rc_gi
+    // is the real signal, checked in sample_rc_irradiance() before doing any
+    // of its ~128 texture loads.
+    has_rc_gi:         u32,
+    num_tiles_x:       u32,
+    // Number of entries in reflection_captures. Zero skips capture blending
+    // entirely and falls through to the skylight cubemap (layer 0).
+    reflection_capture_count: u32,
+    // 0 where the target does not support reflections (Apple platforms). The
+    // cube array, SSR and planar composites are all skipped, leaving indirect
+    // specular at zero — direct light, ambient and RC GI still apply. SsrPass
+    // and PlanarReflectionPass are not in the graph at all on those targets.
+    enable_reflections: u32,
+    // 0 disables the environment-cubemap indirect specular term specifically.
+    // The cubemap is the base reflection layer; SSR and planar only composite
+    // over it. Scalars, not vec3<u32>: a vec3 would align the tail to 16 and
+    // desync the struct from its Rust mirror.
+    enable_env_reflections: u32,
+    water_volume_count: u32,
+    water_ready_mask: u32,
+}
+
+/// GpuLight (128 bytes, matches libhelio::GpuLight / SceneLightRow)
+struct GpuLight {
+    position_range:  vec4<f32>,  // xyz = position, w = range
+    direction_outer: vec4<f32>,  // xyz = direction, w = spot outer cos angle
+    color_intensity: vec4<f32>,  // xyz = color, w = intensity
+    shadow_index:    u32,        // -1u32 if no shadow
+    light_type:      u32,        // LightType enum (0=directional, 1=point, 2=spot)
+    inner_angle:     f32,        // spot inner cos angle
+    _pad:            u32,
+    // Light shafts — consumed by helio-pass-volumetric-fog.
+    god_rays_enabled:  u32,
+    god_rays_density:  f32,
+    god_rays_weight:   f32,
+    god_rays_decay:    f32,
+    god_rays_exposure: f32,
+    flare_enabled:      u32,
+    flare_type:         u32,
+    flare_intensity:    f32,
+    flare_scale:        f32,
+    flare_tint_r:       f32,
+    flare_tint_g:       f32,
+    flare_tint_b:       f32,
+    ies_profile_index:    i32,
+    light_function_index: i32,
+    ies_angle_scale:      f32,
+    ies_angle_offset:     f32,
+}
+struct LightProjection { entity_row: u32, shadow_index: u32 }
+
+struct LightMatrix { mat: mat4x4<f32> }
+
+// Water volume descriptor (simplified, matches libhelio::GpuWaterVolume layout)
+struct GpuWaterVolume {
+    bounds_min: vec4<f32>,
+    bounds_max: vec4<f32>,
+    wave_params: vec4<f32>,
+    wave_direction: vec4<f32>,
+    water_color: vec4<f32>,
+    extinction: vec4<f32>,
+    reflection_refraction: vec4<f32>,
+    caustics_params: vec4<f32>,  // x=enabled, y=intensity, z=scale, w=speed
+    fog_params: vec4<f32>,
+    _pad0: vec4<f32>,
+    _pad1: vec4<f32>,
+    _pad2: vec4<f32>,
+    _pad3: vec4<f32>,
+    _pad4: vec4<f32>,
+    _pad5: vec4<f32>,
+    _pad6: vec4<f32>,
+}
+
+/// Per-cascade shadow configuration (16 bytes, matches libhelio::CascadeConfig)
+struct CascadeConfig {
+    split_distance:   f32,  // Far plane distance (meters)
+    depth_bias:       f32,  // Base depth bias
+    filter_radius:    f32,  // PCF filter radius (texels)
+    pcss_light_size:  f32,  // PCSS light size (meters, 0.0 = disable)
+}
+
+/// Global shadow configuration (96 bytes, matches libhelio::ShadowConfig)
+struct ShadowConfig {
+    cascades:             array<CascadeConfig, 4>,  // 64 bytes
+    enable_pcss:          u32,                      // Global PCSS toggle
+    pcss_blocker_samples: u32,                      // Blocker search samples
+    pcss_filter_samples:  u32,                      // PCSS filter samples
+    pcf_sample_count:     u32,                      // Standard PCF sample count (4/8/12/16)
+}
+
+@group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
+@group(0) @binding(1) var <uniform> globals:       Globals;
+@group(0) @binding(7) var <uniform> shadow_config: ShadowConfig;
+
+// Group 1 – G-buffer inputs (read-only, textureLoad)
+@group(1) @binding(0) var gbuf_albedo:   texture_2d<f32>;       // Rgba8Unorm   albedo.rgb + alpha
+@group(1) @binding(1) var gbuf_normal:   texture_2d<f32>;       // Rgba16Float  world-space normal
+@group(1) @binding(2) var gbuf_orm:      texture_2d<f32>;       // Rgba8Unorm   AO, roughness, metallic
+@group(1) @binding(3) var gbuf_emissive: texture_2d<f32>;       // Rgba16Float  pre-multiplied emissive
+@group(1) @binding(4) var gbuf_depth:    texture_depth_2d;      // Depth32Float
+// R8Unorm screen-space AO (SSAO or pre-baked equivalent). 1.0 = fully lit, 0.0 = fully occluded.
+// Bound to a 1×1 white fallback texture when neither SSAO nor baked AO is available.
+@group(1) @binding(5) var screen_ao:     texture_2d<f32>;
+@group(1) @binding(6) var screen_ao_samp: sampler;
+// Lightmap UVs from GBuffer (Rg16Float, contains atlas UV coordinates for lightmap lookup)
+@group(1) @binding(7) var gbuf_lightmap_uv: texture_2d<f32>;
+// SSS data (Rgba16Float): subsurface_color.rgb, subsurface_radius
+@group(1) @binding(8) var gbuf_sss: texture_2d<f32>;
+// Extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(surface_flags)
+@group(1) @binding(9) var gbuf_extra: texture_2d<f32>;
+
+// Group 2 – lights, shadows, environment (same as forward geometry pass)
+@group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
+@group(2) @binding(1)  var shadow_atlas:         texture_depth_2d_array;  // Dynamic (Movable objects)
+@group(2) @binding(11) var static_shadow_atlas:  texture_depth_2d_array;  // Static (cached forever)
+@group(2) @binding(2) var shadow_sampler: sampler_comparison;
+// Reflection cube array. Layer i is capture i's pre-filtered cubemap; mip m
+// corresponds to a GGX lobe of increasing roughness. Layer 0 doubles as the
+// skylight fallback for surfaces no capture reaches.
+@group(2) @binding(3) var env_cube:       texture_cube_array<f32>;
+@group(2) @binding(4) var <storage, read> shadow_matrices: array<LightMatrix>;
+@group(2) @binding(5) var rc_cascade0:    texture_2d<f32>;
+@group(2) @binding(6) var env_sampler:    sampler;
+@group(2) @binding(7) var shadow_depth_sampler: sampler;  // Non-comparison sampler for PCSS blocker search
+@group(2) @binding(8) var water_caustics: texture_2d_array<f32>;  // Stable sim-slot layers
+@group(2) @binding(9) var caustics_sampler: sampler;  // Sampler for caustics
+@group(2) @binding(10) var<storage, read> water_volumes: array<GpuWaterVolume>;  // Water volumes
+// Baked lightmap atlas (Rgba16Float, pre-baked indirect illumination for Static geometry)
+@group(2) @binding(12) var baked_lightmap: texture_2d<f32>;
+@group(2) @binding(13) var baked_lightmap_sampler: sampler;
+// SSR accum texture (Rgba16Float, half resolution) — screen-space reflections
+@group(2) @binding(14) var ssr_tex: texture_2d<f32>;
+// Planar reflection texture (Rgba16Float, full resolution)
+@group(2) @binding(16) var planar_tex: texture_2d<f32>;
+@group(2) @binding(17) var planar_sampler: sampler;
+// IES light profile textures (R8Unorm, 256×256 per slice, C type angular distribution)
+@group(2) @binding(18) var ies_textures: texture_2d_array<f32>;
+@group(2) @binding(19) var ies_sampler: sampler;
+@group(2) @binding(20) var<storage, read> light_projections: array<LightProjection>;
+
+struct WaterVolumeProjection {
+    entity_row: u32,
+    sim_slot: u32,
+}
+// Shared compact water membership. `sim_slot` is the persistent simulation and
+// caustics-array layer and is not the compact projection index.
+@group(2) @binding(22) var<storage, read> water_volume_projections: array<WaterVolumeProjection>;
+@group(2) @binding(23) var water_sim: texture_2d_array<f32>;
+
+const WATER_CASCADE_PATCH_SIZES: array<f32, 3> = array(30.0, 90.0, 270.0);
+const WATER_CASCADE_AMPLITUDE_WEIGHTS: array<f32, 3> = array(0.6, 0.3, 0.1);
+
+fn water_wave_amplitude(vol: GpuWaterVolume) -> f32 {
+    let rest = vol.bounds_max.w;
+    let headroom = min(rest - vol.bounds_min.y, vol.bounds_max.y - rest);
+    return clamp(vol.wave_params.x, 0.0, max(headroom, 0.0));
+}
+
+fn water_surface_at(world_xz: vec2f, vol: GpuWaterVolume, sim_slot: u32) -> f32 {
+    var height_sum = 0.0;
+    for (var cascade = 0u; cascade < 3u; cascade++) {
+        let uv = fract(world_xz / WATER_CASCADE_PATCH_SIZES[cascade]);
+        height_sum += textureSampleLevel(
+            water_sim,
+            caustics_sampler,
+            uv,
+            sim_slot * 3u + cascade,
+            0.0,
+        ).r * WATER_CASCADE_AMPLITUDE_WEIGHTS[cascade];
+    }
+    return vol.bounds_max.w + height_sum * water_wave_amplitude(vol);
+}
+
+fn projected_light(compact_index: u32) -> GpuLight {
+    let projection = light_projections[compact_index];
+    var light = lights[projection.entity_row];
+    light.shadow_index = projection.shadow_index;
+    return light;
+}
+
+// Reflection projections are sorted by influence volume, smallest first.
+// The blend below runs front-to-back and saturates, so ordering is what lets a
+// small capture override the larger one it sits inside.
+struct GpuReflectionCapture {
+    position_radius:    vec4<f32>,   // xyz = world position, w = influence radius
+    extents_transition: vec4<f32>,   // xyz = local half-extents (box), w = transition distance
+    world_to_local:     mat4x4<f32>, // box parallax; identity for spheres
+    cubemap_index:      i32,         // cube array layer, -1 = no cubemap
+    shape:              u32,         // 0 = sphere, 1 = box
+    mobility:           u32,         // 0 = static, 1 = dynamic
+    brightness:         f32,
+}
+@group(2) @binding(15) var<storage, read> reflection_captures: array<GpuReflectionCapture>;
+struct ReflectionCaptureProjection { entity_row: u32, cubemap_index: u32 }
+@group(2) @binding(21) var<storage, read> reflection_capture_projections: array<ReflectionCaptureProjection>;
+
+const CAPTURE_SHAPE_SPHERE: u32 = 0u;
+const CAPTURE_SHAPE_BOX:    u32 = 1u;
+
+// ENV_MAX_LOD imported from pbr_eval.wgsl
+
+// Group 3 – tiled light culling results (written by LightCullPass each frame)
+const TILE_SIZE:          u32 = 16u;
+const MAX_LIGHTS_PER_TILE: u32 = 64u;
+@group(3) @binding(0) var<storage, read> tile_light_lists:  array<u32>;
+@group(3) @binding(1) var<storage, read> tile_light_counts: array<u32>;
+// cluster bindings removed - GPU-driven architecture
+
+// Cluster constants removed - GPU-driven architecture
+
+// ── Fullscreen-triangle vertex shader ────────────────────────────────────────
+
+struct VSOut {
+    @builtin(position) clip_pos: vec4<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {
+    // Three vertices covering the entire NDC square.
+    // No vertex buffer required — just draw(3, 1, 0, 0).
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    var out: VSOut;
+    out.clip_pos = vec4<f32>(pos[vi], 0.0, 1.0);
+    return out;
+}
+
+// ── Shadow helpers ────────────────────────────────────────────────────────────
+
+const ATLAS_SIZE: f32 = 1024.0;
+
+// Vogel disk sampling - blue-noise-like spiral pattern for high-quality PCF
+fn vogel_disk_sample(sample_idx: u32, sample_count: u32, theta: f32) -> vec2<f32> {
+    let GOLDEN_ANGLE = 2.39996323;  // 2π / φ² (golden angle in radians)
+    let r = sqrt(f32(sample_idx) + 0.5) / sqrt(f32(sample_count));
+    let angle = f32(sample_idx) * GOLDEN_ANGLE + theta;
+    return vec2<f32>(cos(angle), sin(angle)) * r;
+}
+
+// Per-pixel hash for PCF rotation (reduces banding artifacts)
+fn hash22(p: vec2<f32>) -> f32 {
+    let p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    let d = dot(p3, vec3<f32>(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
+    return fract((p3.x + p3.y) * d);
+}
+
+fn point_light_face(dir: vec3<f32>) -> u32 {
+    let a = abs(dir);
+    if a.x >= a.y && a.x >= a.z {
+        return select(0u, 1u, dir.x < 0.0);
+    } else if a.y >= a.x && a.y >= a.z {
+        return select(2u, 3u, dir.y < 0.0);
+    } else {
+        return select(4u, 5u, dir.z < 0.0);
+    }
+}
+
+// Normal-offset bias constant (world-space units).
+// Shifts the shadow query point along the surface normal before projecting into
+// light space, eliminating self-shadowing without any visible surface gap.
+// This is the same technique used by UE4 ("Normal Shadow Bias") and Unity HDRP.
+const NORMAL_OFFSET_SCALE: f32 = 0.01;
+
+// High-quality PCF shadow sampling with Vogel disk pattern.
+// world_pos must already have normal-offset applied (call shadow_factor, not this directly).
+// Adaptive sample count: cascade_idx determines quality (distant cascades use fewer samples).
+fn sample_cascade_shadow(
+    layer: u32,
+    cascade_idx: u32,
+    cascade_scale: f32,
+    world_pos: vec3<f32>,
+    frag_coord: vec2<f32>,
+    frame: u32
+) -> f32 {
+    let light_clip = shadow_matrices[layer].mat * vec4<f32>(world_pos, 1.0);
+    if light_clip.w <= 0.0 { return 1.0; }
+
+    let ndc       = light_clip.xyz / light_clip.w;
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+
+    if any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0))
+       || ndc.z < 0.0 || ndc.z > 1.0 {
+        return 1.0;
+    }
+
+    let filter_radius = (2.0 / ATLAS_SIZE) * cascade_scale;
+
+    // Per-pixel rotation to break up banding (stable hash — no frame counter)
+    let theta = hash22(frag_coord) * 6.28318530718;
+
+    // OPTIMIZATION: Adaptive PCF sample count based on cascade distance
+    // Distant cascades are naturally blurrier and need fewer samples for good quality.
+    // This provides 20-40% shadow performance improvement with minimal visual impact.
+    let base_count = shadow_config.pcf_sample_count;
+    var pcf_count: u32;
+    switch cascade_idx {
+        case 0u: { pcf_count = base_count; }                           // Closest: full quality
+        case 1u: { pcf_count = max(base_count * 3u / 4u, 4u); }       // 75% samples
+        case 2u: { pcf_count = max(base_count / 2u, 4u); }            // 50% samples
+        default: { pcf_count = max(base_count / 4u, 4u); }            // Farthest: 25% samples (min 4)
+    }
+
+    var lit_sum = 0.0;
+    for (var i = 0u; i < pcf_count; i++) {
+        let offset = vogel_disk_sample(i, pcf_count, theta) * filter_radius;
+        // Sample both atlases and take the minimum — pixel is lit only if neither occludes it.
+        // This is the Unreal-style static/dynamic shadow combine for mixed mobility scenes.
+        let dyn_lit = textureSampleCompareLevel(
+            shadow_atlas, shadow_sampler,
+            shadow_uv + offset,
+            i32(layer),
+            ndc.z,
+        );
+        let sta_lit = textureSampleCompareLevel(
+            static_shadow_atlas, shadow_sampler,
+            shadow_uv + offset,
+            i32(layer),
+            ndc.z,
+        );
+        lit_sum += min(dyn_lit, sta_lit);
+    }
+
+    return lit_sum / f32(pcf_count);
+}
+
+// ── PCSS (Contact-Hardening Shadows) ─────────────────────────────────────────
+
+// Step 1: Blocker search - find average occluder depth in light-space
+fn pcss_blocker_search(
+    layer: u32,
+    shadow_uv: vec2<f32>,
+    receiver_depth: f32,
+    search_radius: f32,
+    blocker_samples: u32,
+    theta: f32
+) -> vec2<f32> {  // Returns (avg_blocker_depth, num_blockers)
+    var blocker_sum = 0.0;
+    var blocker_count = 0.0;
+
+    for (var i = 0u; i < blocker_samples; i++) {
+        let offset = vogel_disk_sample(i, blocker_samples, theta) * search_radius;
+        let sample_uv = shadow_uv + offset;
+
+        // Convert UV to pixel coordinates for textureLoad (no filtering needed for blocker search)
+        let pixel_coord = vec2<i32>(sample_uv * ATLAS_SIZE);
+
+        // Bounds check to prevent out-of-range access
+        if any(pixel_coord < vec2<i32>(0)) || any(pixel_coord >= vec2<i32>(i32(ATLAS_SIZE))) {
+            continue;
+        }
+
+        // Sample actual depth value (not comparison) for blocker detection.
+        // Use min of dynamic and static atlases — the closer occluder is the true blocker.
+        let dyn_depth = textureLoad(shadow_atlas, pixel_coord, i32(layer), 0);
+        let sta_depth = textureLoad(static_shadow_atlas, pixel_coord, i32(layer), 0);
+        let occluder_depth = min(dyn_depth, sta_depth);
+
+        if occluder_depth < receiver_depth - 0.0001 {  // Is blocker
+            blocker_sum += occluder_depth;
+            blocker_count += 1.0;
+        }
+    }
+
+    if blocker_count < 0.5 {
+        return vec2<f32>(0.0, 0.0);  // Fully lit (no blockers found)
+    }
+
+    return vec2<f32>(blocker_sum / blocker_count, blocker_count);
+}
+
+// Step 2: Compute penumbra size based on blocker-receiver distance
+fn pcss_penumbra_size(
+    receiver_depth: f32,
+    avg_blocker_depth: f32,
+    light_size: f32
+) -> f32 {
+    // Classic PCSS formula: penumbra_width = (d_receiver - d_blocker) / d_blocker * light_width
+    // Contact shadows (blocker_depth ≈ receiver_depth) → small penumbra (sharp)
+    // Distant shadows (receiver_depth >> blocker_depth) → large penumbra (soft)
+    return (receiver_depth - avg_blocker_depth) / max(avg_blocker_depth, 0.001) * light_size;
+}
+
+// Step 3: Full PCSS shadow sampling (blocker search + variable-kernel PCF).
+// world_pos must already have normal-offset applied (call shadow_factor, not this directly).
+fn sample_cascade_shadow_pcss(
+    layer: u32,
+    cascade_idx: u32,
+    world_pos: vec3<f32>,
+    frag_coord: vec2<f32>,
+    frame: u32
+) -> f32 {
+    let config = shadow_config.cascades[cascade_idx];
+    let light_clip = shadow_matrices[layer].mat * vec4<f32>(world_pos, 1.0);
+    if light_clip.w <= 0.0 { return 1.0; }
+
+    let ndc = light_clip.xyz / light_clip.w;
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+
+    if any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0))
+       || ndc.z < 0.0 || ndc.z > 1.0 {
+        return 1.0;
+    }
+
+    let receiver_depth = ndc.z;
+    let theta = hash22(frag_coord) * 6.28318530718;
+
+    // Step 1: Blocker search (average occluder depth)
+    // Uses unbiased depth so nearby occluders are correctly identified.
+    let search_radius = config.pcss_light_size / ATLAS_SIZE;
+    let blocker = pcss_blocker_search(layer, shadow_uv, receiver_depth, search_radius,
+                                       shadow_config.pcss_blocker_samples, theta);
+
+    if blocker.y < 0.5 {
+        return 1.0;  // No blockers - fully lit (early exit optimization)
+    }
+
+    // Step 2: Compute penumbra size (distance-based filter width)
+    let penumbra = pcss_penumbra_size(receiver_depth, blocker.x, config.pcss_light_size);
+    let filter_radius = clamp(penumbra / ATLAS_SIZE,
+                                config.filter_radius / ATLAS_SIZE,
+                                config.filter_radius * 3.0 / ATLAS_SIZE);
+
+    // Step 3: Variable-kernel PCF (filter size scales with penumbra)
+    var lit_sum = 0.0;
+    for (var i = 0u; i < shadow_config.pcss_filter_samples; i++) {
+        let offset = vogel_disk_sample(i, shadow_config.pcss_filter_samples, theta) * filter_radius;
+        // Combine dynamic and static atlases: shadowed by either
+        let dyn_lit = textureSampleCompareLevel(
+            shadow_atlas, shadow_sampler,
+            shadow_uv + offset,
+            i32(layer),
+            receiver_depth
+        );
+        let sta_lit = textureSampleCompareLevel(
+            static_shadow_atlas, shadow_sampler,
+            shadow_uv + offset,
+            i32(layer),
+            receiver_depth
+        );
+        lit_sum += min(dyn_lit, sta_lit);
+    }
+
+    return lit_sum / f32(shadow_config.pcss_filter_samples);
+}
+
+fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
+    if !ENABLE_SHADOWS { return 1.0; }
+    if light_idx >= MAX_SHADOW_LIGHTS { return 1.0; }
+
+    let light = projected_light(light_idx);
+
+    // Check if this light actually casts shadows (shadow_index != u32::MAX)
+    if light.shadow_index == 4294967295u { return 1.0; }
+
+    // Normal-offset: shift the world-space query point along the surface normal
+    // toward the light before projecting.  This eliminates self-shadowing caused
+    // by floating-point depth quantization, without the visible gap from a
+    // constant depth-offset.  Scale by (1 - NdotL) so face-on surfaces (no
+    // self-shadow risk) get near-zero offset while grazing surfaces get the full
+    // amount — exactly matching the UE4 / Unity HDRP normal-bias approach.
+    var light_dir: vec3<f32>;
+    if light.light_type == 0u {
+        light_dir = normalize(-light.direction_outer.xyz);
+    } else {
+        light_dir = normalize(light.position_range.xyz - world_pos);
+    }
+    let NdotL         = max(dot(N, light_dir), 0.0);
+    let normal_offset = N * NORMAL_OFFSET_SCALE * (1.0 - NdotL);
+    let biased_pos    = world_pos + normal_offset;
+
+    var layer: u32;
+    if light.light_type > 0u && light.light_type < 2u {  // Point light (type 1)
+        let to_frag = biased_pos - light.position_range.xyz;
+        layer = light.shadow_index + point_light_face(to_frag);
+        return sample_cascade_shadow(layer, 0u, 1.0, biased_pos, frag_coord, frame);
+    } else if light.light_type == 0u {  // Directional light (type 0)
+        let dist = length(world_pos - cameras[0].position_near.xyz);
+        let splits = globals.csm_splits;
+        
+        // Determine cascades and blend factor
+        var cascade_a = 3u;
+        var cascade_b = 3u;
+        var blend = 0.0;
+        
+        const BLEND_ZONE = 0.1;  // 10% blend zone around boundaries
+        
+        if dist < splits.x * (1.0 - BLEND_ZONE / 2.0) {
+            cascade_a = 0u;
+        } else if dist < splits.x * (1.0 + BLEND_ZONE / 2.0) {
+            // Blend zone between cascade 0 and 1
+            cascade_a = 0u;
+            cascade_b = 1u;
+            blend = smoothstep(
+                splits.x * (1.0 - BLEND_ZONE / 2.0),
+                splits.x * (1.0 + BLEND_ZONE / 2.0),
+                dist
+            );
+        } else if dist < splits.y * (1.0 - BLEND_ZONE / 2.0) {
+            cascade_a = 1u;
+        } else if dist < splits.y * (1.0 + BLEND_ZONE / 2.0) {
+            // Blend zone between cascade 1 and 2
+            cascade_a = 1u;
+            cascade_b = 2u;
+            blend = smoothstep(
+                splits.y * (1.0 - BLEND_ZONE / 2.0),
+                splits.y * (1.0 + BLEND_ZONE / 2.0),
+                dist
+            );
+        } else if dist < splits.z * (1.0 - BLEND_ZONE / 2.0) {
+            cascade_a = 2u;
+        } else if dist < splits.z * (1.0 + BLEND_ZONE / 2.0) {
+            // Blend zone between cascade 2 and 3
+            cascade_a = 2u;
+            cascade_b = 3u;
+            blend = smoothstep(
+                splits.z * (1.0 - BLEND_ZONE / 2.0),
+                splits.z * (1.0 + BLEND_ZONE / 2.0),
+                dist
+            );
+        } else {
+            cascade_a = 3u;
+        }
+        
+        // Use PCSS if enabled and light size is non-zero for this cascade
+        let use_pcss = shadow_config.enable_pcss != 0u && shadow_config.cascades[cascade_a].pcss_light_size > 0.0;
+
+        let layer_a = light.shadow_index + cascade_a;
+        var shadow_a: f32;
+        if use_pcss {
+            shadow_a = sample_cascade_shadow_pcss(layer_a, cascade_a, biased_pos, frag_coord, frame);
+        } else {
+            let cascade_scale_a = 1.0 + f32(cascade_a) * 1.5;
+            shadow_a = sample_cascade_shadow(layer_a, cascade_a, cascade_scale_a, biased_pos, frag_coord, frame);
+        }
+
+        // If no blending needed, return immediately
+        if blend <= 0.001 { return shadow_a; }
+
+        // Blend between cascades if needed
+        if cascade_b != cascade_a && blend > 0.001 {
+            let use_pcss_b = shadow_config.enable_pcss != 0u && shadow_config.cascades[cascade_b].pcss_light_size > 0.0;
+            let layer_b = light.shadow_index + cascade_b;
+            var shadow_b: f32;
+            if use_pcss_b {
+                shadow_b = sample_cascade_shadow_pcss(layer_b, cascade_b, biased_pos, frag_coord, frame);
+            } else {
+                let cascade_scale_b = 1.0 + f32(cascade_b) * 1.5;
+                shadow_b = sample_cascade_shadow(layer_b, cascade_b, cascade_scale_b, biased_pos, frag_coord, frame);
+            }
+            return mix(shadow_a, shadow_b, blend);
+        }
+
+        return shadow_a;
+    } else {
+        // Spot light (type 2)
+        layer = light.shadow_index;
+        return sample_cascade_shadow(layer, 0u, 1.0, biased_pos, frag_coord, frame);
+    }
+}
+
+// ── Surface flags (read from gbuf_extra.a) ──────────────────────────────────
+
+// SURFACE_FLAG_* and ENV_MAX_LOD imported from pbr_eval.wgsl
+
+// env_brdf_approx imported from pbr_eval.wgsl
+
+// ── Reflection captures ──────────────────────────────────────────────────────
+
+// Anchor the reflection ray to the capture's sphere so the cubemap reads as a
+// room at a real distance rather than an infinitely distant backdrop.
+fn parallax_sphere(P: vec3<f32>, R: vec3<f32>, center: vec3<f32>, radius: f32) -> vec3<f32> {
+    let oc = P - center;
+    let b  = dot(oc, R);
+    let c  = dot(oc, oc) - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return R;
+    }
+    let t = -b + sqrt(disc);  // far hit: the ray leaves the volume here
+    if t <= 0.0 {
+        return R;
+    }
+    return (P + R * t) - center;
+}
+
+// Box parallax against the capture's oriented box.
+//
+// The slab test runs in capture-local space, but the resulting ray parameter t
+// is invariant under the affine world→local transform, so the hit point can be
+// reconstructed in world space as P + R*t. That keeps this to a single stored
+// matrix — reconstructing the hit in local space instead would need the inverse
+// transform as well, just to rotate the direction back.
+fn parallax_box(P: vec3<f32>, R: vec3<f32>, cap: GpuReflectionCapture) -> vec3<f32> {
+    let pl = (cap.world_to_local * vec4<f32>(P, 1.0)).xyz;
+    let rl = (cap.world_to_local * vec4<f32>(R, 0.0)).xyz;
+    let e  = cap.extents_transition.xyz;
+
+    // Components of rl at zero produce infinities here; max() then discards
+    // them, which is the correct answer for a ray parallel to that slab.
+    let inv = 1.0 / rl;
+    let t1  = (-e - pl) * inv;
+    let t2  = (e - pl) * inv;
+    let tv  = max(t1, t2);
+    let t   = min(min(tv.x, tv.y), tv.z);
+    if t <= 0.0 || !(t < 3.402823e38) {
+        return R;
+    }
+    return (P + R * t) - cap.position_radius.xyz;
+}
+
+// How strongly a capture claims this point: 1 well inside, falling to 0 at the
+// volume boundary so neighbouring captures cross-fade instead of popping.
+fn capture_weight(P: vec3<f32>, cap: GpuReflectionCapture) -> f32 {
+    if cap.shape == CAPTURE_SHAPE_BOX {
+        let pl = (cap.world_to_local * vec4<f32>(P, 1.0)).xyz;
+        let e  = cap.extents_transition.xyz;
+        let d  = e - abs(pl);  // distance inside each pair of faces
+        if d.x < 0.0 || d.y < 0.0 || d.z < 0.0 {
+            return 0.0;
+        }
+        let transition = max(cap.extents_transition.w, 1e-4);
+        return clamp(min(min(d.x, d.y), d.z) / transition, 0.0, 1.0);
+    }
+    let radius = cap.position_radius.w;
+    let dist   = distance(P, cap.position_radius.xyz);
+    if dist > radius {
+        return 0.0;
+    }
+    // Fade across the outer 10% of the radius.
+    let fade = max(radius * 0.1, 1e-4);
+    return clamp((radius - dist) / fade, 0.0, 1.0);
+}
+
+// Blend every capture covering P, then let the skylight fill whatever coverage
+// is left over.
+//
+// Captures arrive sorted smallest-influence-first, so accumulating front-to-back
+// gives a small capture first claim on the pixel and lets the loop stop early
+// once coverage saturates.
+fn sample_reflection_environment(P: vec3<f32>, R: vec3<f32>, lod: f32) -> vec3<f32> {
+    var accum   = vec3<f32>(0.0);
+    var accum_a = 0.0;
+
+    // Reflections compiled out for this target: no capture blend, and no
+    // skylight fallback either — the skylight is layer 0 of the same cube array.
+    if globals.enable_reflections == 0u {
+        return accum;
+    }
+
+    let count = min(globals.reflection_capture_count, 64u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        if accum_a >= 0.999 {
+            break;
+        }
+        let projection = reflection_capture_projections[i];
+        var cap = reflection_captures[projection.entity_row];
+        cap.cubemap_index = bitcast<i32>(projection.cubemap_index);
+        if cap.cubemap_index < 0 {
+            continue;  // no cubemap resident yet (unbaked, or awaiting capture)
+        }
+        let w = capture_weight(P, cap);
+        if w <= 0.0 {
+            continue;
+        }
+
+        var dir: vec3<f32>;
+        if cap.shape == CAPTURE_SHAPE_BOX {
+            dir = parallax_box(P, R, cap);
+        } else {
+            dir = parallax_sphere(P, R, cap.position_radius.xyz, cap.position_radius.w);
+        }
+
+        let s = textureSampleLevel(env_cube, env_sampler, dir, cap.cubemap_index, lod).rgb
+              * cap.brightness;
+        let contrib = w * (1.0 - accum_a);
+        accum   = accum + s * contrib;
+        accum_a = accum_a + contrib;
+    }
+
+    if accum_a < 0.999 {
+        // Layer 0 stands in as the skylight: an un-parallaxed lookup for points
+        // no capture reaches.
+        let sky = textureSampleLevel(env_cube, env_sampler, R, 0, lod).rgb;
+        accum = accum + sky * (1.0 - accum_a);
+    }
+    return accum;
+}
+
+// Evaluate one direct light with the full Cook-Torrance BRDF.
+// `sf` is the shadow factor (0=shadowed, 1=lit), computed at the call site.
+// When `is_anisotropic` is true, uses anisotropic GGX distribution with the
+// given tangent direction, ax/aniso roughness in X, ay/aniso roughness in Y.
+// For SSS surfaces (has_subsurface), applies wrap-diffuse lighting with
+// transmission through the subsurface, tinted by subsurface_color.
+fn pbr_direct_light(
+    light:     GpuLight,
+    world_pos: vec3<f32>,
+    N:         vec3<f32>,
+    V:         vec3<f32>,
+    F0:        vec3<f32>,
+    albedo:    vec3<f32>,
+    roughness: f32,
+    metallic:  f32,
+    sf:        f32,
+    is_anisotropic: bool,
+    T:         vec3<f32>,
+    ax:        f32,
+    ay:        f32,
+    has_subsurface: bool,
+    subsurface_color: vec3<f32>,
+) -> vec3<f32> {
+    var L:        vec3<f32>;
+    var radiance: vec3<f32>;
+
+    if light.light_type == 0u {  // Directional light
+        L        = normalize(-light.direction_outer.xyz);
+        radiance = light.color_intensity.xyz * light.color_intensity.w;
+    } else {  // Point or spot light
+        let to_light = light.position_range.xyz - world_pos;
+        let dist     = length(to_light);
+        if dist > light.position_range.w { return vec3<f32>(0.0); }
+        L = to_light / dist;
+        var atten = 1.0 / (dist * dist + 0.0001);
+        let normalized_dist = dist / light.position_range.w;
+        atten *= max(0.0, 1.0 - normalized_dist * normalized_dist * normalized_dist * normalized_dist);
+        if light.light_type == 2u {  // Spot light
+            let cos_a = dot(-L, light.direction_outer.xyz);
+            atten    *= smoothstep(light.direction_outer.w, light.inner_angle, cos_a);
+        }
+        // IES light profile: sample angular intensity distribution
+        if light.ies_profile_index >= 0 {
+            let light_dir = normalize(light.direction_outer.xyz);
+            let theta = acos(clamp(dot(-L, light_dir), -1.0, 1.0));
+            let cross_dir = cross(-L, light_dir);
+            let phi = atan2(cross_dir.x, cross_dir.y);
+            let ies_uv = vec2<f32>(
+                phi / 6.2831853 + 0.5,
+                theta * 0.6366198,
+            ) * vec2<f32>(light.ies_angle_scale, light.ies_angle_scale)
+            + vec2<f32>(light.ies_angle_offset / 360.0, 0.0);
+            let ies_sample = textureSampleLevel(
+                ies_textures, ies_sampler, ies_uv, u32(light.ies_profile_index), 0.0
+            ).r;
+            atten *= ies_sample;
+        }
+        // Light function (gobo/cookie) projection
+        if light.light_function_index >= 0 {
+            let light_to_surface = world_pos - light.position_range.xyz;
+            let light_dir = normalize(light.direction_outer.xyz);
+            let projected = light_to_surface - dot(light_to_surface, light_dir) * light_dir;
+            let proj_len = max(length(projected), 0.0001);
+            let projected_n = projected / proj_len;
+            // Build tangent frame: handle degenerate case where light_dir ≈ up
+            let gobo_up_vec = select(
+                vec3<f32>(0.0, 1.0, 0.0),
+                vec3<f32>(0.0, 0.0, 1.0),
+                abs(dot(light_dir, vec3<f32>(0.0, 1.0, 0.0))) > 0.99,
+            );
+            let gobo_right = normalize(cross(light_dir, gobo_up_vec));
+            let gobo_up = cross(gobo_right, light_dir);
+            let gobo_uv = vec2<f32>(
+                dot(projected, gobo_right) / (light.position_range.w * 0.5) + 0.5,
+                dot(projected, gobo_up) / (light.position_range.w * 0.5) + 0.5,
+            );
+            let gobo_sample = textureSampleLevel(
+                ies_textures, ies_sampler, clamp(gobo_uv, vec2<f32>(0.0), vec2<f32>(1.0)),
+                u32(light.light_function_index), 0.0
+            ).r;
+            atten *= gobo_sample;
+        }
+        radiance = light.color_intensity.xyz * light.color_intensity.w * atten;
+    }
+
+    let NdL = max(dot(N, L), 0.0);
+    if NdL == 0.0 { return vec3<f32>(0.0); }
+
+    if all(radiance < vec3<f32>(0.002)) { return vec3<f32>(0.0); }
+
+    let H         = normalize(V + L);
+    let F         = fresnel_schlick(max(dot(H, V), 0.0), F0);
+    let kD        = (1.0 - F) * (1.0 - metallic);
+    let NdV       = max(dot(N, V), 0.0);
+    var specular: vec3<f32>;
+
+    if is_anisotropic {
+        let phi_h    = compute_phi_h(N, H, T, cross(N, T));
+        let D        = distribution_ggx_anisotropic(max(dot(N, H), 0.0), ax, ay, phi_h);
+        let G        = geometry_smith_anisotropic(NdV, NdL, ax, ay);
+        specular = D * G * F / (4.0 * NdV * NdL + 0.0001);
+    } else {
+        let D        = distribution_ggx(N, H, roughness);
+        let G        = geometry_smith(N, V, L, roughness);
+        specular = D * G * F / (4.0 * NdV * NdL + 0.0001);
+    }
+
+    var diffuse_term = kD * albedo / PI;
+    var NdotL_effective = NdL;
+
+    // Subsurface scattering: wrap-diffuse + transmission approximation.
+    // Light penetrates the surface, scatters internally tinted by
+    // subsurface_color, and exits.  The wrap term extends the diffuse
+    // lobe into the back-facing hemisphere, mimicking internal scatter.
+    if has_subsurface {
+        let wrap = 0.2 + 0.4 * (1.0 - roughness); // tighter wrap for smoother surfaces
+        NdotL_effective = max((dot(N, L) + wrap) / (1.0 + wrap), 0.0);
+        // SSS diffuse: standard diffuse dimmed, plus a tinted wrap term
+        let sss_diffuse = (1.0 - F) * albedo / PI * (1.0 - metallic);
+        let sss_scatter = subsurface_color * (1.0 / PI);
+        diffuse_term = mix(sss_diffuse, sss_scatter, 0.5);
+        // Reduce shadow occlusion — SSS surfaces let light through
+        let sf_sss = mix(sf, 1.0, 0.3);
+        return (diffuse_term + specular) * radiance * NdotL_effective * sf_sss;
+    }
+
+    return (diffuse_term + specular) * radiance * NdotL_effective * sf;
+}
+
+// ── Radiance Cascades GI ──────────────────────────────────────────────────────
+
+const RC_PROBE_DIM: u32 = 16u;
+const RC_DIR_DIM:   u32 = 4u;
+
+fn rc_oct_decode(uv: vec2<f32>) -> vec3<f32> {
+    let f  = uv * 2.0 - 1.0;
+    let af = abs(f);
+    let l  = af.x + af.y;
+    var n: vec3<f32>;
+    if l > 1.0 {
+        let sx = select(-1.0, 1.0, f.x >= 0.0);
+        let sz = select(-1.0, 1.0, f.y >= 0.0);
+        n = vec3<f32>((1.0 - af.y) * sx, 1.0 - l, (1.0 - af.x) * sz);
+    } else {
+        n = vec3<f32>(f.x, 1.0 - l, f.y);
+    }
+    return normalize(n);
+}
+
+fn rc_corner_irradiance_precomp(
+    px: u32, py: u32, pz: u32,
+    cos_weights: array<f32, 16>,
+) -> vec3<f32> {
+    let dim = RC_PROBE_DIM - 1u;
+    let cpx = min(px, dim); let cpy = min(py, dim); let cpz = min(pz, dim);
+    var irr  = vec3<f32>(0.0);
+    var wsum = 0.0;
+    var idx  = 0u;
+    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
+        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
+            let cos_w = cos_weights[idx];
+            if cos_w > 0.001 {
+                let atlas_x = i32(cpx * RC_DIR_DIM + ddx);
+                let atlas_y = i32((cpy * RC_PROBE_DIM + cpz) * RC_DIR_DIM + ddy);
+                irr  += textureLoad(rc_cascade0, vec2<i32>(atlas_x, atlas_y), 0).rgb * cos_w;
+                wsum += cos_w;
+            }
+            idx++;
+        }
+    }
+    return irr / max(wsum, 0.001);
+}
+
+fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    // No real HLFS cascade bound this frame (e.g. FXAA/simple/default
+    // pipelines) — rc_cascade0 is a 1x1 black dummy, so every one of the ~128
+    // texture loads below would just read zero. Skip the whole thing.
+    if globals.has_rc_gi == 0u {
+        return vec3<f32>(0.0);
+    }
+
+    let world_min  = globals.rc_world_min.xyz;
+    let world_max  = globals.rc_world_max.xyz;
+    let world_size = world_max - world_min;
+    if world_size.x <= 0.0 || world_size.y <= 0.0 || world_size.z <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    let t            = (world_pos - world_min) / world_size;
+    let fade_margin  = 0.05;
+    let fade         = smoothstep(vec3<f32>(0.0), vec3<f32>(fade_margin), t)
+                     * smoothstep(vec3<f32>(1.0), vec3<f32>(1.0 - fade_margin), t);
+    let volume_weight = fade.x * fade.y * fade.z;
+    if volume_weight <= 0.0 { return vec3<f32>(0.0); }
+
+    // Precompute per-direction cosine weights ONCE, shared across all 8 trilinear corners.
+    var cos_weights: array<f32, 16>;
+    var idx = 0u;
+    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
+        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
+            let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
+            cos_weights[idx] = max(0.0, dot(normal, rc_oct_decode(dir_uv)));
+            idx++;
+        }
+    }
+
+    let cell_size = world_size / f32(RC_PROBE_DIM);
+    let probe_f   = (world_pos - world_min) / cell_size - 0.5;
+    let pf        = clamp(probe_f, vec3<f32>(0.0), vec3<f32>(f32(RC_PROBE_DIM) - 1.0));
+    let pi        = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
+    let frc       = fract(pf);
+
+    let c000 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z,      cos_weights);
+    let c001 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z + 1u, cos_weights);
+    let c010 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z,      cos_weights);
+    let c011 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z + 1u, cos_weights);
+    let c100 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z,      cos_weights);
+    let c101 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z + 1u, cos_weights);
+    let c110 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z,      cos_weights);
+    let c111 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z + 1u, cos_weights);
+
+    let c0 = mix(mix(c000, c001, frc.z), mix(c010, c011, frc.z), frc.y);
+    let c1 = mix(mix(c100, c101, frc.z), mix(c110, c111, frc.z), frc.y);
+    return mix(c0, c1, frc.x) * volume_weight;
+}
+
+/// Sample RC irradiance as a rough-specular reflection fallback.
+///
+/// For rough surfaces (roughness > 0.6), a single SSR ray or RT ray query
+/// cannot converge the wide GGX lobe. We re-use the RC probe grid's irradiance
+/// data as a broad directional colour wash, weighted by the reflection
+/// direction vs the probe's directional bins.
+///
+/// This is deliberately *not* a physically correct glossy evaluation — it is
+/// a plausible stand-in that keeps rough reflections from going black when
+/// SSR and RT both miss.
+fn sample_rc_specular(
+    world_pos: vec3<f32>,
+    R: vec3<f32>,
+    roughness: f32,
+    normal: vec3<f32>,
+) -> vec3<f32> {
+    if globals.has_rc_gi == 0u { return vec3<f32>(0.0); }
+
+    let world_min = globals.rc_world_min.xyz;
+    let world_max = globals.rc_world_max.xyz;
+    let world_size = world_max - world_min;
+    if world_size.x <= 0.0 || world_size.y <= 0.0 || world_size.z <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    // Weight the reflection direction by roughness — rougher = more diffuse.
+    let lookup_dir = normalize(mix(R, normal, roughness * 0.5));
+
+    let t = (world_pos - world_min) / world_size;
+    let fade_margin = 0.05;
+    let fade = smoothstep(vec3<f32>(0.0), vec3<f32>(fade_margin), t)
+             * smoothstep(vec3<f32>(1.0), vec3<f32>(1.0 - fade_margin), t);
+    let volume_weight = fade.x * fade.y * fade.z;
+    if volume_weight <= 0.0 { return vec3<f32>(0.0); }
+
+    // Compute cosine weights for the reflection direction against each probe bin.
+    var cos_weights: array<f32, 16>;
+    var idx = 0u;
+    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
+        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
+            let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
+            cos_weights[idx] = max(0.0, dot(lookup_dir, rc_oct_decode(dir_uv)));
+            idx++;
+        }
+    }
+
+    let cell_size = world_size / f32(RC_PROBE_DIM);
+    let probe_f   = (world_pos - world_min) / cell_size - 0.5;
+    let pf        = clamp(probe_f, vec3<f32>(0.0), vec3<f32>(f32(RC_PROBE_DIM) - 1.0));
+    let pi        = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
+    let frc       = fract(pf);
+
+    let c000 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z,      cos_weights);
+    let c001 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z + 1u, cos_weights);
+    let c010 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z,      cos_weights);
+    let c011 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z + 1u, cos_weights);
+    let c100 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z,      cos_weights);
+    let c101 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z + 1u, cos_weights);
+    let c110 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z,      cos_weights);
+    let c111 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z + 1u, cos_weights);
+
+    let c0 = mix(mix(c000, c001, frc.z), mix(c010, c011, frc.z), frc.y);
+    let c1 = mix(mix(c100, c101, frc.z), mix(c110, c111, frc.z), frc.y);
+    return mix(c0, c1, frc.x) * volume_weight;
+}
+
+// ── Tonemapping & bloom ───────────────────────────────────────────────────────
+// Handled by PostProcessPass (helio-pass-postprocess). This pass writes raw HDR
+// linear light to pre_aa — no tonemapping or bloom here.
+
+// ── Fragment entry ────────────────────────────────────────────────────────────
+
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let pix = vec2<i32>(i32(in.clip_pos.x), i32(in.clip_pos.y));
+
+    // ── Depth guard: sky areas (depth=1) are already in the target → discard ──
+    let depth = textureLoad(gbuf_depth, pix, 0);
+    if depth >= 1.0 { discard; }
+
+    // ── Read G-buffer ─────────────────────────────────────────────────────────
+    let albedo_a  = textureLoad(gbuf_albedo,   pix, 0);
+    let normal_r  = textureLoad(gbuf_normal,   pix, 0);
+    let orm_r     = textureLoad(gbuf_orm,      pix, 0);
+    let emissive_r = textureLoad(gbuf_emissive, pix, 0);
+    let emissive  = emissive_r.rgb;
+
+    let albedo    = albedo_a.rgb;
+    let alpha     = albedo_a.a;
+    let N         = normalize(normal_r.xyz);
+    let ao        = orm_r.r;
+    let roughness = orm_r.g;
+    let metallic  = orm_r.b;
+
+    // Screen-space AO (SSAO or pre-baked AO).  Sampled by normalised screen UV
+    // so it works regardless of whether the AO texture is at a different resolution.
+    let screen_uv    = in.clip_pos.xy / vec2<f32>(textureDimensions(gbuf_albedo));
+    let ssao_factor  = textureSample(screen_ao, screen_ao_samp, screen_uv).r;
+    // Combined AO: material AO from G-buffer × screen-space AO.
+    let ao_combined  = ao * ssao_factor;
+
+    // ── Debug mode: bypass lighting ───────────────────────────────────────────
+    // Mode 1 (UV Grid) and Mode 2 (Texture Direct) show raw colors without lighting
+    // Mode 3 (Lit without normal mapping) goes through normal lighting
+    // Mode 4 (G-buffer readback test) shows albedo read from G-buffer without lighting
+    // Mode 5 (World normals) remaps N from [-1,1] → [0,1] as RGB (R=+X, G=+Y, B=+Z)
+    // Mode 20 (VG triangle debug): per-face colour written into albedo by vg_gbuffer.wgsl
+    // Mode 21 (VG LOD heatmap): LOD-level colour written into albedo by vg_gbuffer.wgsl
+    if globals.debug_mode == 1u || globals.debug_mode == 2u || globals.debug_mode == 4u
+    || globals.debug_mode == 20u || globals.debug_mode == 21u {
+        return vec4<f32>(albedo, alpha);
+    }
+    if globals.debug_mode == 5u {
+        return vec4<f32>(N * 0.5 + 0.5, 1.0);
+    }
+
+    // ── VG flag: VG pass writes a (-2, -2) sentinel into gbuf_lightmap_uv ─────
+    let lightmap_uv     = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
+    let is_vg           = lightmap_uv.x < -1.5;
+    let has_lightmap    = !is_vg && lightmap_uv.x >= 0.0;  // sentinel: negative x = no lightmap
+
+    // ── Reconstruct world position from depth + inv_view_proj ────────────────
+    // clip_pos.xy is in viewport space (0→width, 0→height, y↓).
+    // Convert to NDC: x ∈ [-1,1], y ∈ [1,-1] (wgpu NDC y+ = up, viewport y+ = down).
+    let screen_size = vec2<f32>(textureDimensions(gbuf_albedo));
+    let uv_01       = in.clip_pos.xy / screen_size;
+    let ndc_xy      = vec2<f32>(uv_01.x * 2.0 - 1.0, 1.0 - uv_01.y * 2.0);
+    let world_h     = cameras[0].view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
+    let world_pos   = world_h.xyz / world_h.w;
+
+    // ── Debug mode 10: shadow factor heatmap ──────────────────────────────────
+    // Shows shadow_factor() per light averaged across all lights.
+    // White = fully lit, black = fully occluded.
+    // Useful for verifying shadow atlas is filled and matrices are correct.
+    if globals.debug_mode == 10u {
+        var shadow_sum = 0.0;
+        for (var i = 0u; i < globals.light_count; i++) {
+            var sf = 1.0;
+            if !is_vg {
+                sf = shadow_factor(i, world_pos, N, in.clip_pos.xy, globals.frame);
+            }
+            shadow_sum += sf;
+        }
+        let sf = shadow_sum / max(f32(globals.light_count), 1.0);
+        return vec4<f32>(sf, sf, sf, 1.0);
+    }
+
+    // ── Debug mode 11: light-space projection for first light face 0 ─────────
+    // Orange gradient = pixel is inside the light frustum, depth = ndc.z.
+    // Dark blue = pixel is outside the frustum (w<=0 or uv out of [0,1]).
+    // Use this to verify shadow matrices are computed by ShadowMatrixPass.
+    if globals.debug_mode == 11u && globals.light_count > 0u {
+        let lc  = shadow_matrices[0u].mat * vec4<f32>(world_pos, 1.0);
+        if lc.w > 0.001 {
+            let ndc3 = lc.xyz / lc.w;
+            let uv   = vec2<f32>(ndc3.x * 0.5 + 0.5, -ndc3.y * 0.5 + 0.5);
+            if all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0))
+                    && ndc3.z >= 0.0 && ndc3.z <= 1.0 {
+                return vec4<f32>(ndc3.z, ndc3.z * 0.3, 0.0, 1.0);
+            }
+        }
+        return vec4<f32>(0.0, 0.0, 0.2, 1.0);
+    }
+
+    // ── PBR setup ─────────────────────────────────────────────────────────────
+    let F0  = clamp(vec3<f32>(normal_r.w, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(0.999));
+    let V   = normalize(cameras[0].position_near.xyz - world_pos);
+    let NdV = max(dot(N, V), 0.0);
+
+    // ── SSS / Extra surface data ──────────────────────────────────────────────
+    let sss_r        = textureLoad(gbuf_sss, pix, 0);
+    let extra_r      = textureLoad(gbuf_extra, pix, 0);
+    let surface_flags = bitcast<u32>(extra_r.a);
+    let is_anisotropic = (surface_flags & SURFACE_FLAG_ANISOTROPIC) != 0u;
+    let has_subsurface = (surface_flags & SURFACE_FLAG_SUBSURFACE) != 0u;
+    let low_specular   = (surface_flags & SURFACE_FLAG_LOW_SPECULAR) != 0u;
+
+    // Anisotropic GGX parameters
+    let aniso_ax    = extra_r.r;
+    let aniso_ay    = extra_r.g;
+    let aniso_rot   = extra_r.b;
+
+    // Compute aniso tangent direction from world normal + rotation
+    var aniso_T = vec3<f32>(0.0);
+    if is_anisotropic {
+        let up_ref = vec3<f32>(0.0, 1.0, 0.0);
+        var T_ref = normalize(cross(cross(N, up_ref), N));
+        if length(T_ref) < 0.001 {
+            T_ref = normalize(cross(cross(N, vec3<f32>(1.0, 0.0, 0.0)), N));
+        }
+        let B = cross(N, T_ref);
+        let cos_a = cos(aniso_rot);
+        let sin_a = sin(aniso_rot);
+        aniso_T = T_ref * cos_a + B * sin_a;
+    }
+
+    // ── Direct lighting ────────────────────────────────────────────────────────
+    // GPU-driven: iterate all visible lights (already culled on CPU by distance).
+    // Shadow factor affects ONLY direct lighting (Lo).  Ambient / indirect light
+    // is handled separately — shadow maps do not occlude it (that is AO's job).
+    var Lo = vec3<f32>(0.0);
+    if ENABLE_LIGHTING {
+        let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
+        let tile_y = u32(in.clip_pos.y) / TILE_SIZE;
+        let tile_idx = tile_y * globals.num_tiles_x + tile_x;
+        let tile_light_count = tile_light_counts[tile_idx];
+        for (var i = 0u; i < tile_light_count; i++) {
+            let light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i];
+            let light = projected_light(light_idx);
+            if light.light_type != 0u {
+                let dist = length(light.position_range.xyz - world_pos);
+                if dist > light.position_range.w { continue; }
+            }
+            // VG geometry does not render into shadow maps, so shadow_factor
+            // would incorrectly occlude VG pixels with unrelated regular geometry.
+            // Skip shadow evaluation for VG surfaces. Must be a real `if`, not
+            // select() — select() evaluates both arguments unconditionally, so
+            // routing through select() paid for a full PCF/PCSS shadow sample
+            // (dozens of shadow-atlas taps, per light) on every VG-covered pixel
+            // only to throw the result away every time.
+            var sf = 1.0;
+            if !is_vg {
+                sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
+            }
+            let sss_color = sss_r.rgb;
+            Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay, has_subsurface, sss_color);
+        }
+    }
+
+    // ── SSS transmission glow (rim-light approximation) ──────────────────────
+    // Light enters the surface near the silhouette, scatters internally tinted
+    // by subsurface_color, and exits.  Modelled as a view-angle-dependent glow
+    // that peaks at grazing angles (where the light path through the medium is
+    // shortest/dimmest physically, but the perceived scatter volume is largest).
+    var sss_transmission = vec3<f32>(0.0);
+    if has_subsurface {
+        let rim = pow(1.0 - NdV, 3.0);
+        sss_transmission = sss_r.rgb * rim * 1.2;
+    }
+
+    // ── RC indirect diffuse ───────────────────────────────────────────────────
+    let rc_irr   = sample_rc_irradiance(world_pos, N);
+    let F_ibl    = fresnel_schlick_roughness(NdV, F0, roughness);
+    let kD_ibl   = (1.0 - F_ibl) * (1.0 - metallic);
+    var diff_ind = kD_ibl * rc_irr * albedo;
+    
+    // ── Baked lightmap indirect diffuse ───────────────────────────────────────
+    // For static geometry: pre-computed multi-bounce GI from offline baking.
+    //
+    // The GBuffer vertex shader writes a sentinel of (-1, -1) into the lightmap UV
+    // channel for instances that have no lightmap (lightmap_index == 0xFFFFFFFF).
+    // We detect this sentinel here to skip the lightmap contribution entirely,
+    // rather than checking `uv > 0.01` which would incorrectly skip valid atlas
+    // regions whose top-left corner happens to be near (0, 0).
+    //
+    // The UV is already clamped to the region's half-texel-inset boundary in the
+    // vertex shader, so textureSample cannot bleed into adjacent atlas regions.
+    // textureSampleLevel instead of textureSample: control flow is non-uniform (depends on
+    // per-fragment world_pos via clip_pos), so WebGPU requires an explicit LOD variant.
+    let lightmap_sample = textureSampleLevel(baked_lightmap, baked_lightmap_sampler, lightmap_uv, 0.0).rgb;
+    // Nebula stores Σ(radiance · NdotL) — the same weighted sum pbr_direct_light accumulates
+    // into Lo.  No extra 1/π factor here: Nebula does not divide by π in the bake shader,
+    // so neither do we.  This convention matches Unreal Engine's lightmap pipeline.
+    let lightmap_indirect = lightmap_sample * albedo;
+
+    // Indirect specular is composed by fs_reflection in a second draw. This
+    // keeps both fragment stages within the WebGPU baseline texture limit.
+
+    // ── INDIRECT LIGHTING ────────────────────────────────────────────────────
+    // Hemisphere ambient is shadow-INDEPENDENT.  Shadow maps only affect direct
+    // lighting (Lo above); ambient occlusion (ao from G-buffer ORM.r) handles
+    // indirect-light occlusion instead.  This ensures shadowed areas still
+    // receive fill light and are never pitch black.
+    //
+    // When RC GI is active it replaces the hemisphere fallback with physically-
+    // based global illumination.  When inactive the hemisphere ambient is used.
+
+    let sky_color      = globals.ambient_color.rgb * globals.ambient_intensity;
+    let ground_color   = sky_color * 0.15;
+    let hemi_t         = N.y * 0.5 + 0.5;
+    let hemi           = mix(ground_color, sky_color, hemi_t) * albedo;
+
+    // RC weight: 0 = no RC data, 1 = full RC coverage
+    let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
+
+    // Baked lightmap weight: 1.0 for static objects with valid lightmap, 0.0 otherwise.
+    let lm_weight      = select(0.0, 1.0, has_lightmap);
+
+    // Blend between hemisphere fallback, RC-based GI, and baked lightmap:
+    // Priority: lightmap > RC > hemisphere
+    // 1. Start with hemisphere (always-on fallback)
+    // 2. Blend in RC when available (runtime dynamic GI)
+    // 3. Blend in lightmap when available (pre-baked static GI, highest quality)
+    var ambient_final = mix(hemi, diff_ind, rc_weight);
+
+    // ── Combine ───────────────────────────────────────────────────────────────
+    //
+    // Unreal-style "Static light" model:
+    //   • The baked lightmap encodes TOTAL LIGHTING (direct shadow + indirect GI)
+    //     from every baked light.  For lightmapped surfaces Lo is suppressed so the
+    //     same lights are not double-counted.
+    //   • AO is NOT applied to the lightmap.  The path-traced bake already accounts
+    //     for per-texel occlusion via shadow rays; applying screen-space AO on top
+    //     would double-darken the result.
+    //   • For un-lightmapped surfaces the normal dynamic path applies AO to the
+    //     hemisphere/RC ambient term as usual.
+    let lo_final      = Lo * (1.0 - lm_weight);          // suppress Lo for baked pixels
+    let indirect_dyn  = ambient_final * ao_combined;  // AO on dynamic GI
+    let indirect_bake = lightmap_indirect;            // no AO on lightmap
+    let indirect      = select(indirect_dyn, indirect_bake, has_lightmap);
+    var color         = lo_final + indirect;
+    color        += emissive;               // emissive from G-buffer
+    color        += sss_transmission;       // SSS rim glow
+
+    // ── Water caustics ────────────────────────────────────────────────────────
+    // Match the first containing canonical projection in the same compact order
+    // used by the other water consumers. Sparse SceneDB row layout is never an
+    // implicit ordering or addressing mechanism.
+    for (var water_index = 0u; water_index < globals.water_volume_count; water_index++) {
+        let projection = water_volume_projections[water_index];
+        let vol = water_volumes[projection.entity_row];
+        let slot_ready = (globals.water_ready_mask & (1u << projection.sim_slot)) != 0u;
+        let inside_xz = all(world_pos.xz >= vol.bounds_min.xz)
+                     && all(world_pos.xz <= vol.bounds_max.xz);
+        if !inside_xz {
+            continue;
+        }
+        var surface_y = vol.bounds_max.w;
+        if slot_ready {
+            surface_y = water_surface_at(world_pos.xz, vol, projection.sim_slot);
+        }
+        let submerged = world_pos.y >= vol.bounds_min.y
+                     && world_pos.y < surface_y;
+        if !submerged {
+            continue;
+        }
+
+        if slot_ready && vol.caustics_params.x > 0.5 {
+            let extent = max(vol.bounds_max.xz - vol.bounds_min.xz, vec2f(1e-4));
+            let caustics_uv = (world_pos.xz - vol.bounds_min.xz) / extent;
+            let caustic_value = textureSampleLevel(
+                water_caustics,
+                caustics_sampler,
+                caustics_uv,
+                projection.sim_slot,
+                0.0,
+            ).r;
+
+            // The producer already applies canonical caustics intensity.
+            color += vec3<f32>(0.7, 0.9, 1.0) * caustic_value;
+        }
+        break;
+    }
+
+    // Tonemapping & bloom handled by PostProcessPass — write raw HDR linear.
+    return vec4<f32>(color, alpha);
+}
+
+// Reflection composition is deliberately isolated from base lighting so neither
+// fragment entry point exceeds the WebGPU baseline of 16 sampled textures.
+// The normal path is additively blended over fs_main; SSR debug modes use the
+// companion replacement pipeline.
+@fragment
+fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
+    let pix = vec2<i32>(i32(in.clip_pos.x), i32(in.clip_pos.y));
+    let depth = textureLoad(gbuf_depth, pix, 0);
+    if depth >= 1.0 { discard; }
+
+    let ssr_hit = textureLoad(ssr_tex, pix, 0);
+    if globals.debug_mode == 30u {
+        return vec4<f32>(vec3<f32>(ssr_hit.a), 1.0);
+    }
+    if globals.debug_mode == 31u {
+        return vec4<f32>(ssr_hit.rgb, 1.0);
+    }
+
+    // These modes replace lighting with another diagnostic in fs_main.
+    if globals.debug_mode == 1u || globals.debug_mode == 2u
+        || globals.debug_mode == 4u || globals.debug_mode == 5u
+        || globals.debug_mode == 10u || globals.debug_mode == 11u
+        || globals.debug_mode == 20u || globals.debug_mode == 21u {
+        return vec4<f32>(0.0);
+    }
+
+    let normal_r = textureLoad(gbuf_normal, pix, 0);
+    let orm_r = textureLoad(gbuf_orm, pix, 0);
+    let emissive_r = textureLoad(gbuf_emissive, pix, 0);
+    let N = normalize(normal_r.xyz);
+    let roughness = orm_r.g;
+    let F0 = clamp(
+        vec3<f32>(normal_r.w, orm_r.a, emissive_r.a),
+        vec3<f32>(0.0),
+        vec3<f32>(0.999),
+    );
+
+    let screen_size = vec2<f32>(textureDimensions(gbuf_normal));
+    let screen_uv = in.clip_pos.xy / screen_size;
+    let ao_combined = orm_r.r * textureSample(screen_ao, screen_ao_samp, screen_uv).r;
+    let lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
+    let is_vg = lightmap_uv.x < -1.5;
+    let has_lightmap = !is_vg && lightmap_uv.x >= 0.0;
+
+    let ndc_xy = vec2<f32>(screen_uv.x * 2.0 - 1.0, 1.0 - screen_uv.y * 2.0);
+    let world_h = cameras[0].view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
+    let world_pos = world_h.xyz / world_h.w;
+    let V = normalize(cameras[0].position_near.xyz - world_pos);
+    let NdV = max(dot(N, V), 0.0);
+    let F_ibl = fresnel_schlick_roughness(NdV, F0, roughness);
+    let R = reflect(-V, N);
+
+    var spec_ind = vec3<f32>(0.0);
+    if globals.enable_env_reflections != 0u {
+        let env_lod = roughness * ENV_MAX_LOD;
+        let env_sample = sample_reflection_environment(world_pos, R, env_lod);
+        let env_brdf = env_brdf_approx(NdV, roughness);
+        spec_ind = env_sample * (F0 * env_brdf.x + env_brdf.y);
+    }
+
+    if globals.enable_reflections != 0u && ssr_hit.a > 0.0 {
+        spec_ind = mix(spec_ind, ssr_hit.rgb * F_ibl, ssr_hit.a);
+    }
+
+    let planar_hit = textureLoad(planar_tex, pix, 0);
+    if globals.enable_reflections != 0u && planar_hit.a > 0.0 {
+        spec_ind = mix(spec_ind, planar_hit.rgb * F_ibl, planar_hit.a);
+    }
+
+    if globals.has_rc_gi > 0u && roughness > 0.6 {
+        let rc_spec = sample_rc_specular(world_pos, R, roughness, N);
+        spec_ind = mix(
+            spec_ind,
+            rc_spec,
+            smoothstep(0.6, 0.9, roughness) * 0.4,
+        );
+    }
+
+    let contribution = select(spec_ind * ao_combined, spec_ind, has_lightmap);
+    return vec4<f32>(contribution, 0.0);
+}
