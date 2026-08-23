@@ -190,7 +190,7 @@ impl TransparentPass {
         // Just the transparent base shader at class 0 — NOT
         // RadiantTemplateRegistry::new(), which populates classes 0-4 with
         // gbuffer templates that have incompatible bind group layouts.
-        let base_src = include_str!("../../../../helio/templates/transparent_base.wgsl");
+        let base_src = include_str!("../../../../../assets/templates/transparent_base.wgsl");
         let resolved_src: &'static str = if base_src.contains("//!use pbr_eval") {
             let mut resolved =
                 String::with_capacity(base_src.len() + libhelio::shader::PBR_EVAL.len());

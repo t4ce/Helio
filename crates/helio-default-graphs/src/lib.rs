@@ -51,7 +51,7 @@ use helio_core::RenderGraph;
 use helio::Scene;
 
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
-static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
+static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../assets/spotlight.png");
 
 /// Create a new graph, honouring the caller's device ownership.
 ///

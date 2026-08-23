@@ -87,7 +87,7 @@ impl DebugPass {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Debug Draw Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/debug_draw.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../assets/shaders/debug_draw.wgsl").into()),
         });
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

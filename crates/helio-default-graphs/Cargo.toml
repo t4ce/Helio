@@ -6,7 +6,7 @@ description = "Default render graph builders for Helio — depends on all pass c
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-helio = { path = "../helio" }
+helio = { path = "../.." }
 helio-core = { workspace = true }
 image = { workspace = true, features = ["png"] }
 wgpu = { workspace = true }

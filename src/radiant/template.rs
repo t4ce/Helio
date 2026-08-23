@@ -83,7 +83,7 @@ pub struct RadiantTemplateRegistry {
 fn base_gbuffer_source() -> &'static str {
     include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../passes/3d/helio-pass-gbuffer/shaders/gbuffer.wgsl"
+        "/crates/passes/3d/helio-pass-gbuffer/shaders/gbuffer.wgsl"
     ))
 }
 
@@ -159,7 +159,7 @@ impl RadiantTemplateRegistry {
                 name: "default_pbr",
                 wgsl_source: include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../passes/3d/helio-pass-gbuffer/shaders/gbuffer.wgsl"
+                    "/crates/passes/3d/helio-pass-gbuffer/shaders/gbuffer.wgsl"
                 )),
             },
         );
@@ -173,19 +173,19 @@ impl RadiantTemplateRegistry {
     fn register_default_templates(&mut self) {
         self.register_partial_str_with_id(
             MATERIAL_CLASS_CLEAR_COAT, "clear_coat",
-            include_str!("../../templates/clear_coat.wgsl").to_string(),
+            include_str!("../../assets/templates/clear_coat.wgsl").to_string(),
         );
         self.register_partial_str_with_id(
             MATERIAL_CLASS_SUBSURFACE, "subsurface",
-            include_str!("../../templates/subsurface.wgsl").to_string(),
+            include_str!("../../assets/templates/subsurface.wgsl").to_string(),
         );
         self.register_partial_str_with_id(
             MATERIAL_CLASS_ANISOTROPIC, "anisotropic",
-            include_str!("../../templates/anisotropic.wgsl").to_string(),
+            include_str!("../../assets/templates/anisotropic.wgsl").to_string(),
         );
         self.register_partial_str_with_id(
             MATERIAL_CLASS_SKIN, "skin",
-            include_str!("../../templates/skin.wgsl").to_string(),
+            include_str!("../../assets/templates/skin.wgsl").to_string(),
         );
     }
 
@@ -264,7 +264,7 @@ impl RadiantTemplateRegistry {
     /// Compose a transparent override function with the transparent base shader.
     /// Returns the composed WGSL source ready for registration.
     pub fn compose_transparent_override(&self, override_fn: &str) -> String {
-        let base = include_str!("../../templates/transparent_base.wgsl");
+        let base = include_str!("../../assets/templates/transparent_base.wgsl");
         compose_fn_override(base, override_fn, "fn radiant_eval_transparent")
     }
 
@@ -283,7 +283,7 @@ impl RadiantTemplateRegistry {
     /// The `override_fn` should contain a `fn radiant_eval_transparent(...)` function body.
     /// Composed with the transparent base shader at registration time.
     pub fn register_transparent_partial_str(&mut self, name: &str, override_fn: String) -> u32 {
-        let base = include_str!("../../templates/transparent_base.wgsl");
+        let base = include_str!("../../assets/templates/transparent_base.wgsl");
         let composed = compose_fn_override(base, &override_fn, "fn radiant_eval_transparent");
         self.register_str(name, composed)
     }
