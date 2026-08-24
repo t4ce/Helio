@@ -118,7 +118,7 @@ impl CpuProfiler {
     ///     // ... CPU work ...
     /// } // Timing recorded when guard drops
     /// ```
-    pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
+    pub fn scope(&mut self, name: &'static str) -> ScopeGuard<'_> {
         ScopeGuard {
             #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
             start: Instant::now(),
@@ -191,4 +191,3 @@ impl Drop for ScopeGuard<'_> {
         }
     }
 }
-

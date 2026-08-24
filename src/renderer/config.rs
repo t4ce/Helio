@@ -33,24 +33,6 @@ pub enum PerfOverlayMode {
 /// * `Passthrough` — prefers `Rgba16Float` (raw HDR float)
 ///
 /// Falls back to the first available format if no preferred format is found.
-pub fn select_hdr_surface_format(
-    caps: &wgpu::SurfaceCapabilities,
-    mode: libhelio::HdrOutputMode,
-) -> wgpu::TextureFormat {
-    let preferred = match mode {
-        libhelio::HdrOutputMode::Ldr => {
-            caps.formats.iter().find(|f| f.is_srgb()).copied()
-        }
-        libhelio::HdrOutputMode::Hdr10
-        | libhelio::HdrOutputMode::ScRgb
-        | libhelio::HdrOutputMode::Passthrough => {
-            caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Rgba16Float).copied()
-                .or_else(|| caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Rgba32Float).copied())
-        }
-    };
-    preferred.unwrap_or(caps.formats[0])
-}
-
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
     let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer

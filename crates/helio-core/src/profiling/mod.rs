@@ -199,7 +199,7 @@ impl Profiler {
     /// } // ScopeGuard drops, timing recorded
     /// # }
     /// ```
-    pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
+    pub fn scope(&mut self, name: &'static str) -> ScopeGuard<'_> {
         self.cpu.scope(name)
     }
 

@@ -216,7 +216,8 @@ mod projection_tests {
 
         let m = projection_from_fov(fov(-half_h, half_h, half_v, -half_v), near, far);
         let aspect = half_h.tan() / half_v.tan();
-        let reference = glam::Mat4::perspective_rh(half_v * 2.0, aspect, near, far);
+        let reference =
+            glam::camera::rh::proj::directx::perspective(half_v * 2.0, aspect, near, far);
 
         for (a, b) in m
             .to_cols_array()

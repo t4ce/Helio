@@ -68,7 +68,7 @@ fn make_static_box_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u
     let mut verts: Vec<[f32; 4]> = Vec::with_capacity(total_verts);
     let mut indices: Vec<u32> = Vec::with_capacity(total_indices);
 
-    let mut add_face = |verts: &mut Vec<[f32; 4]>,
+    let add_face = |verts: &mut Vec<[f32; 4]>,
                         indices: &mut Vec<u32>,
                         make_vert: fn(u32, u32) -> [f32; 4]| {
         let voffset = verts.len() as u32;

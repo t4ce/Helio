@@ -18,7 +18,7 @@ impl RadiantTemplate {
     /// passthrough to keep the default PBR evaluation.
     pub fn build_shader_source(&self, graph_wgsl: &str, max_textures: usize) -> String {
         let max_tex_str = max_textures.to_string();
-        let mut src = self
+        let src = self
             .wgsl_source
             .replace(
                 "binding_array<texture_2d<f32>, 256>",

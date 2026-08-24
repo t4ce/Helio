@@ -110,7 +110,6 @@ impl RenderGraph {
     /// share a physical allocation.  Runs after `chain_local` is computed on
     /// every `ResourceLifetime`, before the final `allocate_textures()` call.
     pub(crate) fn assign_chain_aware_alias_groups(&mut self) {
-        let mut chain_group_gen: u32 = 0;
         for rl in self.resources.values_mut() {
             if rl.chain_local {
                 // Every chain-local resource gets its own alias group keyed

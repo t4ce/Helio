@@ -1,5 +1,3 @@
-use wgpu::util::DeviceExt;
-
 // ── Texture format wrapper ─────────────────────────────────────────────────────
 
 /// A commonly reused set of texture format aliases.

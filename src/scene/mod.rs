@@ -92,7 +92,7 @@ mod voxel;
 mod water;
 
 pub use actor::{
-    DecalActor, PostProcessVolumeActor, ReflectionCaptureActor, ReflectionCaptureDescriptor,
+    DecalActor, ReflectionCaptureActor, ReflectionCaptureDescriptor,
     SceneActor, SceneActorId, SceneActorTrait, WaterHitboxDescriptor, WaterHitboxActor,
     WaterVolumeDescriptor, WaterVolumeActor,
 };

@@ -1,7 +1,7 @@
 // Tests for helio-pass-ssao: SSAO kernel sample distribution, Halton sampling, noise rotation.
 // All tests are pure math — no GPU device required.
 
-use std::f32::consts::{PI, FRAC_PI_2};
+use std::f32::consts::PI;
 
 const KERNEL_SIZE: usize = 64;
 const NOISE_DIM: u32 = 4;

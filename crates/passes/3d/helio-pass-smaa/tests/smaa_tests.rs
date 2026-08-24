@@ -1,7 +1,6 @@
 // Tests for helio-pass-smaa: SMAA algorithm properties, texture formats, 3-pass structure.
 // All tests are pure math — no GPU device required.
 
-use std::mem;
 
 // ── SMAA algorithm constants ──────────────────────────────────────────────────
 

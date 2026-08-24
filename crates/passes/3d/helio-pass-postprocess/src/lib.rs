@@ -98,7 +98,8 @@ pub struct PostProcessPass {
     bloom_active: bool,
 
     // ── Custom effect infrastructure ───────────────────────────────────────
-    noise_texture: wgpu::Texture,
+    // Kept alive for the noise view used by the post-process bind group.
+    _noise_texture: wgpu::Texture,
     noise_view: wgpu::TextureView,
     noise_sampler: wgpu::Sampler,
     /// 1x1 (0,0,0,1) stand-in bound at b17 when the graph has no fog pass.
@@ -564,7 +565,7 @@ impl PostProcessPass {
             format,
             first_frame: true,
             bloom_active: true,
-            noise_texture,
+            _noise_texture: noise_texture,
             noise_view,
             noise_sampler,
             fallback_fog_view,

@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 use crate::handles::Handle;
 
 #[derive(Clone, Copy, Debug)]
-struct DenseSlotMeta {
+pub(crate) struct DenseSlotMeta {
     generation: u32,
     dense_index: u32,
     occupied: bool,
@@ -20,16 +20,10 @@ struct DenseSlotMeta {
 ///
 /// Contains the removed value and auxilliary information needed by callers
 /// to update moved items after a swap-remove.
-pub struct DenseRemove<T, H> {
+pub struct DenseRemove<T> {
     /// The removed value.
     pub removed: T,
 
-    /// Dense-array index that was freed by the removal.
-    pub dense_index: usize,
-
-    /// Optional handle and new dense index for the object that was moved
-    /// into the removed slot by swap-remove.
-    pub moved: Option<(H, usize)>,
 }
 
 /// Compact dense storage for items keyed by handle.
@@ -116,22 +110,11 @@ impl<T, H: Handle> DenseArena<T, H> {
     }
 
     /// Immutable lookup by handle, returning the current dense index and reference.
-    pub fn get_with_index(&self, handle: H) -> Option<(usize, &T)> {
-        let meta = *self.slots.get(handle.slot() as usize)?;
-        if !meta.occupied || meta.generation != handle.generation() {
-            return None;
-        }
-        let dense_index = meta.dense_index as usize;
-        self.dense
-            .get(dense_index)
-            .map(|value| (dense_index, value))
-    }
-
     /// Remove an item by handle and return its removal metadata.
     ///
     /// If the removed item is not the last element in dense storage, the last
     /// element is moved into the freed slot and its dense index is updated.
-    pub fn remove(&mut self, handle: H) -> Option<DenseRemove<T, H>> {
+    pub fn remove(&mut self, handle: H) -> Option<DenseRemove<T>> {
         let slot_index = handle.slot() as usize;
         let meta = self.slots.get(slot_index).copied()?;
         if !meta.occupied || meta.generation != handle.generation() {
@@ -142,19 +125,10 @@ impl<T, H: Handle> DenseArena<T, H> {
         let removed = self.dense.swap_remove(dense_index);
         self.dense_to_slot.swap_remove(dense_index);
 
-        let moved = if dense_index < self.dense.len() {
+        if dense_index < self.dense.len() {
             let moved_slot = self.dense_to_slot[dense_index] as usize;
             self.slots[moved_slot].dense_index = dense_index as u32;
-            Some((
-                H::from_parts(
-                    self.dense_to_slot[dense_index],
-                    self.slots[moved_slot].generation,
-                ),
-                dense_index,
-            ))
-        } else {
-            None
-        };
+        }
 
         let slot = &mut self.slots[slot_index];
         slot.occupied = false;
@@ -163,8 +137,6 @@ impl<T, H: Handle> DenseArena<T, H> {
 
         Some(DenseRemove {
             removed,
-            dense_index,
-            moved,
         })
     }
 
@@ -180,37 +152,6 @@ impl<T, H: Handle> DenseArena<T, H> {
         })
     }
 
-    /// Insert a value using a closure that receives the newly-created handle.
-    ///
-    /// Useful when the value's constructor needs the handle it will be assigned.
-    pub fn insert_with(&mut self, f: impl FnOnce(H) -> T) -> H {
-        let dense_index = self.dense.len();
-        let (slot_index, generation) = if let Some(slot) = self.free_list.pop() {
-            let meta = &mut self.slots[slot as usize];
-            meta.occupied = true;
-            meta.dense_index = dense_index as u32;
-            (slot, meta.generation)
-        } else {
-            let slot = self.slots.len() as u32;
-            self.slots.push(DenseSlotMeta {
-                generation: 1,
-                dense_index: dense_index as u32,
-                occupied: true,
-            });
-            (slot, 1)
-        };
-        let handle = H::from_parts(slot_index, generation);
-        let value = f(handle);
-        self.dense.push(value);
-        self.dense_to_slot.push(slot_index);
-        handle
-    }
-
-    /// Number of live items in the arena.
-    pub fn len(&self) -> usize {
-        self.dense.len()
-    }
-
     /// Immutable lookup by handle.
     pub fn get(&self, handle: H) -> Option<&T> {
         let meta = *self.slots.get(handle.slot() as usize)?;
@@ -220,30 +161,11 @@ impl<T, H: Handle> DenseArena<T, H> {
         self.dense.get(meta.dense_index as usize)
     }
 
-    /// Mutable lookup by handle.
-    pub fn get_mut(&mut self, handle: H) -> Option<&mut T> {
-        let meta = *self.slots.get(handle.slot() as usize)?;
-        if !meta.occupied || meta.generation != handle.generation() {
-            return None;
-        }
-        self.dense.get_mut(meta.dense_index as usize)
-    }
-
     /// Iterate all live items yielding `(handle, &value)` with a simpler API.
     pub fn iter(&self) -> impl Iterator<Item = (H, &T)> + '_ {
         self.iter_with_handles()
     }
 
-    /// Mutable iteration over all live items yielding `(handle, &mut value)`.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (H, &mut T)> + '_ {
-        let dense_to_slot = self.dense_to_slot.as_ptr();
-        let slots = self.slots.as_ptr();
-        self.dense.iter_mut().enumerate().map(move |(dense_idx, value)| {
-            let slot_idx = unsafe { *dense_to_slot.add(dense_idx) as usize };
-            let gen = unsafe { (*slots.add(slot_idx)).generation };
-            (H::from_parts(slot_idx as u32, gen), value)
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -301,16 +223,6 @@ impl<T, H: Handle> SparsePool<T, H> {
         slot.value.as_ref()
     }
 
-    /// Immutable access by raw slot index.
-    pub fn get_by_slot(&self, slot_index: usize) -> Option<&T> {
-        self.slots.get(slot_index)?.value.as_ref()
-    }
-
-    /// Mutable access by raw slot index.
-    pub fn get_mut_by_slot(&mut self, slot_index: usize) -> Option<&mut T> {
-        self.slots.get_mut(slot_index)?.value.as_mut()
-    }
-
     /// Mutable lookup by handle, returning the slot index and reference.
     pub fn get_mut_with_slot(&mut self, handle: H) -> Option<(usize, &mut T)> {
         let slot_index = handle.slot() as usize;
@@ -353,13 +265,4 @@ impl<T, H: Handle> SparsePool<T, H> {
         })
     }
 
-    /// Total number of slots allocated, including vacant slots.
-    pub fn slot_len(&self) -> usize {
-        self.slots.len()
-    }
-
-    /// Returns true when there are freed slots available for reuse.
-    pub fn has_free_slot(&self) -> bool {
-        !self.free_list.is_empty()
-    }
 }

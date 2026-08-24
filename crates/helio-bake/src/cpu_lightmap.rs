@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use nebula::core::scene::{BakeMesh, LightSource, LightSourceKind};
+use nebula::core::scene::{BakeMesh, LightSourceKind};
 use nebula::prelude::SceneGeometry;
 
 use crate::cache::{CachedAtlasRegion, CachedLightmap};

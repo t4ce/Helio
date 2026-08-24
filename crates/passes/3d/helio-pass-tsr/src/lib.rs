@@ -178,8 +178,6 @@ pub struct TsrPass {
     point_sampler:  wgpu::Sampler,
 
     // ── Dimensions ────────────────────────────────────────────────────────────
-    internal_width:  u32,
-    internal_height: u32,
     output_width:    u32,
     output_height:   u32,
 
@@ -201,8 +199,8 @@ impl TsrPass {
     /// - `quality`    — neighbourhood tap count and accumulation parameters.
     pub fn new(
         device:          &wgpu::Device,
-        internal_width:  u32,
-        internal_height: u32,
+        _internal_width:  u32,
+        _internal_height: u32,
         output_width:    u32,
         output_height:   u32,
         format:          wgpu::TextureFormat,
@@ -352,8 +350,6 @@ impl TsrPass {
             output_view,
             linear_sampler,
             point_sampler,
-            internal_width,
-            internal_height,
             output_width,
             output_height,
             first_frame: true,

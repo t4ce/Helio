@@ -1495,7 +1495,7 @@ impl RenderPass for HlfsPass {
 
         // Step 1: Toroidal shift — update clip-stack origins and recycle voxels
         {
-            let mut pass =
+            let _pass =
                 unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("HLFS Toroidal Shift"),
                     timestamp_writes: None,

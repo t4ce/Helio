@@ -211,9 +211,6 @@ impl FreeListAllocator {
         None
     }
 
-    fn clear(&mut self) {
-        self.free.clear();
-    }
 }
 
 // ── Sub-pool (vertex + index + their allocators) ──────────────────────────────

@@ -374,11 +374,6 @@ impl DebugPass {
         self.tri_count = count as u32;
     }
 
-    pub fn clear(&mut self) {
-        self.vertex_count = 0;
-        self.tri_count = 0;
-    }
-
     pub fn set_depth_test(&mut self, enabled: bool) {
         self.depth_test_enabled = enabled;
     }
@@ -424,58 +419,6 @@ impl DebugPass {
         }
     }
 
-    pub fn execute_on_target(
-        &mut self,
-        ctx: &mut PassContext,
-        target: &wgpu::TextureView,
-    ) -> HelioResult<()> {
-        if self.vertex_count == 0 && self.tri_count == 0 {
-            return Ok(());
-        }
-
-        self.ensure_bind_group(ctx.device);
-
-        let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = ctx.resources.full_res_depth.get() {
-                frd
-            } else {
-                ctx.depth
-            };
-            Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            })
-        } else {
-            None
-        };
-
-        let color_attachment = wgpu::RenderPassColorAttachment {
-            view: target,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        };
-        let color_attachments = [Some(color_attachment)];
-        let desc = wgpu::RenderPassDescriptor {
-            label: Some("DebugDraw"),
-            color_attachments: &color_attachments,
-            depth_stencil_attachment: depth_attachment,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        };
-
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
-        self.draw_commands(&mut pass);
-        Ok(())
-    }
 }
 
 impl RenderPass for DebugPass {

@@ -11,7 +11,7 @@ use helio_core::RenderGraph;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
-use super::renderer_impl::{CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer};
+use super::renderer_impl::{CullStatsReadbackState, GraphRebuilder, Renderer};
 
 impl Renderer {
     pub(crate) fn create_depth_resources(
@@ -90,7 +90,6 @@ impl Renderer {
     ///
     /// Prefer [`RendererBuilder`](super::builder::RendererBuilder) for new code — it
     /// creates the scene, debug state, and internal buffers automatically.
-    #[allow(deprecated)]
     pub(crate) fn construct(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
@@ -281,7 +280,6 @@ impl Renderer {
     /// compatibility.  Prefer [`RendererBuilder`](super::builder::RendererBuilder)
     /// for new code — it creates the scene, debug state, and internal buffers
     /// automatically.
-    #[deprecated(since = "0.20.0", note = "use RendererBuilder instead")]
     pub fn new(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
@@ -315,7 +313,6 @@ impl Renderer {
     /// Create a [`Renderer`] that shares a device/queue owned externally.
     ///
     /// Equivalent to [`new()`] with `owns_device = false`.
-    #[deprecated(since = "0.20.0", note = "use RendererBuilder instead")]
     pub fn new_with_external_device(
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,

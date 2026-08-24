@@ -784,7 +784,6 @@ impl Renderer {
             swapchain.acquire_image().map_err(xr_error)?
         };
 
-        let mut representative = self.default_xr_camera(near_far.0, near_far.1);
         for (eye, pose) in located.view_poses.iter().enumerate() {
             let eye_uniform = helio_xr::xr_view_to_camera(pose, pose, near_far.0, near_far.1)[0];
 
@@ -807,7 +806,7 @@ impl Renderer {
             //   fixed inter-eye offset applied to a moving camera, it presents as debug
             //   geometry sliding and shearing against the world as you move — while the
             //   left eye looks perfect.
-            representative = match (&self.xr_camera, pose) {
+            let representative = match (&self.xr_camera, pose) {
                 (Some(template), _) => {
                     let mut cam = template.clone();
                     cam.view = pose.view_matrix();
@@ -907,8 +906,6 @@ impl Renderer {
         image_index: u32,
         mirror: &wgpu::TextureView,
     ) -> HelioResult<()> {
-        use wgpu::util::DeviceExt as _;
-
         if self.xr_mirror_sampler.is_none() {
             self.xr_mirror_sampler = Some(self.device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("XR Mirror Sampler"),
