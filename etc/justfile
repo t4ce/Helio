@@ -135,7 +135,7 @@ wasm-demo-dev demo:
     {{wasm-script}} --dev {{demo}}
 
 serve-wasm port='8000':
-    npx --yes http-server target/wasm-prebuilt --host 127.0.0.1 --port {{port}}
+    npx --yes http-server ../Helio-Examples/target/wasm-prebuilt --host 127.0.0.1 --port {{port}}
 
 # ── Android ──────────────────────────────────────────────────────────────────
 

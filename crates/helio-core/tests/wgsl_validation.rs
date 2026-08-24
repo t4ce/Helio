@@ -134,21 +134,10 @@ fn every_wgsl_shader_parses_and_validates() {
     // silently accepts a new entry-point-less file; an exact list forces its
     // composition role to be reviewed.
     let expected_fragments = [
-        "crates/examples/vhs_effects.wgsl",
-        "crates/helio/templates/anisotropic.wgsl",
-        "crates/helio/templates/clear_coat.wgsl",
-        "crates/helio/templates/glass.wgsl",
-        "crates/helio/templates/glass_transparent.wgsl",
-        "crates/helio/templates/opal.wgsl",
-        "crates/helio/templates/skin.wgsl",
-        "crates/helio/templates/subsurface.wgsl",
-        "crates/helio/templates/water.wgsl",
-        "crates/helio/templates/water_transparent.wgsl",
         "crates/helio-core/src/shader/foliage_wind.wgsl",
         "crates/helio-core/src/shader/hiz_trace.wgsl",
         "crates/helio-core/src/shader/prelude.wgsl",
         "crates/helio-planet-voxel-core/src/planet_voxel_layout.wgsl",
-        "crates/helio-web-demos/examples-wasm/vhs_effects.wgsl",
         "crates/libhelio/shaders/pbr_eval.wgsl",
         "crates/passes/3d/helio-pass-planetary-voxel/src/extraction_layout.wgsl",
     ];

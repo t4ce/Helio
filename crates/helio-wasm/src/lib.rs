@@ -29,7 +29,7 @@
 //! // Native entry point
 //! fn main() { launch::<MyDemo>(); }
 //!
-//! // WASM entry point (in helio-web-demos)
+//! // WASM entry point (in the Helio-Examples/helio-web-demos crate)
 //! #[cfg(target_arch = "wasm32")]
 //! #[wasm_bindgen::prelude::wasm_bindgen(start)]
 //! pub fn run() { launch::<MyDemo>(); }
