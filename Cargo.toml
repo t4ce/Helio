@@ -64,6 +64,7 @@ members = [
     "crates/passes/3d/*",
     "../Helio-Examples",
     "../Helio-Examples/helio-web-demos",
+    "../Helio-Examples/web-tools",
 ]
 exclude = [
     "vendor/nebula",

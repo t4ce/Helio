@@ -32,7 +32,7 @@ The fastest way to see something is to run one of the demos:
 ```sh
 cargo run -p examples --bin indoor_cathedral --release
 cargo run -p examples --bin outdoor_city --release
-cargo run -p examples --bin web    # build every demo to WASM and serve it locally
+cargo run -p helio-web-tools --bin web # build every demo to WASM and serve it locally
 ```
 
 To wire the renderer up to your own window, the shape of it is always the same. You ask Helio which GPU features and limits it needs for the adapter you have, create a config and a scene, build a graph, and hand all of it to `Renderer::new`. From then on you call `render` once per frame with a camera and a surface view.
@@ -107,7 +107,7 @@ fn main() { launch::<Demo>(); }
 
 Everything else on the trait has a default, so you only override what you care about. You can set the window title, choose an internal render scale (it defaults to three-quarters resolution and upscales, which you would set back to `1.0` for a pipeline that has no temporal upscale step), adjust the mouse-look capture behaviour, react to resizes, and, most powerfully, return a completely custom render graph from `build_graph`. That last one is how the voxel and VHS demos plug their own pipelines in while still running on both targets; returning `None` just uses the standard deferred graph. The `InputState` you get each frame carries the held keys, the mouse delta, whether the cursor is grabbed, a one-frame left-click edge, the cursor position, the viewport size, and an `aspect_ratio()` helper.
 
-Building the web version is its own small tool in `Helio-Examples` rather than a shell script. Open the Examples Hub with `cargo run -p examples` and use **Build & serve all web demos**, or run `cargo run -p examples --bin web` directly. The `--headless` variant builds without the UI, writes the finished site out, and exits with a failure code if any demo did not build. Under the hood it invokes `wasm-pack` per demo and writes each landing page plus a master index. The one prerequisite is a wasm-capable `clang` for the C dependencies, which means installing LLVM (`brew install llvm` on macOS, or your distribution's `clang` package on Linux).
+Building the web version is its own lightweight tool in `Helio-Examples` rather than a shell script. Open the terminal Examples Hub with `cargo run -p helio-web-tools` and select **Web: build and serve all demos**, or run `cargo run -p helio-web-tools --bin web` directly. The `--headless` variant builds without the UI, writes the finished site out, and exits with a failure code if any demo did not build. Under the hood it invokes `wasm-pack` per demo and writes each landing page plus a master index. Prerequisites are `wasm-pack`, the `wasm32-unknown-unknown` Rust target, and a wasm-capable `clang` for the C dependencies.
 
 ## Building pipelines with the render graph
 
@@ -294,7 +294,7 @@ The full pipeline is assembled out of the pass crates, and it is worth knowing r
 
 ## Examples and demos
 
-The sibling `Helio-Examples` repository has the native binaries, and the very same demos run in the browser through `helio-web-demos`. There is an indoor cathedral lit by Radiance Cascades global illumination and shafts of stained-glass light, a dense night city, a desert canyon where Q and E rotate the sun, an orbital space station, a six-degree-of-freedom ship flying through an asteroid field, the VHS backrooms with its injected post-process shader, editable voxel terrain rendered through a custom mesh-plus-FXAA graph, the debug shapes gallery, an interactive editor that picks and moves objects, a drop-in FBX/glTF/OBJ/USD viewer, a benchmark pushing a hundred and twenty-eight animated point lights, and a bare-bones fly-camera scene to start from. Run any of them natively with `cargo run -p examples --bin <name> --release`, or run `cargo run -p examples --bin web` to build them all for the browser at once.
+The sibling `Helio-Examples` repository has the native binaries, and the very same demos run in the browser through `helio-web-demos`. There is an indoor cathedral lit by Radiance Cascades global illumination and shafts of stained-glass light, a dense night city, a desert canyon where Q and E rotate the sun, an orbital space station, a six-degree-of-freedom ship flying through an asteroid field, the VHS backrooms with its injected post-process shader, editable voxel terrain rendered through a custom mesh-plus-FXAA graph, the debug shapes gallery, an interactive editor that picks and moves objects, a drop-in FBX/glTF/OBJ/USD viewer, a benchmark pushing a hundred and twenty-eight animated point lights, and a bare-bones fly-camera scene to start from. Run any of them natively with `cargo run -p examples --bin <name> --release`, or run `cargo run -p helio-web-tools --bin web` to build them all for the browser at once.
 
 ## Assets
 
