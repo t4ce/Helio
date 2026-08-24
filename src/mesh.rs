@@ -581,6 +581,7 @@ impl MeshPool {
         self.dynamic_sub.flush(queue);
     }
 
+    #[cfg(any(feature = "bake", test))]
     pub(crate) fn extract_mesh_data(&self, id: MeshId) -> Option<MeshUpload> {
         let record = self.meshes.get(id)?;
         let slice = &record.slice;

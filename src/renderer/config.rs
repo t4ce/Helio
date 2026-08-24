@@ -1,4 +1,5 @@
 use crate::material::MAX_TEXTURES;
+#[cfg(not(target_arch = "wasm32"))]
 use libhelio::BINDLESS_MATERIAL_FEATURES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,10 +36,12 @@ pub enum PerfOverlayMode {
 /// Falls back to the first available format if no preferred format is found.
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
-    let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
+    let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
         wgpu::Features::VERTEX_WRITABLE_STORAGE;
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut optional = optional;
     #[cfg(not(target_arch = "wasm32"))]
     if adapter_features.contains(BINDLESS_MATERIAL_FEATURES) {
         optional |= BINDLESS_MATERIAL_FEATURES;

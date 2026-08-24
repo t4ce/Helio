@@ -34,10 +34,9 @@ impl RadiantTemplate {
         // extension — it has binding_array support in core WGSL.  Strip it for
         // wasm builds, keep it for native wgpu.
         #[cfg(target_arch = "wasm32")]
-        {
-            src = src.replace("enable wgpu_binding_array;\n", "");
-            src = src.replace("enable wgpu_binding_array;\r\n", "");
-        }
+        let src = src
+            .replace("enable wgpu_binding_array;\n", "")
+            .replace("enable wgpu_binding_array;\r\n", "");
 
         if graph_wgsl.is_empty() {
             // No graph: remove the override markers, leaving the default code

@@ -54,6 +54,8 @@ impl MaterialBindingConfig {
     /// Keeping this decision pure lets device creation, scene capacity, and pass
     /// construction share one auditable capability contract.
     pub fn from_capabilities(features: wgpu::Features, limits: wgpu::Limits) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let _ = features;
         #[cfg(not(target_arch = "wasm32"))]
         let mode = if features.contains(BINDLESS_MATERIAL_FEATURES) {
             MaterialBindingMode::BindingArray

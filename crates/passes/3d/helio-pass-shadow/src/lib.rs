@@ -768,9 +768,9 @@ impl RenderPass for ShadowPass {
                         pass.set_bind_group(0, movable_bg, &[dyn_offset]);
                         pass.set_vertex_buffer(0, vertices.slice(..));
                         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                        let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                         #[cfg(not(target_arch = "wasm32"))]
                         if dynamic_work.use_compacted_draws {
+                            let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
                             pass.multi_draw_indexed_indirect_count(
                                 &self.face_cull_indirect,
                                 face_offset,

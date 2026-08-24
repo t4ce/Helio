@@ -142,9 +142,6 @@ impl Renderer {
         } else {
             (None, None, None)
         };
-        #[cfg(target_arch = "wasm32")]
-        let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
-
         let postprocess_buf_size = std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64;
         let postprocess_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Uniforms Buffer"),
