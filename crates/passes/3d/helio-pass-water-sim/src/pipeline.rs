@@ -917,7 +917,7 @@ impl WaterSimPass {
             sim_tex_a,
             sim_tex_b,
             sim_array_view_a,
-            sim_array_view_b,
+            _sim_array_view_b: sim_array_view_b,
             sim_layer_views_a,
             sim_layer_views_b,
             front_per_layer: vec![true; n_updates],

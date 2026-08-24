@@ -7,7 +7,6 @@ use helio_core::{
     WaterSimulationTarget,
 };
 use wgpu::util::DeviceExt;
-use std::f32::consts::PI;
 
 /// Simple fullscreen blit: copies a texture to the render target as-is.
 const BLIT_WGSL: &str = "
@@ -30,28 +29,6 @@ const MAX_DROPS_BUFFERED: usize = 16;
 pub(crate) const CASCADE_COUNT: usize = 3;
 pub(crate) const MAX_SIM_VOLUMES: u32 = helio_core::WATER_SIM_SLOT_COUNT as u32;
 pub(crate) const CASCADE_PATCH_SIZES: [f32; 3] = [30.0, 90.0, 270.0];
-
-// ---- Clipmap ring structure --------------------------------------------------------
-
-const CLIPMAP_GRID_SNAP: f32 = 0.25;
-const MAX_CLIPMAP_VERTS: u64 = 2048;
-const MAX_CLIPMAP_INDICES: u64 = 12288;
-
-struct ClipmapRingDef {
-    inner_radius: f32,
-    outer_radius: f32,
-    inner_divs: u32,
-    outer_divs: u32,
-    level_divs: u32,
-}
-
-const CLIPMAP_RINGS: [ClipmapRingDef; 5] = [
-    ClipmapRingDef { inner_radius: 0.0,  outer_radius: 3.0,   inner_divs: 1,  outer_divs: 12, level_divs: 4 },
-    ClipmapRingDef { inner_radius: 3.0,  outer_radius: 10.0,  inner_divs: 12, outer_divs: 16, level_divs: 4 },
-    ClipmapRingDef { inner_radius: 10.0, outer_radius: 30.0,  inner_divs: 16, outer_divs: 24, level_divs: 3 },
-    ClipmapRingDef { inner_radius: 30.0, outer_radius: 90.0,  inner_divs: 24, outer_divs: 32, level_divs: 3 },
-    ClipmapRingDef { inner_radius: 90.0, outer_radius: 250.0, inner_divs: 32, outer_divs: 48, level_divs: 2 },
-];
 
 // ---- Mesh helpers ----------------------------------------------------------------
 
@@ -203,101 +180,6 @@ fn make_top_grid(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
     (vbuf, ibuf, indices.len() as u32)
 }
 
-/// Build one concentric ring of the clipmap, connecting adjacent levels with
-/// triangles.  Level 0 uses `inner_divs` (to match the previous ring's outer
-/// edge); all remaining levels use `outer_divs`.
-fn generate_ring(
-    verts: &mut Vec<[f32; 4]>,
-    indices: &mut Vec<u32>,
-    ring: &ClipmapRingDef,
-    cx: f32,
-    cz: f32,
-) {
-    let n_levels = ring.level_divs + 1;
-    let mut level_starts: Vec<u32> = Vec::with_capacity(n_levels as usize);
-    let mut level_div_counts: Vec<u32> = Vec::with_capacity(n_levels as usize);
-
-    for level in 0..n_levels {
-        level_starts.push(verts.len() as u32);
-        let t = level as f32 / ring.level_divs as f32;
-        let radius = ring.inner_radius + (ring.outer_radius - ring.inner_radius) * t;
-
-        let divs = if level == 0 {
-            if ring.inner_divs == 1 {
-                verts.push([cx, cz, 0.0, 0.0]);
-                level_div_counts.push(1);
-                continue;
-            }
-            ring.inner_divs
-        } else {
-            ring.outer_divs
-        };
-
-        for s in 0..divs {
-            let angle = s as f32 / divs as f32 * 2.0 * PI;
-            let x = cx + radius * angle.cos();
-            let z = cz + radius * angle.sin();
-            verts.push([x, z, 0.0, 0.0]);
-        }
-        level_div_counts.push(divs);
-    }
-
-    for level in 0..ring.level_divs {
-        let next = level + 1;
-        let start_a = level_starts[level as usize];
-        let start_b = level_starts[next as usize];
-        let divs_a = level_div_counts[level as usize];
-        let divs_b = level_div_counts[next as usize];
-
-        if divs_a == 1 {
-            // Center point → first circle: triangle fan
-            for s in 0..divs_b {
-                let s_next = (s + 1) % divs_b;
-                indices.extend_from_slice(&[start_a, start_b + s, start_b + s_next]);
-            }
-        } else if divs_a == divs_b {
-            // Same vertex count on both levels: regular quads
-            for s in 0..divs_a {
-                let s_next = (s + 1) % divs_a;
-                let tl = start_a + s;
-                let tr = start_a + s_next;
-                let bl = start_b + s;
-                let br = start_b + s_next;
-                indices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
-            }
-        } else {
-            // Different vertex counts: generalised triangulation that walks
-            // both circles simultaneously, advancing whichever is "behind" in
-            // angular space.
-            let mut i = 0u32;
-            let mut j = 0u32;
-            while i < divs_a || j < divs_b {
-                if i >= divs_a {
-                    j += 1;
-                } else if j >= divs_b {
-                    i += 1;
-                } else {
-                    let next_ang_i = (i + 1) as f64 / divs_a as f64;
-                    let next_ang_j = (j + 1) as f64 / divs_b as f64;
-
-                    if next_ang_i <= next_ang_j + 1e-10 {
-                        indices.push(start_a + i % divs_a);
-                        indices.push(start_a + (i + 1) % divs_a);
-                        indices.push(start_b + j % divs_b);
-                        i += 1;
-                    }
-                    if next_ang_j <= next_ang_i + 1e-10 {
-                        indices.push(start_a + i % divs_a);
-                        indices.push(start_b + (j + 1) % divs_b);
-                        indices.push(start_b + j % divs_b);
-                        j += 1;
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn vec4_vbl() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
         array_stride: 16,
@@ -434,7 +316,7 @@ pub struct WaterSimPass {
     pub(crate) sim_tex_a: wgpu::Texture,
     pub(crate) sim_tex_b: wgpu::Texture,
     pub(crate) sim_array_view_a: wgpu::TextureView,
-    pub(crate) sim_array_view_b: wgpu::TextureView,
+    pub(crate) _sim_array_view_b: wgpu::TextureView,
     pub(crate) sim_layer_views_a: Vec<wgpu::TextureView>,
     pub(crate) sim_layer_views_b: Vec<wgpu::TextureView>,
     pub(crate) front_per_layer: Vec<bool>,

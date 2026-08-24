@@ -276,8 +276,8 @@ fn transform_sweep_tracks_projected_position_across_frames() {
     assert_ne!(move_color, decoy_color, "guard: mesh_index 0/1 colors must differ");
 
     let mut observed_columns = Vec::new();
-    /// `(was_rotated, painted_pixel_count)` per frame — feeds the
-    /// rotation-reached-the-shader assertion after the loop.
+    // `(was_rotated, painted_pixel_count)` per frame — feeds the
+    // rotation-reached-the-shader assertion after the loop.
     let mut mover_footprints: Vec<(bool, usize)> = Vec::new();
 
     for (step_i, step) in steps.iter().enumerate() {

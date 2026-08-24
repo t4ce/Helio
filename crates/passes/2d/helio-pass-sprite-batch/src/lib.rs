@@ -837,8 +837,14 @@ impl RenderPass for SpriteBatchPass {
             .unwrap_or([ctx.width as f32 * 0.5, ctx.height as f32 * 0.5]);
         let [cx, cy] = self.camera_center;
         let [hx, hy] = half_extent;
-        let view_proj =
-            glam::Mat4::orthographic_rh(cx - hx, cx + hx, cy - hy, cy + hy, -1.0, 1.0);
+        let view_proj = glam::camera::rh::proj::directx::orthographic(
+            cx - hx,
+            cx + hx,
+            cy - hy,
+            cy + hy,
+            -1.0,
+            1.0,
+        );
         let runtime_capacity = self
             .buffer_source
             .snapshot()

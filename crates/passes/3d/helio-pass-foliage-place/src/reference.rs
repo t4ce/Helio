@@ -160,41 +160,6 @@ fn select_type(
 /// rotations are what decorrelate position from yaw from tint, and using the same
 /// rotation twice would visibly couple two properties (all tall blades facing the same
 /// way, for instance).
-pub fn reference_candidate(
-    uniforms: &PlaceUniforms,
-    types: &[GpuFoliageType],
-    layers: &[GpuFoliageLayer],
-    tile_coord: [i32; 2],
-    generation: u32,
-    index: u32,
-) -> ReferenceCandidate {
-    let mut projections = Vec::with_capacity(layers.len());
-    let mut relations = Vec::with_capacity(layers.len().saturating_mul(types.len()));
-    for (row, _) in layers.iter().enumerate() {
-        let relation_offset = relations.len() as u32;
-        relations.extend((0..types.len()).map(|compact| GpuFoliageLayerTypeRelation {
-            compact_type_id: compact as u32,
-            canonical_type_row: compact as u32,
-        }));
-        projections.push(GpuFoliageLayerProjection {
-            canonical_layer_row: row as u32,
-            relation_offset,
-            relation_count: types.len() as u32,
-            seed: 0,
-        });
-    }
-    reference_candidate_with_relations(
-        uniforms,
-        types,
-        layers,
-        &projections,
-        &relations,
-        tile_coord,
-        generation,
-        index,
-    )
-}
-
 pub fn reference_candidate_with_relations(
     uniforms: &PlaceUniforms,
     types: &[GpuFoliageType],

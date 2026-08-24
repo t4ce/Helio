@@ -16,10 +16,9 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 
 mod clip_stack;
 mod globals;
-use clip_stack::{ClipStack, HLFS_LEVELS, HLFS_RES, HLFS_NEAR_FIELD, HLFS_CASCADE_SCALE};
+use clip_stack::{ClipStack, HLFS_CASCADE_SCALE, HLFS_NEAR_FIELD, HLFS_RES};
 use globals::HlfsGlobals;
 
-const CLIP_STACK_LEVELS: usize = HLFS_LEVELS as usize;
 const VOXEL_RESOLUTION: u32 = HLFS_RES; // 128^3 per level
 const SAMPLES_PER_PIXEL: u32 = 8; // K samples for importance sampling
 
@@ -81,7 +80,7 @@ pub struct HlfsPass {
     /// Raw-pointer key for lazy rebuild of shade BG1.
     bind_group_shade1_key: Option<(usize, usize, usize, usize, usize, usize)>,
 
-    fallback_lightmap_uv_tex: wgpu::Texture,
+    _fallback_lightmap_uv_tex: wgpu::Texture,
     fallback_lightmap_uv_view: wgpu::TextureView,
 
     width: u32,
@@ -1005,7 +1004,7 @@ impl HlfsPass {
             bind_group_shade0_key: [None, None],
             bind_group_shade1: None,
             bind_group_shade1_key: None,
-            fallback_lightmap_uv_tex,
+            _fallback_lightmap_uv_tex: fallback_lightmap_uv_tex,
             fallback_lightmap_uv_view,
             width,
             height,

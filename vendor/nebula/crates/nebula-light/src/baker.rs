@@ -111,7 +111,7 @@ fn upload_scene_geometry(
     let mut indices:  Vec<u32>         = Vec::new();
     let mut mesh_info: Vec<GpuMeshInfo> = Vec::new();
 
-    for (mesh_idx, mesh) in scene.meshes.iter().enumerate() {
+    for mesh in &scene.meshes {
         let vert_base = vertices.len() as u32;
         let idx_base  = indices.len()  as u32;
 
@@ -197,7 +197,7 @@ fn upload_lights(
                 color_intensity: [l.color[0], l.color[1], l.color[2], l.intensity],
                 kind: 2, inner_angle: inner_angle.cos(), _pad: [0; 2],
             },
-            LightSourceKind::Area { center, right, up, half_w, half_h } => GpuLight {
+            LightSourceKind::Area { center, right, up: _, half_w, half_h } => GpuLight {
                 pos_range:       [center[0], center[1], center[2], half_w * half_h],
                 dir_outer:       [right[0], right[1], right[2], 0.0],
                 color_intensity: [l.color[0], l.color[1], l.color[2], l.intensity],
@@ -352,7 +352,7 @@ fn dispatch_lightmap_passes(
     Ok(())
 }
 
-fn build_atlas_regions(scene: &SceneGeometry, resolution: u32) -> Vec<AtlasRegion> {
+fn build_atlas_regions(scene: &SceneGeometry, _resolution: u32) -> Vec<AtlasRegion> {
     // Simple equal-area tiling: N meshes → ceil(sqrt(N)) × ceil(sqrt(N)) grid.
     let n = scene.meshes.len();
     if n == 0 { return Vec::new(); }

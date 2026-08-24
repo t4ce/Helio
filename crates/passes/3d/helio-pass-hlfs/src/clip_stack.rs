@@ -1,6 +1,5 @@
 use wgpu;
 
-pub const HLFS_LEVELS: u32 = 4;
 pub const HLFS_RES: u32 = 128;
 pub const HLFS_NEAR_FIELD: f32 = 50.0;
 pub const HLFS_CASCADE_SCALE: f32 = 2.0;
@@ -8,11 +7,11 @@ pub const HLFS_CASCADE_SCALE: f32 = 2.0;
 /// Per-level clip-stack state
 pub struct ClipStackLevel {
     /// 3D texture for this level (RGBA16F, 128³)
-    pub texture: wgpu::Texture,
-    pub texture_view: wgpu::TextureView,
+    pub _texture: wgpu::Texture,
+    pub _texture_view: wgpu::TextureView,
     /// Toroidal origin in voxel-space
     pub origin: [i32; 3],
-    pub half_extent: f32,
+    pub _half_extent: f32,
     pub voxel_size: f32,
 }
 
@@ -65,10 +64,10 @@ impl ClipStack {
             let (texture, texture_view) = per_level(label);
             write.push(texture_view.clone());
             levels[i] = std::mem::MaybeUninit::new(ClipStackLevel {
-                texture,
-                texture_view,
+                _texture: texture,
+                _texture_view: texture_view,
                 origin: [0; 3],
-                half_extent,
+                _half_extent: half_extent,
                 voxel_size,
             });
         }

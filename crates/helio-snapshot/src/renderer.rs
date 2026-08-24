@@ -294,7 +294,9 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     // Flush all submitted GPU work before we copy the texture to the staging buffer.
     // Because we used new_with_external_device the graph never blocks internally —
     // this single poll is the only synchronisation point we need.
-    device.poll(wgpu::PollType::wait_indefinitely());
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| SnapshotError::Render(format!("GPU poll failed: {e}")))?;
 
     // ── 12. Read pixels back to CPU ───────────────────────────────────────────
     readback_rgba(&device, &queue, &target_texture, cfg.width, cfg.height).await
@@ -389,7 +391,9 @@ async fn readback_rgba(
     let slice = staging.slice(..);
     let (tx, rx) = futures_channel::oneshot::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-    device.poll(wgpu::PollType::wait_indefinitely());
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| SnapshotError::Render(format!("GPU poll failed: {e}")))?;
     rx.await.unwrap()?;
 
     // Strip the 256-byte row padding before building the image.
@@ -641,7 +645,9 @@ impl SnapshotBatch {
             .render(&camera, &self.target_view)
             .map_err(|e| SnapshotError::Render(e.to_string()))?;
 
-        self.device.poll(wgpu::PollType::wait_indefinitely());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| SnapshotError::Render(format!("GPU poll failed: {e}")))?;
 
         // ── Readback ──────────────────────────────────────────────────────────
         let img = readback_rgba(

@@ -134,7 +134,7 @@ fn trace_cubemap(
     ibuf:      &wgpu::Buffer,
     mbuf:      &wgpu::Buffer,
     res:       u32,
-    mip_levels: u32,
+    _mip_levels: u32,
 ) -> Result<Vec<u8>, NebulaError> {
     use wgpu::util::DeviceExt;
     use bytemuck::{Pod, Zeroable};
@@ -147,7 +147,6 @@ fn trace_cubemap(
     }
 
     // Allocate output storage: all 6 faces × mip chain (mip 0 = full res)
-    let bytes_per_pixel = if config.use_rgbe { 4usize } else { 16usize }; // RGBE u8×4 vs RGBA f32×4
     let mut all_face_data: Vec<u8> = Vec::new();
 
     let shader = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {

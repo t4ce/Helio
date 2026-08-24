@@ -16,7 +16,7 @@ pub struct PerfOverlayShared {
     pub(crate) num_tiles_x: u32,
     pub(crate) num_tiles_y: u32,
 
-    pub(crate) color_snapshot_prev: wgpu::Texture,
+    pub(crate) _color_snapshot_prev: wgpu::Texture,
     pub(crate) color_snapshot_prev_view: wgpu::TextureView,
     pub(crate) pass_overdraw_buf: wgpu::Buffer,
     pub(crate) shader_cost_buf: wgpu::Buffer,
@@ -314,7 +314,7 @@ impl PerfOverlayShared {
             display_height: height,
             num_tiles_x,
             num_tiles_y,
-            color_snapshot_prev,
+            _color_snapshot_prev: color_snapshot_prev,
             color_snapshot_prev_view,
             pass_overdraw_buf,
             shader_cost_buf,
@@ -368,12 +368,6 @@ impl PerfOverlayShared {
             .unwrap_or(false)
     }
 
-    pub fn get_material_timings(&self) -> &[MaterialTimingEntry] {
-        self.material_profiler
-            .as_ref()
-            .map(|p| p.get_timing_table())
-            .unwrap_or(&[])
-    }
 }
 
 // ── PerfOverlayPass ─────────────────────────────────────────────────────────────
@@ -860,7 +854,7 @@ pub struct MaterialProfiler {
     pub(crate) profile_bgl: wgpu::BindGroupLayout,
     pub(crate) profile_params_bufs: Vec<wgpu::Buffer>,
     synthetic_lights: wgpu::Buffer,
-    pub(crate) test_texture: wgpu::Texture,
+    pub(crate) _test_texture: wgpu::Texture,
     pub(crate) test_texture_view: wgpu::TextureView,
     pub(crate) query_set: wgpu::QuerySet,
     pub(crate) query_buffer: wgpu::Buffer,
@@ -1035,7 +1029,7 @@ impl MaterialProfiler {
             profile_bgl,
             profile_params_bufs,
             synthetic_lights: synthetic_lights_buf,
-            test_texture,
+            _test_texture: test_texture,
             test_texture_view,
             query_set,
             query_buffer,
@@ -1191,7 +1185,4 @@ impl MaterialProfiler {
         }
     }
 
-    pub fn get_timing_table(&self) -> &[MaterialTimingEntry] {
-        &self.timing_table
-    }
 }
