@@ -49,7 +49,7 @@ pub struct LensFlarePass {
 
     width: u32,
     height: u32,
-    format: wgpu::TextureFormat,
+    _format: wgpu::TextureFormat,
 
     active_flare_count: u32,
 }
@@ -213,7 +213,7 @@ impl LensFlarePass {
             bg_key: None,
             width,
             height,
-            format: surface_format,
+            _format: surface_format,
             active_flare_count: 0,
         }
     }

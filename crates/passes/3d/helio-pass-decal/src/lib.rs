@@ -24,7 +24,7 @@ pub struct DecalPass {
     temp_normal: Option<(wgpu::Texture, wgpu::TextureView)>,
     temp_orm: Option<(wgpu::Texture, wgpu::TextureView)>,
     temp_emissive: Option<(wgpu::Texture, wgpu::TextureView)>,
-    device: Arc<wgpu::Device>,
+    _device: Arc<wgpu::Device>,
     last_w: u32, last_h: u32,
 }
 
@@ -108,7 +108,7 @@ impl DecalPass {
             bg_collect: None, bg_apply: None, bg_textures: None,
             bg_collect_key: None, bg_apply_key: None, bg_textures_version: None,
             globals_buf, temp_albedo: None, temp_normal: None, temp_orm: None, temp_emissive: None,
-            device: Arc::new(device.clone()),
+            _device: Arc::new(device.clone()),
             last_w: 0, last_h: 0,
         }
     }

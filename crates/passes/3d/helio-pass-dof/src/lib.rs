@@ -46,7 +46,7 @@ pub struct DofPass {
     far_blur_view: wgpu::TextureView,
 
     // Bokeh shape texture
-    bokeh_tex: wgpu::Texture,
+    _bokeh_tex: wgpu::Texture,
     bokeh_view: wgpu::TextureView,
 
     // Samplers
@@ -58,8 +58,8 @@ pub struct DofPass {
     composite_bgl: wgpu::BindGroupLayout,
 
     // Pipeline layouts
-    gather_pl: wgpu::PipelineLayout,
-    composite_pl: wgpu::PipelineLayout,
+    _gather_pl: wgpu::PipelineLayout,
+    _composite_pl: wgpu::PipelineLayout,
 
     // Bind groups (rebuilt when resources change)
     coc_bg: Option<wgpu::BindGroup>,
@@ -77,7 +77,7 @@ pub struct DofPass {
 
     width: u32,
     height: u32,
-    format: wgpu::TextureFormat,
+    _format: wgpu::TextureFormat,
 }
 
 impl DofPass {
@@ -175,8 +175,8 @@ impl DofPass {
         });
 
         // ── Bind group layouts ──────────────────────────────────────────
-        /// Uniform buffer binding for the DOF block of GpuPostProcessUniforms.
-        /// The buffer is bound with offset DOF_BLOCK_OFFSET and size DOF_BLOCK_SIZE.
+        // Uniform buffer binding for the DOF block of GpuPostProcessUniforms.
+        // The buffer is bound with offset DOF_BLOCK_OFFSET and size DOF_BLOCK_SIZE.
         let uniform_entry = |binding: u32, min_size: Option<wgpu::BufferSize>| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
@@ -430,14 +430,14 @@ impl DofPass {
             near_blur_view,
             far_blur_tex,
             far_blur_view,
-            bokeh_tex,
+            _bokeh_tex: bokeh_tex,
             bokeh_view,
             linear_sampler,
             coc_bgl,
             gather_bgl,
             composite_bgl,
-            gather_pl,
-            composite_pl,
+            _gather_pl: gather_pl,
+            _composite_pl: composite_pl,
             coc_bg: None,
             gather_bg: None,
             composite_bg: None,
@@ -447,7 +447,7 @@ impl DofPass {
             dof_block_buf,
             width,
             height,
-            format,
+            _format: format,
         }
     }
 

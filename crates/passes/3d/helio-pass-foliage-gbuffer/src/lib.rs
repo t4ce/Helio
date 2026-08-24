@@ -495,7 +495,7 @@ pub struct FoliageGBufferPass {
     region_stride: u32,
     /// `FoliagePlacePass::blades_per_tile` — the fixed arena slab size that makes
     /// [`tile_slot_of_blade`] an exact division.
-    blades_per_tile: u32,
+    _blades_per_tile: u32,
 
     decision: FoliageFrameDecision,
     uploaded_generation: Option<u64>,
@@ -806,7 +806,7 @@ impl FoliageGBufferPass {
             // Clamped once here rather than defended at every use: a zero slab size is a
             // wiring mistake, and one blade per tile is a bounded, visible failure —
             // whereas a division by zero in the vertex stage is implementation-defined.
-            blades_per_tile: blades_per_tile.max(1),
+            _blades_per_tile: blades_per_tile.max(1),
             decision: decide_frame(None, None),
             uploaded_generation: None,
             quality: FoliageQuality::default(),

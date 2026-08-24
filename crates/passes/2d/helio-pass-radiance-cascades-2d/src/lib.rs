@@ -227,7 +227,7 @@ pub struct RadianceCascades2DPass {
     scene_w: u32,
     scene_h: u32,
     cascade_count: u32,
-    jfa_passes: u32,
+    _jfa_passes: u32,
 
     occupancy_dims: (u32, u32),
     occupancy_cell_size: f32,
@@ -557,7 +557,7 @@ impl RadianceCascades2DPass {
             scene_w,
             scene_h,
             cascade_count,
-            jfa_passes,
+            _jfa_passes: jfa_passes,
             occupancy_dims,
             occupancy_cell_size,
             occupancy_origin,

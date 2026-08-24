@@ -43,16 +43,16 @@ pub struct SsaoPass {
     bgl_0: wgpu::BindGroupLayout,
     #[allow(dead_code)]
     bgl_1: wgpu::BindGroupLayout,
-    bgl_2: wgpu::BindGroupLayout,
+    _bgl_2: wgpu::BindGroupLayout,
     bind_group_0: wgpu::BindGroup,
     bind_group_1: wgpu::BindGroup,
     bind_group_2: wgpu::BindGroup,
     ssao_camera_buf: wgpu::Buffer,
-    globals_buf: wgpu::Buffer,
+    _globals_buf: wgpu::Buffer,
     ssao_uniform_buf: wgpu::Buffer,
-    sample_kernel_buf: wgpu::Buffer,
-    noise_texture: wgpu::Texture,
-    noise_sampler: wgpu::Sampler,
+    _sample_kernel_buf: wgpu::Buffer,
+    _noise_texture: wgpu::Texture,
+    _noise_sampler: wgpu::Sampler,
     /// When set, replaces the runtime SSAO computation with a pre-baked AO texture.
     /// The pass skips GPU execution and publishes this view into `frame.ssao` instead.
     baked_ao_override: Option<std::sync::Arc<wgpu::TextureView>>,
@@ -359,16 +359,16 @@ impl SsaoPass {
             pipeline,
             bgl_0,
             bgl_1,
-            bgl_2,
+            _bgl_2: bgl_2,
             bind_group_0,
             bind_group_1,
             bind_group_2,
             ssao_camera_buf,
-            globals_buf,
+            _globals_buf: globals_buf,
             ssao_uniform_buf,
-            sample_kernel_buf,
-            noise_texture,
-            noise_sampler,
+            _sample_kernel_buf: sample_kernel_buf,
+            _noise_texture: noise_texture,
+            _noise_sampler: noise_sampler,
             baked_ao_override: None,
         }
     }
@@ -597,5 +597,4 @@ mod test_utils {
         assert_eq!(a, b, "generate_kernel() must be deterministic");
     }
 }
-
 
